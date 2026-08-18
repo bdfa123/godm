@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; --line:#e2e5ea; --muted:#6b7480; --accent:#2f6df6; --track:#e8ebf0; --ok:#1f9d55; --err:#d64545; }
+  @media (prefers-color-scheme: dark) {
+    :root { --line:#2a3038; --muted:#8a929c; --accent:#5b8cff; --track:#262c34; --ok:#37b26b; --err:#ef6a6a; }
+  }
+  body { width: 340px; margin: 0; padding: 12px; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+  h1 { font-size:13px; margin:0; flex:1; letter-spacing:.4px; }
+  .link { color: var(--accent); cursor:pointer; text-decoration:none; font-size:12px; }
+  .task { padding:7px 0; border-top:1px solid var(--line); }
+  .row { display:flex; gap:8px; align-items:baseline; }
+  .name { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; }
+  .meta { color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .track { height:4px; background:var(--track); border-radius:2px; margin-top:5px; overflow:hidden; }
+  .fill { height:100%; background:var(--accent); border-radius:2px; }
+  .fill.done { background:var(--ok); }
+  .fill.error { background:var(--err); }
+  .msg { color:var(--muted); padding:14px 0; text-align:center; }
+  .msg.bad { color:var(--err); text-align:left; }
+  label { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>godm</h1>
+  <label><input type="checkbox" id="enabled"> takeover</label>
+  <a class="link" id="open">manager</a>
+  <a class="link" id="opts">settings</a>
+</header>
+<div id="body"><div class="msg">Loading…</div></div>
+<script src="popup.js"></script>
+</body>
+</html>

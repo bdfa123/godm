@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "godm takeover",
+  "version": "0.1.0",
+  "description": "Hands browser downloads to the godm download manager for segmented, resumable transfers.",
+  "permissions": [
+    "downloads",
+    "cookies",
+    "nativeMessaging",
+    "storage",
+    "notifications",
+    "contextMenus"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "godm",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>godm settings</title>
+<style>
+  :root { color-scheme: light dark; --line:#e2e5ea; --muted:#6b7480; --accent:#2f6df6; --ok:#1f9d55; --err:#d64545; }
+  @media (prefers-color-scheme: dark) {
+    :root { --line:#2a3038; --muted:#8a929c; --accent:#5b8cff; --ok:#37b26b; --err:#ef6a6a; }
+  }
+  body { font: 14px/1.6 "Segoe UI", system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 20px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin-bottom: 28px; font-size: 13px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; margin-bottom: 18px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
+  label { display: block; margin-bottom: 14px; }
+  label span.t { display: block; font-weight: 600; margin-bottom: 3px; }
+  label span.h { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+  input[type=text], textarea, input[type=number] {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
+    font: inherit; font-size: 13px; background: transparent; color: inherit;
+  }
+  textarea { min-height: 74px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .inline { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .inline input { width: auto; }
+  button { padding: 8px 18px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
+  #status { margin-left: 12px; color: var(--ok); font-size: 13px; }
+  code { background: rgba(127,127,127,.16); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .setup { border-left: 3px solid var(--accent); padding-left: 14px; margin-bottom: 22px; }
+  #probe { font-size: 13px; }
+  #probe.bad { color: var(--err); }
+  #probe.good { color: var(--ok); }
+</style>
+</head>
+<body>
+<h1>godm takeover</h1>
+<div class="sub">Downloads matching your rules are cancelled in the browser and handed to the godm daemon.</div>
+
+<div class="setup">
+  <div>Extension ID: <code id="extid"></code></div>
+  <div>Register the native host once, then restart the browser:</div>
+  <div><code id="cmd"></code></div>
+  <div style="margin-top:6px">Connection: <span id="probe">checking…</span></div>
+</div>
+
+<fieldset>
+  <legend>Interception</legend>
+  <label class="inline"><input type="checkbox" id="enabled"> Take over browser downloads</label>
+  <label class="inline"><input type="checkbox" id="takeAll"> Take over everything, ignoring the file type list</label>
+  <label>
+    <span class="t">File types</span>
+    <span class="h">Comma separated extensions. Ignored when "take over everything" is on.</span>
+    <textarea id="extensions"></textarea>
+  </label>
+  <label>
+    <span class="t">Never intercept these hosts</span>
+    <span class="h">One per line or comma separated. Subdomains are matched too.</span>
+    <textarea id="blocklist" placeholder="mail.google.com&#10;internal.company.net"></textarea>
+  </label>
+  <label>
+    <span class="t">Minimum size (bytes)</span>
+    <span class="h">Only applied when the browser already knows the size before the download starts.</span>
+    <input type="number" id="minSize" min="0" step="1024">
+  </label>
+</fieldset>
+
+<fieldset>
+  <legend>Transfer</legend>
+  <label>
+    <span class="t">Connections per download</span>
+    <span class="h">Segments are only used when the server answers with 206 Partial Content.</span>
+    <input type="number" id="connections" min="1" max="32">
+  </label>
+</fieldset>
+
+<button id="save">Save</button><span id="status"></span>
+<script src="options.js"></script>
+</body>
+</html>
