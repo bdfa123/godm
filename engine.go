@@ -97,7 +97,12 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 
 	// Preallocate so parallel WriteAt calls never race to extend the file, and
 	// so a full disk fails here instead of at 90 percent.
-	if pr.Size > 0 && !resumed {
+	//
+	// Only do this when the source is genuinely resumable. Without Range
+	// support the probe's Content-Length is just a hint from a *different*
+	// request: dynamic endpoints happily return a different body length each
+	// time, and preallocating to the stale number leaves the file zero-padded.
+	if pr.Size > 0 && pr.Resumable && !resumed {
 		if err := f.Truncate(pr.Size); err != nil {
 			return nil, fmt.Errorf("preallocate %d bytes: %w", pr.Size, err)
 		}
@@ -211,12 +216,20 @@ func (t *task) run(ctx context.Context) error {
 	if t.opts.OnProgress != nil {
 		t.opts.OnProgress(t.received.Load(), t.probe.Size)
 	}
+	got := t.received.Load()
+	if t.probe.Resumable {
+		// Here the length came from Content-Range on the same object, so a
+		// short total means a truncated file, not success.
+		if t.probe.Size > 0 && got != t.probe.Size {
+			return fmt.Errorf("size mismatch: got %d of %d bytes", got, t.probe.Size)
+		}
+	} else if err := t.file.Truncate(got); err != nil {
+		// Single stream: whatever arrived *is* the file. Cut any leftover tail
+		// from an earlier, longer attempt at the same path.
+		return fmt.Errorf("trim to %d bytes: %w", got, err)
+	}
 	if err := t.file.Sync(); err != nil {
 		return err
-	}
-	// A short total with a known length means a truncated file, not success.
-	if t.probe.Size > 0 && t.received.Load() != t.probe.Size {
-		return fmt.Errorf("size mismatch: got %d of %d bytes", t.received.Load(), t.probe.Size)
 	}
 	return nil
 }

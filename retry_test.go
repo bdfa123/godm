@@ -220,3 +220,71 @@ func TestFirstRealErrorIgnoresCancellation(t *testing.T) {
 		t.Errorf("no errors should report nil, got %v", got)
 	}
 }
+
+// dynamicHandler models an endpoint whose body length depends on the request,
+// which is exactly what an echo service or any templated response does.
+type dynamicHandler struct{ hits atomic.Int32 }
+
+func (h *dynamicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	n := h.hits.Add(1)
+	// The probe carries a Range header and so gets a longer echo than the real
+	// fetch that follows. No Range support is advertised.
+	body := strings.Repeat("x", 200+20*int(n))
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(body))
+}
+
+func TestNonResumableBodyIsNotZeroPadded(t *testing.T) {
+	h := &dynamicHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/echo.json", OutDir: dir, Connections: 4, MinSplit: 64,
+	})
+	if err != nil {
+		t.Fatalf("a shifting body length must not fail the download: %v", err)
+	}
+	got, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The file must be exactly what the second request returned, with no tail.
+	if len(got) != 240 {
+		t.Fatalf("file is %d bytes, want 240 (probe said 220)", len(got))
+	}
+	if strings.ContainsRune(string(got), 0) {
+		t.Fatal("file contains zero padding from preallocation")
+	}
+	if int64(len(got)) != res.Size {
+		t.Errorf("reported size %d does not match file size %d", res.Size, len(got))
+	}
+}
+
+func TestSingleStreamTrimsLongerLeftoverFile(t *testing.T) {
+	body := strings.Repeat("y", 500)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	// A stale, larger file already sits at the target path.
+	target := dir + "/leftover.bin"
+	if err := os.WriteFile(target, make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/leftover.bin", OutDir: dir, Filename: "leftover.bin", Connections: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(res.Path)
+	if len(got) != 500 {
+		t.Fatalf("stale tail survived: file is %d bytes, want 500", len(got))
+	}
+}
