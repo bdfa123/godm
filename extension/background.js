@@ -2,6 +2,12 @@
 
 const HOST_NAME = "com.godm.host";
 
+// How long a failed host check keeps takeover switched off, and how long a URL
+// we handed back to the browser stays immune from re-interception.
+const HOST_RECHECK_MS = 60000;
+const HANDBACK_TTL_MS = 120000;
+const NOTIFY_COOLDOWN_MS = 60000;
+
 const DEFAULTS = {
   enabled: true,
   takeAll: false,
@@ -22,30 +28,82 @@ async function getConfig() {
 function callHost(message) {
   return new Promise((resolve) => {
     let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
     try {
       chrome.runtime.sendNativeMessage(HOST_NAME, message, (resp) => {
-        if (settled) return;
-        settled = true;
         if (chrome.runtime.lastError) {
-          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          done({ ok: false, error: chrome.runtime.lastError.message });
         } else if (!resp) {
-          resolve({ ok: false, error: "native host returned nothing" });
+          done({ ok: false, error: "native host returned nothing" });
         } else {
-          resolve(resp);
+          done(resp);
         }
       });
     } catch (e) {
-      resolve({ ok: false, error: String(e) });
+      done({ ok: false, error: String(e) });
     }
     // The host is a thin client to the daemon and answers immediately; if it
     // does not, something is wrong and we want to fail over, not hang.
-    setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        resolve({ ok: false, error: "native host timed out" });
-      }
-    }, 15000);
+    setTimeout(() => done({ ok: false, error: "native host timed out" }), 15000);
   });
+}
+
+// ---------- host health ----------
+//
+// Session storage rather than a module variable: the MV3 service worker is torn
+// down after ~30s idle, and losing this state between a cancel and the retry is
+// exactly what turned one failure into a notification storm.
+
+async function getHostState() {
+  const { hostState } = await chrome.storage.session.get({
+    hostState: { ok: true, at: 0, error: "" }
+  });
+  return hostState;
+}
+
+async function setHostState(ok, error) {
+  const st = { ok: !!ok, at: Date.now(), error: error || "" };
+  await chrome.storage.session.set({ hostState: st });
+  await chrome.storage.local.set({
+    lastPing: { ok: st.ok, error: st.error, at: new Date().toISOString() }
+  });
+  chrome.action.setBadgeBackgroundColor({ color: ok ? "#2f6df6" : "#d64545" });
+  chrome.action.setBadgeText({ text: ok ? "" : "!" });
+  chrome.action.setTitle({
+    title: ok ? "godm" : "godm - native host unreachable, downloads left to the browser"
+  });
+  return st;
+}
+
+// takeoverDisabled reports whether a recent failure means we should keep our
+// hands off. Cancelling a download we cannot actually take over is strictly
+// worse than doing nothing.
+async function takeoverDisabled() {
+  const st = await getHostState();
+  if (st.ok) return false;
+  return Date.now() - st.at < HOST_RECHECK_MS;
+}
+
+// ---------- hand-back bookkeeping ----------
+
+async function markHandedBack(url) {
+  const { handedBack } = await chrome.storage.session.get({ handedBack: {} });
+  const now = Date.now();
+  for (const [k, t] of Object.entries(handedBack)) {
+    if (now - t > HANDBACK_TTL_MS) delete handedBack[k];
+  }
+  handedBack[url] = now;
+  await chrome.storage.session.set({ handedBack });
+}
+
+async function wasHandedBack(url) {
+  const { handedBack } = await chrome.storage.session.get({ handedBack: {} });
+  const t = handedBack[url];
+  return !!t && Date.now() - t < HANDBACK_TTL_MS;
 }
 
 // ---------- takeover decision ----------
@@ -59,7 +117,6 @@ function extensionOf(name) {
 }
 
 function shouldTakeOver(item, cfg) {
-  // Never grab a download we ourselves handed back to the browser.
   if (item.byExtensionId && item.byExtensionId === chrome.runtime.id) return "own fallback";
 
   const url = item.finalUrl || item.url || "";
@@ -106,6 +163,22 @@ async function cookieHeader(url) {
   }
 }
 
+// ---------- notifications ----------
+
+async function notifyThrottled(key, title, message) {
+  const stamps = (await chrome.storage.session.get({ notifyAt: {} })).notifyAt;
+  const now = Date.now();
+  if (stamps[key] && now - stamps[key] < NOTIFY_COOLDOWN_MS) return;
+  stamps[key] = now;
+  await chrome.storage.session.set({ notifyAt: stamps });
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/128.png",
+    title: title,
+    message: message
+  });
+}
+
 // ---------- main interception ----------
 
 let activeCount = 0;
@@ -117,28 +190,45 @@ function bumpBadge(delta) {
   if (activeCount) setTimeout(() => bumpBadge(-1), 4000);
 }
 
-function notify(title, message) {
-  chrome.notifications.create({
-    type: "basic",
-    iconUrl: "icons/128.png",
-    title: title,
-    message: message
-  });
-}
-
 chrome.downloads.onCreated.addListener(async (item) => {
   const cfg = await getConfig();
   if (!cfg.enabled) return;
 
-  const skip = shouldTakeOver(item, cfg);
-  if (skip) {
-    console.debug("godm: leaving to browser -", skip, item.finalUrl || item.url);
+  const url = item.finalUrl || item.url;
+
+  // Two gates before we touch anything. Both exist because a cancelled
+  // download we cannot take over is a download the user has lost.
+  if (await takeoverDisabled()) {
+    console.debug("godm: host is down, leaving this to the browser -", url);
+    return;
+  }
+  if (url && (await wasHandedBack(url))) {
+    console.debug("godm: already handed this back, not touching it again -", url);
     return;
   }
 
-  const url = item.finalUrl || item.url;
+  const skip = shouldTakeOver(item, cfg);
+  if (skip) {
+    console.debug("godm: leaving to browser -", skip, url);
+    return;
+  }
 
-  // Cancel first so the browser stops pulling bytes we are about to refetch.
+  // Confirm the host is actually reachable *before* cancelling. One extra
+  // round trip is cheap next to losing the user's download.
+  const health = await callHost({ type: "ping" });
+  if (!health.ok) {
+    await setHostState(false, health.error);
+    await notifyThrottled(
+      "host-down",
+      "godm is not connected",
+      (health.error || "native host unreachable") +
+        "\nDownloads are being left to Chrome until this is fixed."
+    );
+    console.error("godm: host unreachable, not intercepting -", health.error);
+    return; // the browser download continues untouched
+  }
+  await setHostState(true, "");
+
   try {
     await chrome.downloads.cancel(item.id);
     await chrome.downloads.erase({ id: item.id });
@@ -161,14 +251,24 @@ chrome.downloads.onCreated.addListener(async (item) => {
     return;
   }
 
-  // Handing it back is the only honest failure mode: we already cancelled the
-  // browser download, so silently dropping it would lose the user's file.
+  // The host answered the ping but failed the job. Hand the download back and
+  // remember the URL so the replacement is not intercepted in turn.
+  await setHostState(false, resp.error);
+  await markHandedBack(url);
   console.error("godm: handoff failed -", resp.error);
-  notify("godm could not take over", (resp.error || "unknown error") + " - falling back to the browser.");
+  await notifyThrottled(
+    "handoff-failed",
+    "godm could not take over",
+    (resp.error || "unknown error") + "\nHanded the download back to Chrome."
+  );
   try {
     await chrome.downloads.download({ url: url });
   } catch (e) {
-    notify("Download lost", "godm failed and the browser refused the retry. URL: " + url);
+    await notifyThrottled(
+      "lost",
+      "Download lost",
+      "godm failed and Chrome refused the retry.\n" + url
+    );
   }
 });
 
@@ -187,22 +287,14 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(selfTest);
 
-// selfTest pings the native host as soon as the worker wakes, so a broken
-// registration shows up immediately instead of the first time a download is
-// cancelled and lost. The result is kept in storage for the options page.
+// selfTest pings the host as soon as the worker wakes, so a broken
+// registration shows up on the options page rather than the first time a real
+// download needs it.
 async function selfTest() {
   const resp = await callHost({ type: "ping" });
-  const record = {
-    ok: !!resp.ok,
-    error: resp.error || "",
-    at: new Date().toISOString()
-  };
-  await chrome.storage.local.set({ lastPing: record });
-  if (resp.ok) {
-    console.log("godm: native host reachable");
-  } else {
-    console.error("godm: native host unreachable -", resp.error);
-  }
+  await setHostState(!!resp.ok, resp.error);
+  if (resp.ok) console.log("godm: native host reachable");
+  else console.error("godm: native host unreachable -", resp.error);
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -218,13 +310,29 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     userAgent: navigator.userAgent,
     connections: cfg.connections
   });
-  if (resp.ok) bumpBadge(1);
-  else notify("godm error", resp.error || "unknown error");
+  if (resp.ok) {
+    await setHostState(true, "");
+    bumpBadge(1);
+  } else {
+    await setHostState(false, resp.error);
+    // An explicit right-click deserves an immediate answer, not a throttled one.
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/128.png",
+      title: "godm error",
+      message: resp.error || "unknown error"
+    });
+  }
 });
 
 // ---------- popup / options bridge ----------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  callHost(msg).then(sendResponse);
+  callHost(msg).then(async (resp) => {
+    if (msg && (msg.type === "ping" || msg.type === "tasks")) {
+      await setHostState(!!resp.ok, resp.error);
+    }
+    sendResponse(resp);
+  });
   return true; // keep the channel open for the async reply
 });
