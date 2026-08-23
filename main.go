@@ -45,7 +45,7 @@ func main() {
 		// that printed help into a window that vanishes.
 		if launchedByDoubleClick() {
 			hideConsole()
-			if err := cmdUI(); err != nil {
+			if err := RunApp(); err != nil {
 				alert("godm", "Could not start the download manager:\n\n"+err.Error())
 				os.Exit(1)
 			}
@@ -69,6 +69,8 @@ func main() {
 		err = cmdUninstall()
 	case "status":
 		err = cmdStatus()
+	case "app":
+		err = RunApp()
 	case "ui":
 		err = cmdUI()
 	case "version", "-v", "--version":
@@ -97,9 +99,12 @@ func usage() {
   godm install --ext-id <extension-id>
       Register the native messaging host so the browser extension can reach us.
 
+  godm app           Open the manager in an application window.
+                     This is also what double-clicking the exe does.
+
   godm uninstall     Remove the native messaging registration.
   godm status        Show daemon state and current tasks.
-  godm ui            Open the web UI in your browser.
+  godm ui            Open the manager in your browser instead.
 `)
 }
 
