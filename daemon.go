@@ -261,11 +261,20 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	if err != nil {
 		return err
 	}
+
+	// Refuse to become a second daemon. Without this check a double-click would
+	// start another instance, which loses the port race, falls back to an
+	// ephemeral port, and then clobbers the port file the first one published.
+	if c, err := newDaemonClient(); err == nil && c.ping() == nil {
+		log.Printf("a godm daemon is already running at %s; nothing to do", c.base)
+		return nil
+	}
+
 	s := &server{mgr: NewManager(outDir, parallel), token: token}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
-		// Port taken by something else: fall back to an ephemeral one.
+		// The port is held by something that is not us: take an ephemeral one.
 		ln, err = net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			return err
@@ -275,7 +284,13 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	if err := writePort(actual); err != nil {
 		return err
 	}
-	defer os.Remove(portPath())
+	// Only clear the port file if it still points at us; a later daemon may
+	// have taken over, and deleting its entry would strand every client.
+	defer func() {
+		if readPort() == actual {
+			os.Remove(portPath())
+		}
+	}()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)

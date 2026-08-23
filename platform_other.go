@@ -94,3 +94,5 @@ func openInBrowser(url string) error {
 func launchedByDoubleClick() bool { return false }
 func hideConsole()                {}
 func alert(title, body string)    { fmt.Fprintf(os.Stderr, "%s: %s\n", title, body) }
+
+func setMachineScope(bool) {}

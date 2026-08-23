@@ -237,7 +237,11 @@ type nativeManifest struct {
 func cmdInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	extID := fs.String("ext-id", "", "extension ID (comma separated for several)")
+	machine := fs.Bool("machine", false,
+		"register under HKLM instead of HKCU (needs an Administrator terminal); "+
+			"required when the NativeMessagingUserLevelHosts policy is off")
 	fs.Parse(args)
+	setMachineScope(*machine)
 
 	if *extID == "" {
 		return fmt.Errorf("need --ext-id; load the extension unpacked first, then copy its ID from the extensions page")

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -47,16 +48,37 @@ func nativeHostRegRoots() []string {
 	return []string{chromeRegRoot, edgeRegRoot, braveRegRoot, chromiumRegRoot}
 }
 
+// machineScope switches registration from HKCU to HKLM. Managed browsers can
+// set the NativeMessagingUserLevelHosts policy to false, which makes Chrome
+// ignore every HKCU host and report "Specified native messaging host not
+// found". HKLM entries still work, but writing them needs elevation.
+var machineScope bool
+
+func nativeHostRegRootsScoped() []string {
+	roots := nativeHostRegRoots()
+	if !machineScope {
+		return roots
+	}
+	out := make([]string, len(roots))
+	for i, r := range roots {
+		out[i] = strings.Replace(r, `HKCU\`, `HKLM\`, 1)
+	}
+	return out
+}
+
 // registerNativeHost writes the manifest pointer into the registry. Shelling
 // out to reg.exe keeps this binary dependency-free.
 func registerNativeHost(manifestPath string) []string {
 	var done []string
-	for _, root := range nativeHostRegRoots() {
-		key := root + `\` + nativeHostAppName
+	for _, key := range keysFor() {
 		cmd := exec.Command("reg", "add", key, "/ve", "/t", "REG_SZ", "/d", manifestPath, "/f")
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		if out, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "  skip %s: %v %s\n", key, err, out)
+			msg := strings.TrimSpace(string(out))
+			if strings.Contains(msg, "Access is denied") {
+				msg = "access denied - run this from an Administrator terminal"
+			}
+			fmt.Fprintf(os.Stderr, "  skip %s: %s\n", key, msg)
 			continue
 		}
 		done = append(done, key)
@@ -64,14 +86,27 @@ func registerNativeHost(manifestPath string) []string {
 	return done
 }
 
+func keysFor() []string {
+	roots := nativeHostRegRootsScoped()
+	keys := make([]string, len(roots))
+	for i, r := range roots {
+		keys[i] = r + `\` + nativeHostAppName
+	}
+	return keys
+}
+
+// unregisterNativeHost clears both scopes so a cleanup never leaves half of a
+// previous install behind.
 func unregisterNativeHost() []string {
 	var done []string
 	for _, root := range nativeHostRegRoots() {
-		key := root + `\` + nativeHostAppName
-		cmd := exec.Command("reg", "delete", key, "/f")
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		if err := cmd.Run(); err == nil {
-			done = append(done, key)
+		for _, scoped := range []string{root, strings.Replace(root, `HKCU\`, `HKLM\`, 1)} {
+			key := scoped + `\` + nativeHostAppName
+			cmd := exec.Command("reg", "delete", key, "/f")
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			if err := cmd.Run(); err == nil {
+				done = append(done, key)
+			}
 		}
 	}
 	return done
@@ -122,3 +157,5 @@ func alert(title, body string) {
 	procAllocConsoleMessage.Call(0,
 		uintptr(unsafe.Pointer(b)), uintptr(unsafe.Pointer(t)), 0x10) // MB_ICONERROR
 }
+
+func setMachineScope(v bool) { machineScope = v }
