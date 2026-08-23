@@ -182,7 +182,28 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["link", "video", "audio", "image"]
     });
   });
+  selfTest();
 });
+
+chrome.runtime.onStartup.addListener(selfTest);
+
+// selfTest pings the native host as soon as the worker wakes, so a broken
+// registration shows up immediately instead of the first time a download is
+// cancelled and lost. The result is kept in storage for the options page.
+async function selfTest() {
+  const resp = await callHost({ type: "ping" });
+  const record = {
+    ok: !!resp.ok,
+    error: resp.error || "",
+    at: new Date().toISOString()
+  };
+  await chrome.storage.local.set({ lastPing: record });
+  if (resp.ok) {
+    console.log("godm: native host reachable");
+  } else {
+    console.error("godm: native host unreachable -", resp.error);
+  }
+}
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== "godm-link") return;

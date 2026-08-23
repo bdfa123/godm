@@ -51,4 +51,20 @@ chrome.runtime.sendMessage({ type: "ping" }, (resp) => {
   }
 });
 
+// Show the startup self-test too: it runs without the user triggering a
+// download, so it tells them whether the next download will actually work.
+chrome.storage.local.get({ lastPing: null }, (s) => {
+  const el = document.getElementById("lastping");
+  if (!el) return;
+  if (!s.lastPing) {
+    el.textContent = "not run yet - reload the extension to trigger it";
+    return;
+  }
+  const when = new Date(s.lastPing.at).toLocaleString();
+  el.textContent = s.lastPing.ok
+    ? "reachable, checked " + when
+    : s.lastPing.error + " (checked " + when + ")";
+  el.className = s.lastPing.ok ? "good" : "bad";
+});
+
 load();
