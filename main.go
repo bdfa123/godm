@@ -41,6 +41,16 @@ func main() {
 	}
 
 	if len(args) == 0 {
+		// Double-clicked in Explorer: behave like an app, not like a script
+		// that printed help into a window that vanishes.
+		if launchedByDoubleClick() {
+			hideConsole()
+			if err := cmdUI(); err != nil {
+				alert("godm", "Could not start the download manager:\n\n"+err.Error())
+				os.Exit(1)
+			}
+			return
+		}
 		usage()
 		os.Exit(2)
 	}

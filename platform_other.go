@@ -89,3 +89,8 @@ func openInBrowser(url string) error {
 	}
 	return exec.Command(bin, url).Start()
 }
+
+// There is no Explorer double-click equivalent to detect here.
+func launchedByDoubleClick() bool { return false }
+func hideConsole()                {}
+func alert(title, body string)    { fmt.Fprintf(os.Stderr, "%s: %s\n", title, body) }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -80,4 +81,44 @@ func openInBrowser(url string) error {
 	cmd := exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Start()
+}
+
+var (
+	kernel32                = syscall.NewLazyDLL("kernel32.dll")
+	user32                  = syscall.NewLazyDLL("user32.dll")
+	procGetConsoleProcList  = kernel32.NewProc("GetConsoleProcessList")
+	procGetConsoleWindow    = kernel32.NewProc("GetConsoleWindow")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procAllocConsoleMessage = user32.NewProc("MessageBoxW")
+)
+
+const swHide = 0
+
+// launchedByDoubleClick reports whether Explorer started us rather than a
+// shell. A console started just for us has exactly one process attached: this
+// one. Run from cmd or PowerShell, the shell is attached too, so the count is
+// at least two.
+func launchedByDoubleClick() bool {
+	var pids [4]uint32
+	n, _, _ := procGetConsoleProcList.Call(
+		uintptr(unsafe.Pointer(&pids[0])), uintptr(len(pids)))
+	return n == 1
+}
+
+// hideConsole tucks away the black window Explorer opened for us, so a
+// double-click looks like launching an app rather than running a script.
+func hideConsole() {
+	hwnd, _, _ := procGetConsoleWindow.Call()
+	if hwnd != 0 {
+		procShowWindow.Call(hwnd, swHide)
+	}
+}
+
+// alert shows a message box, the only way to report a startup failure once the
+// console is hidden.
+func alert(title, body string) {
+	t, _ := syscall.UTF16PtrFromString(title)
+	b, _ := syscall.UTF16PtrFromString(body)
+	procAllocConsoleMessage.Call(0,
+		uintptr(unsafe.Pointer(b)), uintptr(unsafe.Pointer(t)), 0x10) // MB_ICONERROR
 }
