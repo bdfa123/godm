@@ -429,7 +429,10 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		// connecting any more.
 		segs := make([]SegmentView, len(mt.view.Segments))
 		for i, s := range mt.view.Segments {
-			if s.State == "active" || s.State == "connecting" || s.State == "retrying" {
+			moving := s.State == "active" || s.State == "connecting" || s.State == "retrying"
+			// After a pause or an expired link the saved bytes are intact, and
+			// painting those segments red would suggest otherwise.
+			if moving || (s.State == "failed" && st != StateError) {
 				s.State, s.Note = "waiting", ""
 			}
 			segs[i] = s

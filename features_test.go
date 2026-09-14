@@ -293,6 +293,10 @@ func TestLinkExpiryLetsInFlightConnectionsFinish(t *testing.T) {
 	if !errors.As(err, &expired) {
 		t.Fatalf("want LinkExpiredError, got %v", err)
 	}
+	// Report the cause, not a connection that merely stopped because of it.
+	if expired.consequence || !strings.Contains(err.Error(), "403") {
+		t.Errorf("reported %q; want the 403 that killed the link", err)
+	}
 	st, ok := loadState(filepath.Join(dir, "movie.bin"))
 	if !ok {
 		t.Fatal("no sidecar after expiry")

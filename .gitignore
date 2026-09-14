@@ -3,3 +3,4 @@ godm.exe~
 *.godm
 godm-*.exe
 .diag-*.txt
+.devcfg/

@@ -308,6 +308,16 @@ chrome.runtime.onInstalled.addListener(() => {
       title: "Download with godm",
       contexts: ["link", "video", "audio", "image"]
     });
+    chrome.contextMenus.create({
+      id: "godm-page-links",
+      title: "Download links on this page with godm…",
+      contexts: ["page"]
+    });
+    chrome.contextMenus.create({
+      id: "godm-selection-links",
+      title: "Download selected links with godm…",
+      contexts: ["selection"]
+    });
   });
   selfTest();
 });
@@ -325,6 +335,10 @@ async function selfTest() {
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "godm-page-links" || info.menuItemId === "godm-selection-links") {
+    await pickLinksFromTab(tab, info.menuItemId === "godm-selection-links");
+    return;
+  }
   if (info.menuItemId !== "godm-link") return;
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
@@ -352,9 +366,114 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-// ---------- popup / options bridge ----------
+// ---------- download list: pick links from a page ----------
+
+// collectLinksInPage runs inside the page, so it must be self-contained. It
+// gathers anchors and media sources, resolved and de-duplicated, optionally
+// only those inside the user's selection.
+function collectLinksInPage(selectionOnly) {
+  const sel = window.getSelection();
+  const useSelection = selectionOnly && sel && sel.rangeCount > 0 && !sel.isCollapsed;
+  const inSelection = (el) => {
+    if (!useSelection) return true;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      if (sel.getRangeAt(i).intersectsNode(el)) return true;
+    }
+    return false;
+  };
+  const seen = new Set();
+  const links = [];
+  const add = (href, text, kind) => {
+    let u;
+    try {
+      u = new URL(href, location.href);
+    } catch (e) {
+      return;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") return;
+    u.hash = "";
+    if (seen.has(u.href)) return;
+    seen.add(u.href);
+    links.push({ url: u.href, text: (text || "").replace(/\s+/g, " ").trim().slice(0, 160), kind: kind });
+  };
+  document.querySelectorAll("a[href]").forEach((a) => {
+    if (inSelection(a)) add(a.href, a.textContent || a.title || a.getAttribute("download") || "", "link");
+  });
+  document.querySelectorAll("video[src], audio[src], video source[src], audio source[src]").forEach((m) => {
+    if (inSelection(m)) add(m.src, m.title || "", "media");
+  });
+  return { page: location.href, title: document.title, links: links };
+}
+
+async function pickLinksFromTab(tab, selectionOnly) {
+  if (!tab || tab.id === undefined) return { ok: false, error: "no active tab" };
+  let result;
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: collectLinksInPage,
+      args: [!!selectionOnly]
+    });
+    result = res && res.result;
+  } catch (e) {
+    // chrome:// pages, the Web Store and PDFs refuse script injection.
+    const msg = "This page does not allow reading its links.";
+    chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
+    return { ok: false, error: msg };
+  }
+  if (!result || !result.links.length) {
+    const msg = selectionOnly ? "No links in the selection." : "No links found on this page.";
+    chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
+    return { ok: false, error: msg };
+  }
+  // The picker is a separate extension page; hand it the list through session
+  // storage rather than a URL, which would leak every link into history.
+  const key = "pick-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+  await chrome.storage.session.set({ [key]: result });
+  await chrome.windows.create({
+    url: chrome.runtime.getURL("picker.html?k=" + encodeURIComponent(key)),
+    type: "popup",
+    width: 920,
+    height: 700
+  });
+  return { ok: true, count: result.links.length };
+}
+
+// submitPicked sends the chosen links as one batch. Cookies are looked up per
+// link because a single page often links to several hosts.
+async function submitPicked(msg) {
+  const cfg = await getConfig();
+  const items = [];
+  for (const it of msg.items || []) {
+    if (!/^https?:\/\//i.test(it.url || "")) continue;
+    items.push({ url: it.url, filename: it.filename || "", cookie: await cookieHeader(it.url) });
+  }
+  if (!items.length) return { ok: false, error: "nothing selected" };
+  const resp = await callHost({
+    type: "batch",
+    items: items,
+    referrer: msg.referrer || "",
+    userAgent: navigator.userAgent,
+    connections: msg.connections || cfg.connections
+  });
+  await setHostState(!!resp.ok, resp.error);
+  if (resp.ok) bumpBadge(1);
+  return resp;
+}
+
+// ---------- popup / options / picker bridge ----------
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "godm-grab-active") {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true })
+      .then((tabs) => pickLinksFromTab(tabs[0], false))
+      .then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-batch") {
+    submitPicked(msg).then(sendResponse);
+    return true;
+  }
   callHost(msg).then(async (resp) => {
     if (msg && (msg.type === "ping" || msg.type === "tasks")) {
       await setHostState(!!resp.ok, resp.error);

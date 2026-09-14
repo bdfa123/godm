@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "godm takeover",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Hands browser downloads to the godm download manager for segmented, resumable transfers.",
   "permissions": [
     "downloads",
@@ -9,7 +9,8 @@
     "nativeMessaging",
     "storage",
     "notifications",
-    "contextMenus"
+    "contextMenus",
+    "scripting"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

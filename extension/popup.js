@@ -25,9 +25,11 @@ function render(tasks) {
     const pct = t.size > 0 ? Math.min(100, (t.received / t.size) * 100)
       : (t.state === "done" ? 100 : 0);
     const cls = t.state === "done" ? "done" : (t.state === "error" ? "error" : "");
+    const labels = { queued: "queued", paused: "paused", done: "done", error: "failed",
+      needs_refresh: "link expired", awaiting_refresh: "waiting for link" };
     const right = t.state === "running"
-      ? human(t.speed) + "/s"
-      : t.state;
+      ? human(t.speed) + "/s" + (t.segments && t.segments.length > 1 ? " · " + t.active + " conn" : "")
+      : (labels[t.state] || t.state);
     return '<div class="task">'
       + '<div class="row"><span class="name">' + esc(t.filename || t.url) + '</span>'
       + '<span class="meta">' + esc(right) + '</span></div>'
@@ -56,6 +58,11 @@ document.getElementById("open").addEventListener("click", () => {
 });
 document.getElementById("opts").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
+});
+document.getElementById("grab").addEventListener("click", () => {
+  chrome.runtime.sendMessage({ type: "godm-grab-active" }, (resp) => {
+    if (resp && resp.ok) window.close(); // the picker window takes over
+  });
 });
 
 const box = document.getElementById("enabled");

@@ -147,6 +147,9 @@ type Result struct {
 type LinkExpiredError struct {
 	Reason string
 	err    error
+	// consequence marks a connection that stopped only because another one
+	// had already found the link dead. It is never the error worth reporting.
+	consequence bool
 }
 
 func (e *LinkExpiredError) Error() string { return "download link expired: " + e.Reason }
@@ -394,7 +397,7 @@ func (t *task) runSegment(ctx context.Context, i int) error {
 			if t.linkDead.Load() {
 				// A retry would only collect another 403.
 				seg.set(SegFailed, "link expired")
-				return &LinkExpiredError{Reason: "the link expired while this connection was retrying"}
+				return &LinkExpiredError{Reason: "the link expired while this connection was retrying", consequence: true}
 			}
 			wait := backoff(attempt, last)
 			seg.set(SegRetrying, fmt.Sprintf("%s; retry %d in %s", shortErr(last), attempt, wait.Round(100*time.Millisecond)))
@@ -431,7 +434,7 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 		return nil // already complete
 	}
 	if t.linkDead.Load() {
-		return &LinkExpiredError{Reason: "the link expired before this connection started"}
+		return &LinkExpiredError{Reason: "the link expired before this connection started", consequence: true}
 	}
 	seg.set(SegConnecting, "")
 
@@ -638,13 +641,25 @@ func newClient() *http.Client {
 }
 
 // firstRealError reports the failure that actually caused the abort. The
-// sibling segments all report context.Canceled because we cancelled them, and
-// joining those in would bury the real cause behind four lines of noise.
+// sibling segments report context.Canceled, or an expiry they only learned
+// about second-hand, and either would bury the real cause (the 403 itself).
 func firstRealError(errs []error) error {
+	var secondHand error
 	for _, err := range errs {
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
+		if err == nil || errors.Is(err, context.Canceled) {
+			continue
 		}
+		var le *LinkExpiredError
+		if errors.As(err, &le) && le.consequence {
+			if secondHand == nil {
+				secondHand = err
+			}
+			continue
+		}
+		return err
+	}
+	if secondHand != nil {
+		return secondHand
 	}
 	for _, err := range errs {
 		if err != nil {
