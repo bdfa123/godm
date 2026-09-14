@@ -30,7 +30,15 @@ type Options struct {
 	Connections int
 	MinSplit    int64 // never split a file smaller than this
 	MaxRetries  int
-	OnProgress  func(received, total int64)
+
+	// Refresh resumes an interrupted download from a different URL, the way a
+	// download manager continues after the user fetches a fresh link. Saved
+	// progress is reused as long as the file size still matches; if it does
+	// not, the download is refused instead of silently starting over.
+	Refresh bool
+
+	OnStart    func(StartInfo)
+	OnProgress func(Progress)
 }
 
 func (o *Options) applyDefaults() {
@@ -53,12 +61,73 @@ func (o *Options) applyDefaults() {
 	}
 }
 
+// SegmentState is what one connection is doing right now.
+type SegmentState int32
+
+const (
+	SegWaiting SegmentState = iota
+	SegConnecting
+	SegActive
+	SegRetrying
+	SegDone
+	SegFailed
+)
+
+func (s SegmentState) String() string {
+	switch s {
+	case SegConnecting:
+		return "connecting"
+	case SegActive:
+		return "active"
+	case SegRetrying:
+		return "retrying"
+	case SegDone:
+		return "done"
+	case SegFailed:
+		return "failed"
+	}
+	return "waiting"
+}
+
 // Segment is one contiguous byte range owned by exactly one goroutine.
-// done is atomic because the progress ticker and state writer read it live.
+// Its counters are atomic because the progress ticker reads them live.
 type Segment struct {
 	Start int64
 	End   int64 // inclusive; -1 means "until the stream ends"
 	done  atomic.Int64
+	state atomic.Int32
+	note  atomic.Value // string: why it is retrying or failed
+}
+
+func (s *Segment) set(st SegmentState, note string) {
+	s.state.Store(int32(st))
+	s.note.Store(note)
+}
+
+// SegmentView is a point-in-time copy of a Segment for display.
+type SegmentView struct {
+	Start int64  `json:"start"`
+	End   int64  `json:"end"`
+	Done  int64  `json:"done"`
+	State string `json:"state"`
+	Note  string `json:"note,omitempty"`
+}
+
+// Progress is reported a few times a second while a download runs.
+type Progress struct {
+	Received int64
+	Total    int64
+	Active   int // connections currently receiving bytes
+	Segments []SegmentView
+}
+
+// StartInfo is reported once the plan is fixed and before bytes move.
+type StartInfo struct {
+	Path      string
+	Size      int64
+	Resumable bool
+	Resumed   bool
+	Segments  int
 }
 
 // Result describes a finished download.
@@ -71,6 +140,24 @@ type Result struct {
 	Resumed   bool
 }
 
+// LinkExpiredError means the URL stopped leading to the file: the server now
+// refuses it, or answers with a web page instead of the bytes. Retrying the
+// same URL is pointless, but the partial download is intact and can continue
+// from a fresh link to the same file.
+type LinkExpiredError struct {
+	Reason string
+	err    error
+}
+
+func (e *LinkExpiredError) Error() string { return "download link expired: " + e.Reason }
+func (e *LinkExpiredError) Unwrap() error { return e.err }
+
+// RefreshMismatchError means a fresh link was offered for a partial download
+// but it does not describe the same file, so resuming would corrupt it.
+type RefreshMismatchError struct{ Reason string }
+
+func (e *RefreshMismatchError) Error() string { return "cannot resume from this link: " + e.Reason }
+
 // Download runs a job to completion, resuming from a sidecar state file if one
 // matches. It is safe to cancel through ctx; progress survives in the sidecar.
 func Download(ctx context.Context, o Options) (*Result, error) {
@@ -79,7 +166,7 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 
 	pr, err := probeWithRetry(ctx, client, o)
 	if err != nil {
-		return nil, err
+		return nil, classifyLinkError(err)
 	}
 
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
@@ -87,7 +174,10 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	}
 	target := filepath.Join(o.OutDir, pr.Filename)
 
-	segs, resumed := planSegments(target, pr, o)
+	segs, resumed, err := planSegments(target, pr, o)
+	if err != nil {
+		return nil, err
+	}
 
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -113,10 +203,17 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 		t.received.Add(s.done.Load())
 	}
 
+	if o.OnStart != nil {
+		o.OnStart(StartInfo{
+			Path: target, Size: pr.Size, Resumable: pr.Resumable,
+			Resumed: resumed, Segments: len(segs),
+		})
+	}
+
 	start := time.Now()
 	if err := t.run(ctx); err != nil {
 		t.persist()
-		return nil, err
+		return nil, classifyLinkError(err)
 	}
 
 	clearState(target)
@@ -128,6 +225,24 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 		Resumable: pr.Resumable,
 		Resumed:   resumed,
 	}, nil
+}
+
+// classifyLinkError turns "this URL no longer works" into LinkExpiredError so
+// callers can offer a refresh instead of reporting a dead end. 401/403/404/410
+// are what signed and session-bound links return once they lapse.
+func classifyLinkError(err error) error {
+	var le *LinkExpiredError
+	if errors.As(err, &le) {
+		return err
+	}
+	var se *statusError
+	if errors.As(err, &se) {
+		switch se.code {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+			return &LinkExpiredError{Reason: "server returned " + se.status, err: err}
+		}
+	}
+	return err
 }
 
 // probeWithRetry gives the opening request the same retry policy as the
@@ -166,7 +281,28 @@ type task struct {
 	target   string
 	client   *http.Client
 	received atomic.Int64
-	writeMu  sync.Mutex // only used when the length is unknown
+	writeMu  sync.Mutex  // only used when the length is unknown
+	linkDead atomic.Bool // a segment found the link expired; make no new requests
+}
+
+func (t *task) snapshot() Progress {
+	p := Progress{
+		Received: t.received.Load(),
+		Total:    t.probe.Size,
+		Segments: make([]SegmentView, len(t.segs)),
+	}
+	for i, s := range t.segs {
+		st := SegmentState(s.state.Load())
+		note, _ := s.note.Load().(string)
+		p.Segments[i] = SegmentView{
+			Start: s.Start, End: s.End, Done: s.done.Load(),
+			State: st.String(), Note: note,
+		}
+		if st == SegActive {
+			p.Active++
+		}
+	}
+	return p
 }
 
 func (t *task) run(ctx context.Context) error {
@@ -186,7 +322,7 @@ func (t *task) run(ctx context.Context) error {
 				return
 			case <-tick.C:
 				if t.opts.OnProgress != nil {
-					t.opts.OnProgress(t.received.Load(), t.probe.Size)
+					t.opts.OnProgress(t.snapshot())
 				}
 				t.persist()
 			}
@@ -199,10 +335,21 @@ func (t *task) run(ctx context.Context) error {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if err := t.runSegment(ctx, i); err != nil {
-				errs[i] = err
-				cancel() // one dead segment means the file is unusable; stop the rest
+			err := t.runSegment(ctx, i)
+			if err == nil {
+				return
 			}
+			errs[i] = err
+			var expired *LinkExpiredError
+			if errors.As(classifyLinkError(err), &expired) {
+				// The link is dead, but connections already holding a response
+				// can still finish their ranges, and every byte they save is
+				// one the refreshed link will not have to send. Stop new
+				// requests instead of cutting the transfers in flight.
+				t.linkDead.Store(true)
+				return
+			}
+			cancel() // anything else makes the file unusable; stop the rest
 		}(i)
 	}
 	wg.Wait()
@@ -210,11 +357,13 @@ func (t *task) run(ctx context.Context) error {
 	close(stop)
 	tickWG.Wait()
 
+	// Report once more whatever happened, so a failed connection's reason is
+	// visible rather than lost between two ticks.
+	if t.opts.OnProgress != nil {
+		t.opts.OnProgress(t.snapshot())
+	}
 	if err := firstRealError(errs); err != nil {
 		return err
-	}
-	if t.opts.OnProgress != nil {
-		t.opts.OnProgress(t.received.Load(), t.probe.Size)
 	}
 	got := t.received.Load()
 	if t.probe.Resumable {
@@ -238,27 +387,40 @@ func (t *task) run(ctx context.Context) error {
 // seg.done, so a retry resumes mid-segment instead of refetching bytes already
 // on disk.
 func (t *task) runSegment(ctx context.Context, i int) error {
+	seg := t.segs[i]
 	var last error
 	for attempt := 0; attempt <= t.opts.MaxRetries; attempt++ {
 		if attempt > 0 {
+			if t.linkDead.Load() {
+				// A retry would only collect another 403.
+				seg.set(SegFailed, "link expired")
+				return &LinkExpiredError{Reason: "the link expired while this connection was retrying"}
+			}
+			wait := backoff(attempt, last)
+			seg.set(SegRetrying, fmt.Sprintf("%s; retry %d in %s", shortErr(last), attempt, wait.Round(100*time.Millisecond)))
 			select {
 			case <-ctx.Done():
+				seg.set(SegWaiting, "")
 				return ctx.Err()
-			case <-time.After(backoff(attempt, last)):
+			case <-time.After(wait):
 			}
 		}
 		err := t.trySegment(ctx, i)
 		if err == nil {
+			seg.set(SegDone, "")
 			return nil
 		}
 		if ctx.Err() != nil {
+			seg.set(SegWaiting, "")
 			return ctx.Err()
 		}
 		if !retryable(err) {
+			seg.set(SegFailed, shortErr(err))
 			return err
 		}
 		last = err
 	}
+	seg.set(SegFailed, shortErr(last))
 	return fmt.Errorf("segment %d gave up after %d retries: %w", i, t.opts.MaxRetries, last)
 }
 
@@ -268,6 +430,10 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 	if seg.End >= 0 && offset > seg.End {
 		return nil // already complete
 	}
+	if t.linkDead.Load() {
+		return &LinkExpiredError{Reason: "the link expired before this connection started"}
+	}
+	seg.set(SegConnecting, "")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.probe.FinalURL, nil)
 	if err != nil {
@@ -289,17 +455,10 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 	}
 	defer resp.Body.Close()
 
-	want := http.StatusOK
-	if ranged {
-		want = http.StatusPartialContent
+	if err := t.checkResponse(resp, ranged, offset, seg.End); err != nil {
+		return err
 	}
-	if resp.StatusCode != want {
-		return &statusError{
-			code:       resp.StatusCode,
-			status:     resp.Status,
-			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
-		}
-	}
+	seg.set(SegActive, "")
 
 	buf := make([]byte, readBufSize)
 	for {
@@ -334,6 +493,43 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 	return nil
 }
 
+// checkResponse decides whether a segment response really carries our bytes.
+// The order matters: a throttling or overload response is worth waiting out
+// even when a CDN dresses it up as an HTML error page, but any other page in
+// place of a binary file is a login or "link expired" screen.
+func (t *task) checkResponse(resp *http.Response, ranged bool, offset, end int64) error {
+	if isRetryableStatus(resp.StatusCode) {
+		return &statusError{
+			code:       resp.StatusCode,
+			status:     resp.Status,
+			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
+	}
+	if looksLikeHTML(resp.Header.Get("Content-Type")) && !looksLikeHTML(t.probe.MIME) {
+		return &LinkExpiredError{Reason: "the server sent a web page instead of the file"}
+	}
+	want := http.StatusOK
+	if ranged {
+		want = http.StatusPartialContent
+	}
+	if resp.StatusCode != want {
+		return &statusError{code: resp.StatusCode, status: resp.Status}
+	}
+	if ranged && t.probe.Size > 0 {
+		// Bytes from a different object would silently corrupt the file.
+		if total, ok := parseContentRangeTotal(resp.Header.Get("Content-Range")); ok && total != t.probe.Size {
+			return &LinkExpiredError{Reason: fmt.Sprintf(
+				"the file on the server changed size (%d bytes, expected %d)", total, t.probe.Size)}
+		}
+	}
+	return nil
+}
+
+func looksLikeHTML(contentType string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	return strings.HasPrefix(ct, "text/html") || strings.HasPrefix(ct, "application/xhtml")
+}
+
 // writeAt is a positional write (pwrite), so every segment writes straight into
 // its own slice of the final file. There is no merge step and no .part files.
 func (t *task) writeAt(b []byte, off int64) (int, error) {
@@ -361,21 +557,40 @@ func (t *task) persist() {
 	})
 }
 
-// planSegments either restores a matching sidecar or carves a fresh plan.
-func planSegments(target string, pr *ProbeResult, o Options) ([]*Segment, bool) {
-	if st, ok := loadState(target); ok && st.reusable(pr, o.URL) {
+// planSegments restores a matching sidecar or carves a fresh plan. With
+// Refresh set there is no fresh plan to fall back on: the caller asked to
+// continue a specific partial file.
+func planSegments(target string, pr *ProbeResult, o Options) ([]*Segment, bool, error) {
+	st, ok := loadState(target)
+	if ok && st.reusable(pr, o.URL, o.Refresh) {
 		if fi, err := os.Stat(target); err == nil && fi.Size() == st.Size {
 			segs := make([]*Segment, len(st.Segments))
 			for i, s := range st.Segments {
 				seg := &Segment{Start: s.Start, End: s.End}
 				seg.done.Store(s.Done)
+				if s.Start+s.Done > s.End {
+					seg.set(SegDone, "")
+				} else {
+					seg.set(SegWaiting, "")
+				}
 				segs[i] = seg
 			}
-			return segs, true
+			return segs, true, nil
+		}
+	}
+	if o.Refresh {
+		switch {
+		case !ok:
+			return nil, false, &RefreshMismatchError{Reason: "no saved progress was found for " + filepath.Base(target)}
+		case !pr.Resumable:
+			return nil, false, &RefreshMismatchError{Reason: "the new link does not support resuming"}
+		default:
+			return nil, false, &RefreshMismatchError{Reason: fmt.Sprintf(
+				"it points to a different file (%d bytes, the partial download is %d)", pr.Size, st.Size)}
 		}
 	}
 	clearState(target)
-	return freshSegments(pr, o), false
+	return freshSegments(pr, o), false, nil
 }
 
 func freshSegments(pr *ProbeResult, o Options) []*Segment {
@@ -437,6 +652,17 @@ func firstRealError(errs []error) error {
 		}
 	}
 	return nil
+}
+
+func shortErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if len(s) > 90 {
+		s = s[:90] + "…"
+	}
+	return s
 }
 
 // statusError carries the HTTP status so retry policy can be decided on the
@@ -502,21 +728,29 @@ func backoff(attempt int, last error) time.Duration {
 	return d
 }
 
+func isRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway,
+		http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
 func retryable(err error) bool {
 	if err == nil {
+		return false
+	}
+	var le *LinkExpiredError
+	if errors.As(err, &le) {
 		return false
 	}
 	// Decide on the status code first; an expired signed URL (403) or a deleted
 	// object (404) will never fix itself, but a 429 or 503 will.
 	var se *statusError
 	if errors.As(err, &se) {
-		switch se.code {
-		case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
-			http.StatusInternalServerError, http.StatusBadGateway,
-			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
-		}
-		return false
+		return isRetryableStatus(se.code)
 	}
 	var ne net.Error
 	if errors.As(err, &ne) {

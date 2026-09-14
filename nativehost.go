@@ -14,7 +14,7 @@ import (
 const maxNativeMessage = 8 << 20
 
 type nativeRequest struct {
-	Type        string            `json:"type"` // download | tasks | ping
+	Type        string            `json:"type"` // download | batch | tasks | ping
 	URL         string            `json:"url"`
 	Filename    string            `json:"filename"`
 	Referrer    string            `json:"referrer"`
@@ -23,13 +23,24 @@ type nativeRequest struct {
 	Headers     map[string]string `json:"headers"`
 	Connections int               `json:"connections"`
 	OutDir      string            `json:"outDir"`
+	Items       []batchItem       `json:"items"`
+}
+
+// batchItem is one link picked from a page. Cookies are per item because the
+// links on one page can point at several hosts.
+type batchItem struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+	Cookie   string `json:"cookie"`
 }
 
 type nativeResponse struct {
-	OK    bool       `json:"ok"`
-	ID    string     `json:"id,omitempty"`
-	Error string     `json:"error,omitempty"`
-	Tasks []TaskView `json:"tasks,omitempty"`
+	OK     bool       `json:"ok"`
+	ID     string     `json:"id,omitempty"`
+	IDs    []string   `json:"ids,omitempty"`
+	Errors []string   `json:"errors,omitempty"`
+	Error  string     `json:"error,omitempty"`
+	Tasks  []TaskView `json:"tasks,omitempty"`
 	// UI carries the authenticated manager URL so the popup can open it
 	// without the extension ever storing the daemon token.
 	UI string `json:"ui,omitempty"`
@@ -96,28 +107,7 @@ func handleNative(req nativeRequest) nativeResponse {
 		return nativeResponse{OK: true, Tasks: tasks, UI: uiURL}
 
 	case "download", "":
-		// Carry the browser identity across. Miss any of these and an
-		// authenticated download turns into a 403 or an HTML login page.
-		headers := map[string]string{}
-		for k, v := range req.Headers {
-			headers[k] = v
-		}
-		if req.Cookie != "" {
-			headers["Cookie"] = req.Cookie
-		}
-		if req.Referrer != "" {
-			headers["Referer"] = req.Referrer
-		}
-		if req.UserAgent != "" {
-			headers["User-Agent"] = req.UserAgent
-		}
-		id, err := c.submit(jobRequest{
-			URL:         req.URL,
-			Filename:    req.Filename,
-			Headers:     headers,
-			Connections: req.Connections,
-			OutDir:      req.OutDir,
-		})
+		id, err := c.submit(req.job(req.URL, req.Filename, req.Cookie))
 		if err != nil {
 			log.Printf("submit failed: %v", err)
 			return nativeResponse{Error: err.Error()}
@@ -125,8 +115,48 @@ func handleNative(req nativeRequest) nativeResponse {
 		log.Printf("accepted %s -> %s", req.URL, id)
 		return nativeResponse{OK: true, ID: id}
 
+	case "batch":
+		jobs := make([]jobRequest, 0, len(req.Items))
+		for _, it := range req.Items {
+			jobs = append(jobs, req.job(it.URL, it.Filename, it.Cookie))
+		}
+		ids, errs, err := c.submitBatch(jobs)
+		if err != nil {
+			log.Printf("batch submit failed: %v", err)
+			return nativeResponse{Error: err.Error()}
+		}
+		log.Printf("accepted batch of %d from %s", len(ids), req.Referrer)
+		return nativeResponse{OK: len(ids) > 0, IDs: ids, Errors: errs}
+
 	default:
 		return nativeResponse{Error: "unknown message type: " + req.Type}
+	}
+}
+
+// job carries the browser identity across. Miss any of these and an
+// authenticated download turns into a 403 or an HTML login page. The referrer
+// is also kept separately: it is the page to reopen when the link expires.
+func (req nativeRequest) job(url, filename, cookie string) jobRequest {
+	headers := map[string]string{}
+	for k, v := range req.Headers {
+		headers[k] = v
+	}
+	if cookie != "" {
+		headers["Cookie"] = cookie
+	}
+	if req.Referrer != "" {
+		headers["Referer"] = req.Referrer
+	}
+	if req.UserAgent != "" {
+		headers["User-Agent"] = req.UserAgent
+	}
+	return jobRequest{
+		URL:         url,
+		Filename:    filename,
+		Referrer:    req.Referrer,
+		Headers:     headers,
+		Connections: req.Connections,
+		OutDir:      req.OutDir,
 	}
 }
 

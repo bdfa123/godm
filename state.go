@@ -75,15 +75,22 @@ func clearState(target string) { os.Remove(statePath(target)) }
 
 // reusable reports whether an existing state file describes the same bytes we
 // are about to fetch. ETag is the strong signal; size is the weak fallback.
-func (s *State) reusable(pr *ProbeResult, url string) bool {
-	if s.Size != pr.Size || s.Size <= 0 {
+//
+// A refresh deliberately comes from a different URL, and very often from a
+// different CDN node whose ETag differs for the same bytes, so it is matched on
+// size alone. That is the same trade-off IDM makes; the caller has already
+// confirmed the user is re-requesting this particular file.
+func (s *State) reusable(pr *ProbeResult, url string, refresh bool) bool {
+	if s.Size != pr.Size || s.Size <= 0 || !pr.Resumable {
 		return false
 	}
-	if s.URL != url {
-		return false
-	}
-	if s.ETag != "" && pr.ETag != "" && s.ETag != pr.ETag {
-		return false
+	if !refresh {
+		if s.URL != url {
+			return false
+		}
+		if s.ETag != "" && pr.ETag != "" && s.ETag != pr.ETag {
+			return false
+		}
 	}
 	if len(s.Segments) == 0 {
 		return false

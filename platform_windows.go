@@ -118,6 +118,19 @@ func openInBrowser(url string) error {
 	return cmd.Start()
 }
 
+// showInFolder opens Explorer with the file selected, or the folder itself.
+// The command line is built by hand because Explorer wants /select,"path" as a
+// single token and does not follow the usual argument quoting rules.
+func showInFolder(path string) error {
+	line := `explorer.exe "` + path + `"`
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		line = `explorer.exe /select,"` + path + `"`
+	}
+	cmd := exec.Command("explorer.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: line}
+	return cmd.Start()
+}
+
 var (
 	kernel32                = syscall.NewLazyDLL("kernel32.dll")
 	user32                  = syscall.NewLazyDLL("user32.dll")

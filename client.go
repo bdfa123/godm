@@ -78,6 +78,18 @@ func (c *daemonClient) submit(req jobRequest) (string, error) {
 	return out.ID, nil
 }
 
+func (c *daemonClient) submitBatch(reqs []jobRequest) ([]string, []string, error) {
+	var out struct {
+		IDs    []string `json:"ids"`
+		Errors []string `json:"errors"`
+	}
+	body := map[string]any{"items": reqs}
+	if err := c.do(http.MethodPost, "/api/batch", body, &out); err != nil {
+		return nil, nil, err
+	}
+	return out.IDs, out.Errors, nil
+}
+
 func (c *daemonClient) tasks() ([]TaskView, error) {
 	var out struct {
 		Tasks []TaskView `json:"tasks"`

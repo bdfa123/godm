@@ -139,8 +139,11 @@ func cmdGet(args []string) error {
 		OutDir:      *outDir,
 		Filename:    *name,
 		Connections: *conns,
-		OnProgress: func(received, total int64) {
-			line := renderProgress(received, total, time.Since(start))
+		OnProgress: func(p Progress) {
+			line := renderProgress(p.Received, p.Total, time.Since(start))
+			if len(p.Segments) > 1 {
+				line += fmt.Sprintf("  %d/%d conn", p.Active, len(p.Segments))
+			}
 			pad := ""
 			if d := lastLine - len(line); d > 0 {
 				pad = strings.Repeat(" ", d)

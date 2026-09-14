@@ -90,6 +90,14 @@ func openInBrowser(url string) error {
 	return exec.Command(bin, url).Start()
 }
 
+func showInFolder(path string) error {
+	dir := path
+	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+		dir = filepath.Dir(path)
+	}
+	return openInBrowser(dir)
+}
+
 // There is no Explorer double-click equivalent to detect here.
 func launchedByDoubleClick() bool { return false }
 func hideConsole()                {}
