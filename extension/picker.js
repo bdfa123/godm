@@ -9,17 +9,26 @@ const DEFAULTS = {
 
 const state = { page: "", links: [], selected: new Set(), types: new Set(), query: "", fileTypes: new Set() };
 
+function baseOf(url) {
+  try {
+    return decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+  } catch (e) {
+    return "";
+  }
+}
+
+// The type comes from the path only. A bare site link falls back to showing
+// its host, and "example.com" must not be mistaken for a .com file.
 function extOf(link) {
-  const m = /\.([a-z0-9]{1,5})$/i.exec(link.name);
+  const m = /\.([a-z0-9]{1,5})$/i.exec(baseOf(link.url));
   return m ? m[1].toLowerCase() : "";
 }
 
 function nameFor(link) {
+  const base = baseOf(link.url);
+  if (base) return base;
   try {
-    const u = new URL(link.url);
-    const base = decodeURIComponent(u.pathname.split("/").pop() || "");
-    if (base && /\.[a-z0-9]{1,5}$/i.test(base)) return base;
-    return base || u.host;
+    return new URL(link.url).host;
   } catch (e) {
     return link.url;
   }
