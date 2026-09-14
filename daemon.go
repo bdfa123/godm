@@ -78,6 +78,9 @@ type managedTask struct {
 
 	outDir string
 	cancel context.CancelFunc
+	// connLimit is read live by the engine, so changing it adds or releases
+	// connections on a running download within a fraction of a second.
+	connLimit atomic.Int32
 	// gen increments on every run so a superseded run cannot overwrite the
 	// state of the one that replaced it.
 	gen         int
@@ -110,7 +113,6 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 		t.view.Size = si.Size
 	}
 	t.view.Resumable = si.Resumable
-	t.view.Conns = si.Segments
 }
 
 // progress folds raw byte counts into an exponentially smoothed rate so the UI
@@ -143,7 +145,16 @@ func (t *managedTask) progress(gen int, p Progress) {
 	}
 	t.view.Speed = int64(t.speedEMA)
 	t.view.Active = p.Active
+	t.view.Conns = p.Limit
 	t.view.Segments = p.Segments
+}
+
+// requestedConnections normalises a job's connection count, defaulting to 8.
+func requestedConnections(n int) int {
+	if n <= 0 {
+		return DefaultConnections
+	}
+	return clampConnections(n)
 }
 
 // Manager owns every task, runs them as a first-in-first-out queue, and keeps
@@ -215,6 +226,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	if outDir == "" {
 		outDir = m.outDir
 	}
+	req.Connections = requestedConnections(req.Connections)
 	mt := &managedTask{
 		req:    req,
 		outDir: outDir,
@@ -223,6 +235,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 			State: StateQueued, Size: -1, Conns: req.Connections, AddedAt: time.Now(),
 		},
 	}
+	mt.connLimit.Store(int32(req.Connections))
 
 	m.mu.Lock()
 	m.tasks[id] = mt
@@ -297,6 +310,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 		OutDir:      outDir,
 		Filename:    filename,
 		Connections: req.Connections,
+		ConnLimit:   func() int { return int(mt.connLimit.Load()) },
 		Refresh:     refresh,
 		OnStart: func(si StartInfo) {
 			mt.onStart(gen, si)
@@ -711,6 +725,24 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	return nil
 }
 
+// SetConnections changes how many connections a task may use. A running
+// download picks it up immediately: more connections split the remaining
+// ranges, fewer release connections after their current chunk.
+func (m *Manager) SetConnections(id string, n int) (int, error) {
+	mt := m.get(id)
+	if mt == nil {
+		return 0, fmt.Errorf("no such task")
+	}
+	n = clampConnections(n)
+	mt.mu.Lock()
+	mt.req.Connections = n
+	mt.view.Conns = n
+	mt.mu.Unlock()
+	mt.connLimit.Store(int32(n))
+	m.dirty.Store(true)
+	return n, nil
+}
+
 func (m *Manager) SetLimit(n int) int {
 	m.mu.Lock()
 	m.limit = clampLimit(n)
@@ -845,7 +877,11 @@ func (m *Manager) load() error {
 		if _, dup := m.tasks[v.ID]; dup || v.ID == "" {
 			continue
 		}
-		m.tasks[v.ID] = &managedTask{view: v, req: st.Req, outDir: st.OutDir}
+		st.Req.Connections = requestedConnections(st.Req.Connections)
+		v.Conns = st.Req.Connections
+		mt := &managedTask{view: v, req: st.Req, outDir: st.OutDir}
+		mt.connLimit.Store(int32(st.Req.Connections))
+		m.tasks[v.ID] = mt
 		m.order = append(m.order, v.ID)
 	}
 	return nil
@@ -930,6 +966,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/refresh", s.guard(post(s.handleRefresh)))
 	mux.HandleFunc("/api/address", s.guard(post(s.handleAddress)))
 	mux.HandleFunc("/api/limit", s.guard(post(s.handleLimit)))
+	mux.HandleFunc("/api/connections", s.guard(post(s.handleConnections)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
 
 	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
@@ -1071,6 +1108,20 @@ func (s *server) handleLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "limit": s.mgr.SetLimit(n)})
+}
+
+func (s *server) handleConnections(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(r.URL.Query().Get("n"))
+	if err != nil {
+		http.Error(w, "n must be a number", http.StatusBadRequest)
+		return
+	}
+	got, err := s.mgr.SetConnections(r.URL.Query().Get("id"), n)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "connections": got})
 }
 
 func (s *server) handleOpen(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -272,16 +273,25 @@ func TestSingleStreamTrimsLongerLeftoverFile(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	// A stale, larger file already sits at the target path.
+	// Our own earlier, longer attempt at this same link sits at the target
+	// path with its sidecar. Unrelated files are never overwritten, but a dead
+	// partial download of the same URL is restarted in place and must be trimmed.
 	target := dir + "/leftover.bin"
 	if err := os.WriteFile(target, make([]byte, 4096), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	saveState(target, &State{
+		Version: stateVersion, URL: srv.URL + "/leftover.bin", Size: -1, Filename: "leftover.bin",
+		Segments: []SegSnap{{Start: 0, End: -1, Done: 4096}},
+	})
 	res, err := Download(context.Background(), Options{
 		URL: srv.URL + "/leftover.bin", OutDir: dir, Filename: "leftover.bin", Connections: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if filepath.Clean(res.Path) != filepath.Clean(target) {
+		t.Fatalf("restarted into %s, want the same path %s", res.Path, target)
 	}
 	got, _ := os.ReadFile(res.Path)
 	if len(got) != 500 {

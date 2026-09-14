@@ -341,12 +341,15 @@ function segMap(t) {
 function connTable(t) {
   var segs = t.segments || [];
   if (!segs.length) return '<div class="conns"><span class="url">No connection details yet.</span></div>';
-  var sp = segSpeeds(t), rows = "";
+  var sp = segSpeeds(t), rows = "", finished = 0, finishedBytes = 0, row = 0;
   segs.forEach(function (s, i) {
+    // Ranges get split as connections free up, so finished ones are folded into
+    // a single summary line instead of filling the table.
+    if (s.state === "done") { finished++; finishedBytes += s.done; return; }
     var len = s.end >= 0 ? s.end - s.start + 1 : 0;
     var pct = len > 0 ? Math.min(100, s.done / len * 100) : 0;
     var range = s.end >= 0 ? human(s.start) + " – " + human(s.end + 1) : "whole stream";
-    rows += "<tr><td>#" + (i + 1) + "</td>" +
+    rows += "<tr><td>" + (++row) + "</td>" +
       "<td>" + range + "</td>" +
       '<td><div class="mini"><i style="width:' + pct.toFixed(1) + '%"></i></div></td>' +
       "<td>" + (len > 0 ? pct.toFixed(0) + "%" : human(s.done)) + "</td>" +
@@ -354,8 +357,22 @@ function connTable(t) {
       '<td class="st ' + s.state + '">' + s.state + "</td>" +
       '<td class="note">' + esc(s.note || "") + "</td></tr>";
   });
-  return '<div class="conns"><table><thead><tr><th>Conn</th><th>Range</th><th></th><th>Done</th><th>Speed</th><th>State</th><th></th></tr></thead><tbody>' +
+  var summary = finished
+    ? '<div class="url" style="margin-bottom:4px">' + human(finishedBytes) + " already downloaded in finished ranges</div>"
+    : "";
+  return '<div class="conns">' + summary + '<table><thead><tr><th>#</th><th>Range</th><th></th><th>Done</th><th>Speed</th><th>State</th><th></th></tr></thead><tbody>' +
     rows + "</tbody></table></div>";
+}
+
+var CONN_CHOICES = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+function connSelect(t) {
+  var opts = CONN_CHOICES.slice();
+  if (opts.indexOf(t.conns) < 0 && t.conns > 0) opts.push(t.conns);
+  opts.sort(function (a, b) { return a - b; });
+  return '<label class="field connsel" title="Connections for this download. Changing it takes effect immediately.">Connections ' +
+    '<select data-conns="' + t.id + '">' + opts.map(function (n) {
+      return '<option value="' + n + '"' + (n === t.conns ? " selected" : "") + ">" + n + "</option>";
+    }).join("") + "</select></label>";
 }
 
 function queuePosition(t) {
@@ -374,8 +391,8 @@ function metaLine(t) {
       bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
       bits.push("<b>" + human(t.speed) + "/s</b>");
       if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
-      if ((t.segments || []).length > 1) bits.push("<b>" + t.active + "</b> of " + t.segments.length + " connections active");
-      else if (!t.resumable && t.size !== -1) bits.push("single connection · server cannot resume");
+      if (t.resumable) bits.push("<b>" + t.active + "</b> of " + t.conns + " connections active");
+      else if (t.size !== -1) bits.push("single connection · server cannot resume");
       break;
     case "queued":
       var pos = queuePosition(t);
@@ -445,7 +462,9 @@ function card(t) {
       banner(t) +
       '<div class="actions">' + acts.map(function (a) {
         return '<button class="btn ghost small' + (a[0] === "remove" ? " danger" : "") + '" data-act="' + a[0] + '" data-id="' + t.id + '">' + a[1] + "</button>";
-      }).join("") + "</div>" +
+      }).join("") +
+      (t.state !== "done" && t.resumable !== false ? '<span style="flex:1"></span>' + connSelect(t) : "") +
+      "</div>" +
       (open ? connTable(t) : "") +
     "</div></div>";
 }
@@ -474,6 +493,9 @@ function render() {
 
   var shown = tasks.filter(function (t) { return inTab(t, S.tab); });
   var list = document.getElementById("list");
+  // Re-rendering would close a dropdown the user is in the middle of choosing from.
+  var a = document.activeElement;
+  if (a && a.tagName === "SELECT" && list.contains(a)) return;
   if (!shown.length) {
     list.innerHTML = tasks.length
       ? '<div class="empty"><b>Nothing here</b>No downloads in this view.</div>'
@@ -550,6 +572,18 @@ document.getElementById("list").addEventListener("click", function (e) {
     del.parentElement.hidden = !(t && t.path);
     show("rmDlg");
   }
+});
+
+document.getElementById("list").addEventListener("change", function (e) {
+  var sel = e.target.closest("select[data-conns]");
+  if (!sel) return;
+  var id = sel.getAttribute("data-conns"), n = parseInt(sel.value, 10);
+  sel.blur();
+  post("/api/connections?id=" + q(id) + "&n=" + n).then(function (r) {
+    if (!r.ok) return toast(r.error, "err");
+    toast("Using up to " + r.connections + " connection" + (r.connections === 1 ? "" : "s") + " for this download.");
+    poll();
+  }).catch(fail);
 });
 
 document.getElementById("tabs").addEventListener("click", function (e) {

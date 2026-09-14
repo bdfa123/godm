@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -27,17 +28,28 @@ func sum(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
 // rangedHandler serves payload with correct 206 semantics, optionally cutting
 // the connection short to exercise the retry path.
 type rangedHandler struct {
-	payload    []byte
-	disp       string
-	noRange    bool
-	cutAfter   int // bytes to send before hanging up; 0 disables
-	cutsLeft   atomic.Int32
-	reqCount   atomic.Int32
-	lastRanges []string
+	payload  []byte
+	disp     string
+	noRange  bool
+	cutAfter int // bytes to send before hanging up; 0 disables
+	cutsLeft atomic.Int32
+	reqCount atomic.Int32
+
+	mu     sync.Mutex
+	ranges []string // Range headers as received
+}
+
+func (h *rangedHandler) requestedRanges() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.ranges...)
 }
 
 func (h *rangedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.reqCount.Add(1)
+	h.mu.Lock()
+	h.ranges = append(h.ranges, r.Header.Get("Range"))
+	h.mu.Unlock()
 	if h.disp != "" {
 		w.Header().Set("Content-Disposition", h.disp)
 	}
@@ -114,8 +126,9 @@ func TestSegmentedDownloadMatchesSource(t *testing.T) {
 	dir := t.TempDir()
 	res := runDownload(t, srv.URL+"/big.bin", dir, 8)
 
-	if res.Segments != 8 {
-		t.Errorf("expected 8 segments, got %d", res.Segments)
+	// Idle connections may split ranges further, so 8 is the floor, not the count.
+	if res.Segments < 8 {
+		t.Errorf("expected at least 8 segments, got %d", res.Segments)
 	}
 	got, err := os.ReadFile(res.Path)
 	if err != nil {
@@ -225,9 +238,18 @@ func TestResumeFromSidecarSkipsFinishedBytes(t *testing.T) {
 	if sum(got) != sum(payload) {
 		t.Fatal("resumed file does not match source")
 	}
-	// probe + one segment. The finished segment must not be refetched.
-	if n := h.reqCount.Load() - before; n > 2 {
-		t.Errorf("expected at most 2 requests on resume, got %d", n)
+	// Connections may share the missing half between them, but none of them
+	// may ask for bytes from the half that was already on disk.
+	_ = before
+	for _, rg := range h.requestedRanges() {
+		if rg == "" || rg == "bytes=0-0" {
+			continue
+		}
+		var start int64
+		fmt.Sscanf(rg, "bytes=%d-", &start)
+		if start < half {
+			t.Errorf("resume refetched finished bytes: %s", rg)
+		}
 	}
 }
 
@@ -328,11 +350,11 @@ func TestFreshSegmentsCoverExactlyOnce(t *testing.T) {
 			if s.Start != next {
 				t.Fatalf("size %d: segment %d starts at %d, expected %d", size, i, s.Start, next)
 			}
-			if s.End < s.Start {
+			if s.End() < s.Start {
 				t.Fatalf("size %d: segment %d is empty", size, i)
 			}
-			total += s.End - s.Start + 1
-			next = s.End + 1
+			total += s.End() - s.Start + 1
+			next = s.End() + 1
 		}
 		if total != size {
 			t.Errorf("size %d: segments cover %d bytes", size, total)

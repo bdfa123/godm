@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -19,17 +20,29 @@ import (
 const (
 	defaultUA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 	readBufSize = 256 << 10
+
+	DefaultConnections = 8
+	// MaxConnections matches IDM's ceiling. Past this, hosts start refusing or
+	// throttling harder than the extra connections gain.
+	MaxConnections = 32
 )
 
 // Options is one download job.
 type Options struct {
-	URL         string
-	Headers     map[string]string
-	OutDir      string
-	Filename    string
+	URL      string
+	Headers  map[string]string
+	OutDir   string
+	Filename string
+
+	// Connections is how many connections the download may use at once.
 	Connections int
-	MinSplit    int64 // never split a file smaller than this
-	MaxRetries  int
+	// ConnLimit, when set, is read continuously so the connection count can be
+	// changed while the download runs. Connections is used when it is nil.
+	ConnLimit func() int
+	// MinSplit is the smallest piece worth its own connection. A range is only
+	// split while both halves would be at least this big.
+	MinSplit   int64
+	MaxRetries int
 
 	// Refresh resumes an interrupted download from a different URL, the way a
 	// download manager continues after the user fetches a fresh link. Saved
@@ -41,16 +54,24 @@ type Options struct {
 	OnProgress func(Progress)
 }
 
+func clampConnections(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > MaxConnections {
+		return MaxConnections
+	}
+	return n
+}
+
 func (o *Options) applyDefaults() {
 	if o.Connections <= 0 {
-		o.Connections = 8
+		o.Connections = DefaultConnections
 	}
-	if o.Connections > 32 {
-		o.Connections = 32
-	}
+	o.Connections = clampConnections(o.Connections)
 	if o.MinSplit <= 0 {
-		// Small enough that a 2 MiB file still gets real parallelism, large
-		// enough that per-connection setup does not dominate the transfer.
+		// Small enough that the last megabyte of a file is still shared out,
+		// large enough that opening a connection is not most of the work.
 		o.MinSplit = 512 << 10
 	}
 	if o.MaxRetries <= 0 {
@@ -89,19 +110,74 @@ func (s SegmentState) String() string {
 	return "waiting"
 }
 
-// Segment is one contiguous byte range owned by exactly one goroutine.
-// Its counters are atomic because the progress ticker reads them live.
+// Segment is one contiguous byte range. Ranges are not fixed: when a
+// connection frees up, the largest unfinished range is cut in half and the
+// back half becomes a new segment, so every connection stays busy to the end.
 type Segment struct {
 	Start int64
-	End   int64 // inclusive; -1 means "until the stream ends"
+	end   atomic.Int64 // inclusive; -1 means "until the stream ends"
 	done  atomic.Int64
 	state atomic.Int32
 	note  atomic.Value // string: why it is retrying or failed
+	eof   atomic.Bool  // a stream of unknown length has ended
+
+	// mu is held while a chunk is written and counted, so a split sees the
+	// exact offset and the worker never writes past a shortened end.
+	mu   sync.Mutex
+	busy bool // owned by a worker; guarded by task.segMu
+}
+
+func newSegment(start, end int64) *Segment {
+	s := &Segment{Start: start}
+	s.end.Store(end)
+	s.note.Store("")
+	return s
+}
+
+// End is the inclusive last byte, or -1 for a stream of unknown length.
+func (s *Segment) End() int64 { return s.end.Load() }
+
+func (s *Segment) complete() bool {
+	e := s.end.Load()
+	if e < 0 {
+		// No length to compare against: done once the server closed the stream.
+		return s.eof.Load()
+	}
+	return s.Start+s.done.Load() > e
+}
+
+func (s *Segment) remaining() int64 {
+	e := s.end.Load()
+	if e < 0 {
+		return math.MaxInt64
+	}
+	return e + 1 - s.Start - s.done.Load()
 }
 
 func (s *Segment) set(st SegmentState, note string) {
 	s.state.Store(int32(st))
 	s.note.Store(note)
+}
+
+// splitInHalf gives the back half of the unfinished part of s to a new
+// segment. Holding s.mu means its worker is between writes, so the offset is
+// exact and the worker will stop at the new end.
+func (s *Segment) splitInHalf(minPiece int64) *Segment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	end := s.end.Load()
+	if end < 0 {
+		return nil
+	}
+	cur := s.Start + s.done.Load()
+	rem := end - cur + 1
+	if rem < 2*minPiece {
+		return nil
+	}
+	mid := cur + rem/2
+	ns := newSegment(mid, end)
+	s.end.Store(mid - 1)
+	return ns
 }
 
 // SegmentView is a point-in-time copy of a Segment for display.
@@ -118,6 +194,7 @@ type Progress struct {
 	Received int64
 	Total    int64
 	Active   int // connections currently receiving bytes
+	Limit    int // connections allowed right now
 	Segments []SegmentView
 }
 
@@ -161,6 +238,9 @@ type RefreshMismatchError struct{ Reason string }
 
 func (e *RefreshMismatchError) Error() string { return "cannot resume from this link: " + e.Reason }
 
+// errYield stops a connection because the connection limit was lowered.
+var errYield = errors.New("connection released: the connection limit was lowered")
+
 // Download runs a job to completion, resuming from a sidecar state file if one
 // matches. It is safe to cancel through ctx; progress survives in the sidecar.
 func Download(ctx context.Context, o Options) (*Result, error) {
@@ -171,21 +251,37 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, classifyLinkError(err)
 	}
-
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return nil, err
 	}
-	target := filepath.Join(o.OutDir, pr.Filename)
 
-	segs, resumed, err := planSegments(target, pr, o)
-	if err != nil {
-		return nil, err
+	var plan *targetPlan
+	var f *os.File
+	// Retry the choice if another program grabs the name between our check
+	// and our exclusive create.
+	for attempt := 0; ; attempt++ {
+		plan, err = planTarget(pr, o)
+		if err != nil {
+			return nil, err
+		}
+		flags := os.O_WRONLY
+		switch {
+		case plan.resumed:
+		case plan.overwrite:
+			flags |= os.O_CREATE
+		default:
+			flags |= os.O_CREATE | os.O_EXCL
+		}
+		f, err = os.OpenFile(plan.path, flags, 0o644)
+		if err == nil {
+			break
+		}
+		plan.release()
+		if !errors.Is(err, os.ErrExist) || attempt >= 3 {
+			return nil, err
+		}
 	}
-
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return nil, err
-	}
+	defer plan.release()
 	defer f.Close()
 
 	// Preallocate so parallel WriteAt calls never race to extend the file, and
@@ -195,21 +291,24 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	// support the probe's Content-Length is just a hint from a *different*
 	// request: dynamic endpoints happily return a different body length each
 	// time, and preallocating to the stale number leaves the file zero-padded.
-	if pr.Size > 0 && pr.Resumable && !resumed {
+	if pr.Size > 0 && pr.Resumable && !plan.resumed {
 		if err := f.Truncate(pr.Size); err != nil {
 			return nil, fmt.Errorf("preallocate %d bytes: %w", pr.Size, err)
 		}
 	}
 
-	t := &task{opts: o, probe: pr, segs: segs, file: f, target: target, client: client}
-	for _, s := range segs {
+	t := &task{
+		opts: o, probe: pr, segs: plan.segs, file: f, target: plan.path, client: client,
+		changed: make(chan struct{}, 1),
+	}
+	for _, s := range plan.segs {
 		t.received.Add(s.done.Load())
 	}
 
 	if o.OnStart != nil {
 		o.OnStart(StartInfo{
-			Path: target, Size: pr.Size, Resumable: pr.Resumable,
-			Resumed: resumed, Segments: len(segs),
+			Path: plan.path, Size: pr.Size, Resumable: pr.Resumable,
+			Resumed: plan.resumed, Segments: len(plan.segs),
 		})
 	}
 
@@ -219,15 +318,152 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 		return nil, classifyLinkError(err)
 	}
 
-	clearState(target)
+	clearState(plan.path)
+	t.segMu.Lock()
+	nsegs := len(t.segs)
+	t.segMu.Unlock()
 	return &Result{
-		Path:      target,
+		Path:      plan.path,
 		Size:      t.received.Load(),
 		Elapsed:   time.Since(start),
-		Segments:  len(segs),
+		Segments:  nsegs,
 		Resumable: pr.Resumable,
-		Resumed:   resumed,
+		Resumed:   plan.resumed,
 	}, nil
+}
+
+// ---------- choosing the file on disk ----------
+
+type targetPlan struct {
+	path      string
+	segs      []*Segment
+	resumed   bool
+	overwrite bool // our own earlier, unresumable attempt at this same link
+	release   func()
+}
+
+// planTarget decides which file this download writes to. It continues a
+// matching partial download when there is one. Otherwise it never touches a
+// file it does not own: a finished file, or another link's partial file, gets
+// a numbered sibling name instead, the way browsers do.
+func planTarget(pr *ProbeResult, o Options) (*targetPlan, error) {
+	base := filepath.Join(o.OutDir, pr.Filename)
+
+	st, hasState := loadState(base)
+	if hasState && st.reusable(pr, o.URL, o.Refresh) {
+		if fi, err := os.Stat(base); err == nil && fi.Size() == st.Size {
+			if release, ok := reserveTarget(base); ok {
+				return &targetPlan{path: base, segs: restoreSegments(st), resumed: true, release: release}, nil
+			}
+			if o.Refresh {
+				return nil, fmt.Errorf("%s is already being downloaded by another task", filepath.Base(base))
+			}
+		}
+	}
+
+	if o.Refresh {
+		switch {
+		case !hasState:
+			return nil, &RefreshMismatchError{Reason: "no saved progress was found for " + filepath.Base(base)}
+		case !pr.Resumable:
+			return nil, &RefreshMismatchError{Reason: "the new link does not support resuming"}
+		default:
+			return nil, &RefreshMismatchError{Reason: fmt.Sprintf(
+				"it points to a different file (%d bytes, the partial download is %d)", pr.Size, st.Size)}
+		}
+	}
+
+	// Our own earlier attempt at this very link that can no longer be resumed
+	// (the file changed on the server, or it never supported ranges): start it
+	// over in place rather than leaving a dead partial file behind.
+	if hasState && st.URL == o.URL {
+		if release, ok := reserveTarget(base); ok {
+			clearState(base)
+			return &targetPlan{path: base, segs: freshSegments(pr, o), overwrite: true, release: release}, nil
+		}
+	}
+
+	for n := 0; n < 10000; n++ {
+		cand := numberedName(base, n)
+		if pathExists(cand) || pathExists(statePath(cand)) {
+			continue
+		}
+		if release, ok := reserveTarget(cand); ok {
+			return &targetPlan{path: cand, segs: freshSegments(pr, o), release: release}, nil
+		}
+	}
+	return nil, fmt.Errorf("no free file name for %s", pr.Filename)
+}
+
+func restoreSegments(st *State) []*Segment {
+	segs := make([]*Segment, len(st.Segments))
+	for i, s := range st.Segments {
+		seg := newSegment(s.Start, s.End)
+		seg.done.Store(s.Done)
+		if seg.complete() {
+			seg.set(SegDone, "")
+		}
+		segs[i] = seg
+	}
+	return segs
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// numberedName returns "name (n).ext", keeping double extensions like .tar.gz
+// together as browsers do.
+func numberedName(path string, n int) string {
+	if n == 0 {
+		return path
+	}
+	dir, name := filepath.Split(path)
+	stem, ext := splitExt(name)
+	return filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, n, ext))
+}
+
+func splitExt(name string) (string, string) {
+	lower := strings.ToLower(name)
+	for _, double := range []string{".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"} {
+		if strings.HasSuffix(lower, double) && len(name) > len(double) {
+			return name[:len(name)-len(double)], name[len(name)-len(double):]
+		}
+	}
+	ext := filepath.Ext(name)
+	if ext == name { // ".bashrc"
+		return name, ""
+	}
+	return strings.TrimSuffix(name, ext), ext
+}
+
+// Files this process is writing right now. Checking the disk alone is not
+// enough: two downloads of the same name can both see it free before either
+// creates it.
+var (
+	targetsMu sync.Mutex
+	targets   = map[string]bool{}
+)
+
+func reserveTarget(path string) (release func(), ok bool) {
+	// Windows file names are case-insensitive; on other systems this only
+	// costs an occasional unnecessary "(1)".
+	key := strings.ToLower(filepath.Clean(path))
+	targetsMu.Lock()
+	defer targetsMu.Unlock()
+	if targets[key] {
+		return nil, false
+	}
+	targets[key] = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			targetsMu.Lock()
+			delete(targets, key)
+			targetsMu.Unlock()
+		})
+	}, true
 }
 
 // classifyLinkError turns "this URL no longer works" into LinkExpiredError so
@@ -276,73 +512,90 @@ func probeWithRetry(ctx context.Context, c *http.Client, o Options) (*ProbeResul
 	return nil, fmt.Errorf("probe gave up after %d retries: %w", o.MaxRetries, last)
 }
 
+// ---------- the transfer ----------
+
 type task struct {
 	opts     Options
 	probe    *ProbeResult
-	segs     []*Segment
 	file     *os.File
 	target   string
 	client   *http.Client
 	received atomic.Int64
 	writeMu  sync.Mutex  // only used when the length is unknown
 	linkDead atomic.Bool // a segment found the link expired; make no new requests
+
+	segMu   sync.Mutex
+	segs    []*Segment // sorted by Start, covering the whole file
+	workers atomic.Int32
+	changed chan struct{} // nudges the supervisor when a worker exits
 }
 
-func (t *task) snapshot() Progress {
-	p := Progress{
-		Received: t.received.Load(),
-		Total:    t.probe.Size,
-		Segments: make([]SegmentView, len(t.segs)),
+// limit is how many connections may run right now.
+func (t *task) limit() int {
+	if !t.probe.Resumable || t.probe.Size <= 0 {
+		return 1
 	}
-	for i, s := range t.segs {
+	n := t.opts.Connections
+	if t.opts.ConnLimit != nil {
+		n = t.opts.ConnLimit()
+	}
+	return clampConnections(n)
+}
+
+// snapshot copies the segments for display, merging finished neighbours so a
+// file split dozens of times still reads as a few solid runs.
+func (t *task) snapshot() Progress {
+	t.segMu.Lock()
+	segs := append([]*Segment(nil), t.segs...)
+	t.segMu.Unlock()
+
+	p := Progress{Received: t.received.Load(), Total: t.probe.Size, Limit: t.limit()}
+	for _, s := range segs {
 		st := SegmentState(s.state.Load())
-		note, _ := s.note.Load().(string)
-		p.Segments[i] = SegmentView{
-			Start: s.Start, End: s.End, Done: s.done.Load(),
-			State: st.String(), Note: note,
+		if s.complete() {
+			st = SegDone
 		}
+		note, _ := s.note.Load().(string)
+		v := SegmentView{Start: s.Start, End: s.end.Load(), Done: s.done.Load(), State: st.String(), Note: note}
 		if st == SegActive {
 			p.Active++
 		}
+		if n := len(p.Segments); n > 0 && v.State == "done" && p.Segments[n-1].State == "done" {
+			p.Segments[n-1].End = v.End
+			p.Segments[n-1].Done += v.Done
+			continue
+		}
+		p.Segments = append(p.Segments, v)
 	}
 	return p
 }
 
+// run keeps up to limit() connections working until every byte is on disk.
 func (t *task) run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	stop := make(chan struct{})
-	var tickWG sync.WaitGroup
-	tickWG.Add(1)
-	go func() {
-		defer tickWG.Done()
-		tick := time.NewTicker(400 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-tick.C:
-				if t.opts.OnProgress != nil {
-					t.opts.OnProgress(t.snapshot())
-				}
-				t.persist()
-			}
-		}
-	}()
-
-	var wg sync.WaitGroup
-	errs := make([]error, len(t.segs))
-	for i := range t.segs {
+	var (
+		wg    sync.WaitGroup
+		errMu sync.Mutex
+		errs  []error
+	)
+	spawn := func() {
+		t.workers.Add(1)
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			err := t.runSegment(ctx, i)
+			err := t.worker(ctx)
+			select {
+			case t.changed <- struct{}{}:
+			default:
+			}
 			if err == nil {
 				return
 			}
-			errs[i] = err
+			errMu.Lock()
+			errs = append(errs, err)
+			errMu.Unlock()
 			var expired *LinkExpiredError
 			if errors.As(classifyLinkError(err), &expired) {
 				// The link is dead, but connections already holding a response
@@ -353,12 +606,33 @@ func (t *task) run(ctx context.Context) error {
 				return
 			}
 			cancel() // anything else makes the file unusable; stop the rest
-		}(i)
+		}()
+	}
+
+	for i := 0; i < t.limit(); i++ {
+		spawn()
+	}
+
+	tick := time.NewTicker(400 * time.Millisecond)
+	defer tick.Stop()
+	for t.workers.Load() > 0 {
+		select {
+		case <-tick.C:
+			if t.opts.OnProgress != nil {
+				t.opts.OnProgress(t.snapshot())
+			}
+			t.persist()
+		case <-t.changed:
+		}
+		// Top up to the limit: it may have been raised, or a connection just
+		// finished and there is still a range big enough to share.
+		if ctx.Err() == nil && !t.linkDead.Load() {
+			for int(t.workers.Load()) < t.limit() && t.hasClaimableWork() {
+				spawn()
+			}
+		}
 	}
 	wg.Wait()
-
-	close(stop)
-	tickWG.Wait()
 
 	// Report once more whatever happened, so a failed connection's reason is
 	// visible rather than lost between two ticks.
@@ -368,6 +642,10 @@ func (t *task) run(ctx context.Context) error {
 	if err := firstRealError(errs); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	got := t.received.Load()
 	if t.probe.Resumable {
 		// Here the length came from Content-Range on the same object, so a
@@ -380,17 +658,131 @@ func (t *task) run(ctx context.Context) error {
 		// from an earlier, longer attempt at the same path.
 		return fmt.Errorf("trim to %d bytes: %w", got, err)
 	}
-	if err := t.file.Sync(); err != nil {
-		return err
+	return t.file.Sync()
+}
+
+// worker takes pieces of the file one after another until there is nothing
+// left it may do.
+func (t *task) worker(ctx context.Context) error {
+	yielded := false
+	defer func() {
+		if !yielded {
+			t.workers.Add(-1)
+		}
+	}()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if t.linkDead.Load() {
+			return nil
+		}
+		if t.yieldSlot() {
+			yielded = true
+			return nil
+		}
+		seg := t.claim()
+		if seg == nil {
+			return nil
+		}
+		err := t.runSegment(ctx, seg)
+		t.unclaim(seg)
+		if errors.Is(err, errYield) {
+			yielded = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+}
+
+// yieldSlot gives up this worker's connection if the limit was lowered below
+// the number running. The compare-and-swap stops exactly as many as needed.
+func (t *task) yieldSlot() bool {
+	for {
+		w := t.workers.Load()
+		if int(w) <= t.limit() {
+			return false
+		}
+		if t.workers.CompareAndSwap(w, w-1) {
+			return true
+		}
+	}
+}
+
+// claim hands a worker its next piece: an unowned unfinished segment if there
+// is one, otherwise the back half of the largest range another connection is
+// still working through. The second case is what stops a single slow
+// connection from being left alone with the end of the file.
+func (t *task) claim() *Segment {
+	t.segMu.Lock()
+	defer t.segMu.Unlock()
+	for _, s := range t.segs {
+		if !s.busy && !s.complete() {
+			s.busy = true
+			return s
+		}
+	}
+	big, ok := t.splitCandidateLocked()
+	if !ok {
+		return nil
+	}
+	ns := big.splitInHalf(t.opts.MinSplit)
+	if ns == nil {
+		return nil
+	}
+	ns.busy = true
+	for i, s := range t.segs {
+		if s == big {
+			t.segs = append(t.segs, nil)
+			copy(t.segs[i+2:], t.segs[i+1:])
+			t.segs[i+1] = ns
+			break
+		}
+	}
+	return ns
+}
+
+func (t *task) unclaim(s *Segment) {
+	t.segMu.Lock()
+	s.busy = false
+	t.segMu.Unlock()
+}
+
+func (t *task) hasClaimableWork() bool {
+	t.segMu.Lock()
+	defer t.segMu.Unlock()
+	for _, s := range t.segs {
+		if !s.busy && !s.complete() {
+			return true
+		}
+	}
+	_, ok := t.splitCandidateLocked()
+	return ok
+}
+
+func (t *task) splitCandidateLocked() (*Segment, bool) {
+	if !t.probe.Resumable || t.probe.Size <= 0 {
+		return nil, false
+	}
+	var best *Segment
+	var bestRem int64
+	for _, s := range t.segs {
+		if !s.busy || s.complete() {
+			continue
+		}
+		if r := s.remaining(); r > bestRem {
+			best, bestRem = s, r
+		}
+	}
+	return best, best != nil && bestRem >= 2*t.opts.MinSplit
 }
 
 // runSegment retries one range with exponential backoff. Each attempt re-reads
 // seg.done, so a retry resumes mid-segment instead of refetching bytes already
 // on disk.
-func (t *task) runSegment(ctx context.Context, i int) error {
-	seg := t.segs[i]
+func (t *task) runSegment(ctx context.Context, seg *Segment) error {
 	var last error
 	for attempt := 0; attempt <= t.opts.MaxRetries; attempt++ {
 		if attempt > 0 {
@@ -408,29 +800,35 @@ func (t *task) runSegment(ctx context.Context, i int) error {
 			case <-time.After(wait):
 			}
 		}
-		err := t.trySegment(ctx, i)
-		if err == nil {
-			seg.set(SegDone, "")
+		err := t.trySegment(ctx, seg)
+		switch {
+		case err == nil:
+			if seg.complete() {
+				seg.set(SegDone, "")
+			} else {
+				seg.set(SegWaiting, "")
+			}
 			return nil
-		}
-		if ctx.Err() != nil {
+		case errors.Is(err, errYield):
+			seg.set(SegWaiting, "")
+			return err
+		case ctx.Err() != nil:
 			seg.set(SegWaiting, "")
 			return ctx.Err()
-		}
-		if !retryable(err) {
+		case !retryable(err):
 			seg.set(SegFailed, shortErr(err))
 			return err
 		}
 		last = err
 	}
 	seg.set(SegFailed, shortErr(last))
-	return fmt.Errorf("segment %d gave up after %d retries: %w", i, t.opts.MaxRetries, last)
+	return fmt.Errorf("segment at byte %d gave up after %d retries: %w", seg.Start, t.opts.MaxRetries, last)
 }
 
-func (t *task) trySegment(ctx context.Context, i int) error {
-	seg := t.segs[i]
+func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	offset := seg.Start + seg.done.Load()
-	if seg.End >= 0 && offset > seg.End {
+	end := seg.end.Load()
+	if end >= 0 && offset > end {
 		return nil // already complete
 	}
 	if t.linkDead.Load() {
@@ -446,7 +844,7 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 
 	ranged := t.probe.Resumable
 	if ranged {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, seg.End))
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
 	} else if offset > 0 {
 		// Server never supported Range, so a mid-stream retry cannot resume.
 		return fmt.Errorf("connection lost at byte %d and server does not support resume", offset)
@@ -458,28 +856,25 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 	}
 	defer resp.Body.Close()
 
-	if err := t.checkResponse(resp, ranged, offset, seg.End); err != nil {
+	if err := t.checkResponse(resp, ranged); err != nil {
 		return err
 	}
 	seg.set(SegActive, "")
 
 	buf := make([]byte, readBufSize)
 	for {
+		if t.yieldSlot() {
+			return errYield
+		}
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
-			if seg.End >= 0 && offset+int64(n) > seg.End+1 {
-				n = int(seg.End + 1 - offset) // server overshot the requested range
+			reached, werr := t.store(seg, buf[:n], &offset)
+			if werr != nil {
+				return werr
 			}
-			if n > 0 {
-				wn, werr := t.writeAt(buf[:n], offset)
-				offset += int64(wn)
-				seg.done.Add(int64(wn))
-				t.received.Add(int64(wn))
-				if werr != nil {
-					return werr
-				}
-			}
-			if seg.End >= 0 && offset > seg.End {
+			if reached {
+				// Also the normal exit when a split shortened this range: the
+				// rest of the response belongs to another connection now.
 				return nil
 			}
 		}
@@ -490,17 +885,48 @@ func (t *task) trySegment(ctx context.Context, i int) error {
 			return rerr
 		}
 	}
-	if seg.End >= 0 && offset <= seg.End {
-		return fmt.Errorf("short read: segment %d stopped at %d, wanted %d", i, offset, seg.End)
+	e := seg.end.Load()
+	if e < 0 {
+		seg.eof.Store(true)
+		return nil
+	}
+	if offset <= e {
+		return fmt.Errorf("short read: segment stopped at %d, wanted %d", offset, e)
 	}
 	return nil
+}
+
+// store writes one chunk into the segment's range. It runs under seg.mu, so a
+// concurrent split lands either before (the chunk is clipped to the new end)
+// or after (the split sees the exact offset). reached reports the range is
+// complete.
+func (t *task) store(seg *Segment, b []byte, offset *int64) (reached bool, err error) {
+	seg.mu.Lock()
+	defer seg.mu.Unlock()
+	end := seg.end.Load()
+	if end >= 0 {
+		if *offset > end {
+			return true, nil
+		}
+		if *offset+int64(len(b)) > end+1 {
+			b = b[:end+1-*offset] // server overshot, or the range was split
+		}
+	}
+	wn, err := t.writeAt(b, *offset)
+	*offset += int64(wn)
+	seg.done.Add(int64(wn))
+	t.received.Add(int64(wn))
+	if err != nil {
+		return false, err
+	}
+	return end >= 0 && *offset > end, nil
 }
 
 // checkResponse decides whether a segment response really carries our bytes.
 // The order matters: a throttling or overload response is worth waiting out
 // even when a CDN dresses it up as an HTML error page, but any other page in
 // place of a binary file is a login or "link expired" screen.
-func (t *task) checkResponse(resp *http.Response, ranged bool, offset, end int64) error {
+func (t *task) checkResponse(resp *http.Response, ranged bool) error {
 	if isRetryableStatus(resp.StatusCode) {
 		return &statusError{
 			code:       resp.StatusCode,
@@ -544,11 +970,24 @@ func (t *task) writeAt(b []byte, off int64) (int, error) {
 	return t.file.WriteAt(b, off)
 }
 
+// persist saves progress, merging finished neighbours so the sidecar stays
+// small however many times the ranges were split.
 func (t *task) persist() {
-	snap := make([]SegSnap, len(t.segs))
-	for i, s := range t.segs {
-		snap[i] = SegSnap{Start: s.Start, End: s.End, Done: s.done.Load()}
+	t.segMu.Lock()
+	var snap []SegSnap
+	for _, s := range t.segs {
+		ss := SegSnap{Start: s.Start, End: s.end.Load(), Done: s.done.Load()}
+		if n := len(snap); n > 0 && ss.End >= 0 {
+			prev := &snap[n-1]
+			if prev.End >= 0 && prev.Start+prev.Done > prev.End && ss.Start+ss.Done > ss.End {
+				prev.End, prev.Done = ss.End, prev.Done+ss.Done
+				continue
+			}
+		}
+		snap = append(snap, ss)
 	}
+	t.segMu.Unlock()
+
 	saveState(t.target, &State{
 		Version:  stateVersion,
 		URL:      t.opts.URL,
@@ -560,45 +999,9 @@ func (t *task) persist() {
 	})
 }
 
-// planSegments restores a matching sidecar or carves a fresh plan. With
-// Refresh set there is no fresh plan to fall back on: the caller asked to
-// continue a specific partial file.
-func planSegments(target string, pr *ProbeResult, o Options) ([]*Segment, bool, error) {
-	st, ok := loadState(target)
-	if ok && st.reusable(pr, o.URL, o.Refresh) {
-		if fi, err := os.Stat(target); err == nil && fi.Size() == st.Size {
-			segs := make([]*Segment, len(st.Segments))
-			for i, s := range st.Segments {
-				seg := &Segment{Start: s.Start, End: s.End}
-				seg.done.Store(s.Done)
-				if s.Start+s.Done > s.End {
-					seg.set(SegDone, "")
-				} else {
-					seg.set(SegWaiting, "")
-				}
-				segs[i] = seg
-			}
-			return segs, true, nil
-		}
-	}
-	if o.Refresh {
-		switch {
-		case !ok:
-			return nil, false, &RefreshMismatchError{Reason: "no saved progress was found for " + filepath.Base(target)}
-		case !pr.Resumable:
-			return nil, false, &RefreshMismatchError{Reason: "the new link does not support resuming"}
-		default:
-			return nil, false, &RefreshMismatchError{Reason: fmt.Sprintf(
-				"it points to a different file (%d bytes, the partial download is %d)", pr.Size, st.Size)}
-		}
-	}
-	clearState(target)
-	return freshSegments(pr, o), false, nil
-}
-
 func freshSegments(pr *ProbeResult, o Options) []*Segment {
 	if pr.Size <= 0 || !pr.Resumable {
-		return []*Segment{{Start: 0, End: -1}} // one stream, length unknown
+		return []*Segment{newSegment(0, -1)} // one stream, length unknown
 	}
 	n := o.Connections
 	if maxSplit := pr.Size / o.MinSplit; maxSplit < int64(n) {
@@ -615,7 +1018,7 @@ func freshSegments(pr *ProbeResult, o Options) []*Segment {
 		if i == n-1 {
 			end = pr.Size - 1
 		}
-		segs[i] = &Segment{Start: start, End: end}
+		segs[i] = newSegment(start, end)
 	}
 	return segs
 }
@@ -754,7 +1157,7 @@ func isRetryableStatus(code int) bool {
 }
 
 func retryable(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, errYield) {
 		return false
 	}
 	var le *LinkExpiredError
