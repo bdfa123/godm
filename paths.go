@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // configDir holds the token, the port file and the native-messaging manifest.
@@ -33,6 +34,34 @@ func defaultDownloadDir() string {
 		return "."
 	}
 	return filepath.Join(home, "Downloads")
+}
+
+// virtualizedBy returns the name of the app package whose private storage
+// received a file we just wrote under %LOCALAPPDATA%, or "" if the write went
+// where it appears to. Package identity APIs are no help here: children of a
+// packaged app are redirected without carrying the identity themselves, so the
+// only reliable signal is looking for the redirected copy.
+func virtualizedBy(realPath string) string {
+	local := os.Getenv("LOCALAPPDATA")
+	if local == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(local, realPath)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return ""
+	}
+	packages := filepath.Join(local, "Packages")
+	matches, _ := filepath.Glob(filepath.Join(packages, "*", "LocalCache", "Local", rel))
+	for _, m := range matches {
+		fi, err := os.Stat(m)
+		if err != nil || time.Since(fi.ModTime()) > 2*time.Minute {
+			continue // a stale copy from some earlier run, not this write
+		}
+		if inner, err := filepath.Rel(packages, m); err == nil {
+			return strings.SplitN(inner, string(filepath.Separator), 2)[0]
+		}
+	}
+	return ""
 }
 
 func tokenPath() string { return filepath.Join(configDir(), "token") }

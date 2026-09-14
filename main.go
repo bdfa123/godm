@@ -296,6 +296,18 @@ func cmdInstall(args []string) error {
 	for _, r := range registered {
 		fmt.Println("registered:", r)
 	}
+
+	// A terminal hosted by a packaged (MSIX) app has its AppData and HKCU
+	// writes silently redirected into that package's private storage. Every
+	// check run from the same terminal then looks perfect, while a browser
+	// started from the Start menu reports the host as not found.
+	if pkg := virtualizedBy(manifestPath); pkg != "" {
+		fmt.Fprintf(os.Stderr, "\nWARNING: this terminal runs inside the app package %q.\n"+
+			"Windows redirected the manifest and registry keys into that package's private\n"+
+			"storage, so browsers will report \"Specified native messaging host not found\".\n"+
+			"Run the same command again from a normal terminal (Start menu > Terminal).\n", pkg)
+		return fmt.Errorf("registration landed in virtualized storage that browsers cannot see")
+	}
 	fmt.Println("\nRestart the browser, then downloads will be handed to godm.")
 	return nil
 }
