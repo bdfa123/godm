@@ -116,6 +116,14 @@ function extensionOf(name) {
   return clean.slice(dot + 1).toLowerCase();
 }
 
+function pathOf(u) {
+  try {
+    return decodeURIComponent(new URL(u).pathname);
+  } catch (e) {
+    return "";
+  }
+}
+
 function shouldTakeOver(item, cfg) {
   if (item.byExtensionId && item.byExtensionId === chrome.runtime.id) return "own fallback";
 
@@ -146,7 +154,8 @@ function shouldTakeOver(item, cfg) {
   );
   const ext =
     extensionOf(item.filename) ||
-    extensionOf(decodeURIComponent(new URL(url).pathname));
+    extensionOf(pathOf(item.url)) ||
+    extensionOf(pathOf(url));
   if (!allowed.has(ext)) return "extension not in list (" + (ext || "none") + ")";
 
   return null; // take it
@@ -190,7 +199,21 @@ function bumpBadge(delta) {
   if (activeCount) setTimeout(() => bumpBadge(-1), 4000);
 }
 
-chrome.downloads.onCreated.addListener(async (item) => {
+// The decision is made in onDeterminingFilename rather than onCreated. When
+// onCreated fires the response headers have not arrived, so item.filename is
+// empty, and for anything behind a redirect to a signed CDN URL (GitHub
+// releases, S3, most file hosts) the URL path carries no extension either.
+// The real name only exists in Content-Disposition, which Chrome has parsed by
+// the time it asks listeners to confirm the filename.
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  // Answer straight away without overriding anything. Chrome holds the
+  // download until every listener has suggested, and we must not stall it
+  // while we talk to the native host.
+  suggest();
+  handleDownload(item);
+});
+
+async function handleDownload(item) {
   const cfg = await getConfig();
   if (!cfg.enabled) return;
 
@@ -236,12 +259,16 @@ chrome.downloads.onCreated.addListener(async (item) => {
     console.warn("godm: could not cancel browser download", e);
   }
 
+  // Hand over the URL the user actually clicked, not the redirect target.
+  // Signed CDN links expire within minutes; godm follows redirects itself, so
+  // starting from the original gets a fresh signature every time it resumes.
+  const jobUrl = /^https?:\/\//i.test(item.url || "") ? item.url : url;
   const resp = await callHost({
     type: "download",
-    url: url,
+    url: jobUrl,
     filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
     referrer: item.referrer || "",
-    cookie: await cookieHeader(url),
+    cookie: await cookieHeader(jobUrl),
     userAgent: navigator.userAgent,
     connections: cfg.connections
   });
@@ -270,7 +297,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
       "godm failed and Chrome refused the retry.\n" + url
     );
   }
-});
+}
 
 // ---------- right-click entry point ----------
 
