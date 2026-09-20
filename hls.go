@@ -32,7 +32,7 @@ import (
 // maxSegmentBytes caps a single segment read. A playlist is attacker-supplied
 // input; without a cap one entry pointing at an endless response would eat all
 // the memory we have.
-const maxSegmentBytes = 256 << 20
+var maxSegmentBytes int64 = 256 << 20
 
 // maxBufferedBytes bounds how far finished segments may pile up waiting for
 // their turn to be written. Segments are appended in playlist order, so a slow
@@ -466,6 +466,7 @@ type hlsRun struct {
 	initDone bool
 
 	fetching atomic.Int32 // connections with a segment request in flight
+	workers  atomic.Int32 // connections alive, however busy
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -675,19 +676,60 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 	}()
 
 	var wg sync.WaitGroup
-	for i := 0; i < r.limit(); i++ {
+	spawn := func() {
 		wg.Add(1)
+		r.workers.Add(1)
 		go func() {
 			defer wg.Done()
+			defer r.workers.Add(-1)
 			r.worker(ctx)
 		}()
 	}
+	for i := 0; i < r.limit(); i++ {
+		spawn()
+	}
+
+	// Reporting from the write loop alone is not enough: it waits for the next
+	// segment in playlist order, so one slow segment freezes the display for as
+	// long as it takes. The same tick tops up connections, because the claim
+	// window throttles downwards by itself but can never add anyone.
+	ticked := make(chan struct{})
+	go func() {
+		defer close(ticked)
+		t := time.NewTicker(400 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				r.report()
+				r.persist()
+				r.mu.Lock()
+				short := r.limit() - int(r.workers.Load())
+				work := r.next < len(r.media.Segments)
+				r.mu.Unlock()
+				for i := 0; work && i < short; i++ {
+					spawn()
+				}
+			}
+		}
+	}()
 
 	err = r.writeLoop(ctx, f)
 	cancel()
+	<-ticked // nothing spawns after this, so waiting on the group is safe
 	wg.Wait()
 
 	if err != nil {
+		if r.bytes == 0 {
+			// Nothing ever reached the file. Leaving an empty one behind would
+			// burn the name too: the next attempt would go to "clip (1).ts".
+			f.Close()
+			os.Remove(r.target)
+			clearState(r.target)
+			return err
+		}
 		r.persist()
 		return err
 	}
@@ -701,7 +743,6 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 // writeLoop appends segments in playlist order. Everything else exists to keep
 // this loop fed.
 func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
-	last := time.Now()
 	for {
 		r.mu.Lock()
 		for r.ready[r.want] == nil && r.failed == nil && ctx.Err() == nil {
@@ -719,13 +760,10 @@ func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
 		data := r.ready[r.want]
 		delete(r.ready, r.want)
 		r.held -= int64(len(data))
-		r.want++
-		done := r.want
 		r.cond.Broadcast() // a slot and its bytes just freed up
 		r.mu.Unlock()
 
 		n, err := f.Write(data)
-		r.bytes += int64(n)
 		if err != nil {
 			r.mu.Lock()
 			if r.failed == nil {
@@ -735,14 +773,19 @@ func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
 			r.mu.Unlock()
 			return err
 		}
+
+		// The number of segments written and the length that goes with it move
+		// together under one lock. A sidecar that caught one without the other
+		// would resume at the wrong offset and drop a segment from the middle.
+		r.mu.Lock()
+		r.want++
+		r.bytes += int64(n)
+		done := r.want
+		r.mu.Unlock()
+
 		if done >= len(r.media.Segments) {
 			r.report()
 			return nil
-		}
-		if time.Since(last) >= 400*time.Millisecond {
-			last = time.Now()
-			r.persist()
-			r.report()
 		}
 	}
 }
@@ -903,13 +946,19 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
 		}
 	}
-	limit := int64(maxSegmentBytes)
+	limit := maxSegmentBytes
 	if length > 0 && length < limit {
 		limit = length
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	// Read one byte past the cap: io.LimitReader stops silently at the limit,
+	// and a segment quietly cut short produces a file of the right shape that
+	// plays wrong.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("response is too large (over %d bytes)", limit)
 	}
 	if length > 0 && int64(len(data)) != length {
 		return nil, fmt.Errorf("byte range asked for %d bytes, got %d", length, len(data))
@@ -957,7 +1006,7 @@ func decryptAES128(data, key, iv []byte) ([]byte, error) {
 
 func (r *hlsRun) persist() {
 	r.mu.Lock()
-	done := r.want
+	done, written := r.want, r.bytes
 	r.mu.Unlock()
 	saveHLSState(r.target, &hlsState{
 		Version:  stateVersion,
@@ -966,7 +1015,7 @@ func (r *hlsRun) persist() {
 		Variant:  r.variant,
 		Total:    len(r.media.Segments),
 		Next:     done,
-		Written:  r.bytes,
+		Written:  written,
 		InitDone: r.initDone,
 	})
 }
@@ -976,17 +1025,17 @@ func (r *hlsRun) report() {
 		return
 	}
 	r.mu.Lock()
-	done := r.want
+	done, written := r.want, r.bytes
 	r.mu.Unlock()
 	total := len(r.media.Segments)
-	est := r.bytes
+	est := written
 	if done > 0 && done < total {
-		est = r.bytes / int64(done) * int64(total)
+		est = written / int64(done) * int64(total)
 	}
 	r.opts.OnProgress(HLSProgress{
 		Segments:      done,
 		TotalSegments: total,
-		Bytes:         r.bytes,
+		Bytes:         written,
 		Estimate:      est,
 		Duration:      r.media.TotalDuration,
 		Active:        int(r.fetching.Load()),

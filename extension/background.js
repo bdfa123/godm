@@ -75,8 +75,10 @@ async function setHostState(ok, error) {
   await chrome.storage.local.set({
     lastPing: { ok: st.ok, error: st.error, at: new Date().toISOString() }
   });
-  chrome.action.setBadgeBackgroundColor({ color: ok ? "#2f6df6" : "#d64545" });
-  chrome.action.setBadgeText({ text: ok ? "" : "!" });
+  // Painting the badge here directly used to wipe the count of videos found on
+  // the page, because the popup asks for the task list every second and every
+  // answer came through this function.
+  paintBadge();
   chrome.action.setTitle({
     title: ok ? "godm" : "godm - native host unreachable, downloads left to the browser"
   });
@@ -194,10 +196,17 @@ function bumpBadge(delta) {
   if (activeCount) setTimeout(() => bumpBadge(-1), 4000);
 }
 
-// One badge, two things worth counting. A download just handed over is the
-// louder news, so it wins while it is showing; otherwise the badge says how
-// many videos were spotted on the tab in front.
+// The one place the badge is painted. Three things want to say something on
+// it, so they are ranked here rather than each writing over the others: a dead
+// native host is a problem, a download just handed over is news, and otherwise
+// it says how many videos were spotted on the tab in front.
 async function paintBadge() {
+  const host = await getHostState();
+  if (!host.ok) {
+    chrome.action.setBadgeBackgroundColor({ color: "#d64545" });
+    chrome.action.setBadgeText({ text: "!" });
+    return;
+  }
   if (activeCount > 0) {
     chrome.action.setBadgeBackgroundColor({ color: "#2f6df6" });
     chrome.action.setBadgeText({ text: String(activeCount) });

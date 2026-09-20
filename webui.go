@@ -382,16 +382,32 @@ function queuePosition(t) {
   return 0;
 }
 
+// A segment stream has no real total size until the last segment lands: what
+// is shown as the size is a projection that moves as the download runs. The
+// share of segments written is the number that only goes one way.
+function progressOf(t) {
+  if (t.kind === "hls" && t.segments_total > 0) {
+    return Math.min(100, t.segments_done / t.segments_total * 100);
+  }
+  return t.size > 0 ? Math.min(100, t.received / t.size * 100) : 0;
+}
+
 function metaLine(t) {
   var bits = [];
   var hasSize = t.size > 0;
-  var pct = hasSize ? Math.min(100, t.received / t.size * 100) : 0;
+  var pct = progressOf(t);
   switch (t.state) {
     case "running":
-      bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
+      if (t.kind === "hls") {
+        bits.push("<b>" + t.segments_done + "</b> / " + t.segments_total + " segments · " + pct.toFixed(1) + "%");
+        bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " of about " + human(t.size) : ""));
+      } else {
+        bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
+      }
       bits.push("<b>" + human(t.speed) + "/s</b>");
       if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
       if (t.resumable) bits.push("<b>" + t.active + "</b> of " + t.conns + " connections active");
+      if (t.quality) bits.push(esc(t.quality));
       else if (t.size !== -1) bits.push("single connection · server cannot resume");
       break;
     case "queued":
@@ -441,7 +457,7 @@ function banner(t) {
 function card(t) {
   var name = nameOf(t), ext = extOf(name), open = !!S.open[t.id];
   var hasSize = t.size > 0;
-  var pct = t.state === "done" ? 100 : (hasSize ? Math.min(100, t.received / t.size * 100) : 0);
+  var pct = t.state === "done" ? 100 : progressOf(t);
   var acts = [];
   if (t.state === "running" || t.state === "queued") acts.push(["pause", "Pause"]);
   if (t.state === "paused") acts.push(["resume", "Resume"]);

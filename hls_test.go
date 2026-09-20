@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -28,10 +29,12 @@ type hlsServer struct {
 	key  []byte // nil leaves the segments in the clear
 	live bool   // omit EXT-X-ENDLIST
 
-	mu     sync.Mutex
-	hits   map[string]int
-	failAt map[int]int           // segment index -> status code to answer with
-	delay  map[int]time.Duration // segment index -> how long to stall
+	mu       sync.Mutex
+	hits     map[string]int
+	failAt   map[int]int           // segment index -> status code to answer with
+	delay    map[int]time.Duration // segment index -> how long to stall
+	inFlight int
+	peak     int // most segment requests ever open at once
 }
 
 func newHLSServer(t *testing.T, segs [][]byte) *hlsServer {
@@ -45,6 +48,12 @@ func newHLSServer(t *testing.T, segs [][]byte) *hlsServer {
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
 	return s
+}
+
+func (s *hlsServer) peakConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
 }
 
 func (s *hlsServer) hitCount(path string) int {
@@ -78,7 +87,16 @@ func (s *hlsServer) serve(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		code, bad := fail[i]
 		d := delay[i]
+		s.inFlight++
+		if s.inFlight > s.peak {
+			s.peak = s.inFlight
+		}
 		s.mu.Unlock()
+		defer func() {
+			s.mu.Lock()
+			s.inFlight--
+			s.mu.Unlock()
+		}()
 		if d > 0 {
 			time.Sleep(d)
 		}
@@ -591,5 +609,116 @@ func TestInspectReportsDRMAndLiveBeforeATaskIsCreated(t *testing.T) {
 				t.Errorf("live: err = %v, want a LiveStreamError", err)
 			}
 		}
+	}
+}
+
+// ---------- bugs found while reading it back ----------
+
+func TestAnOversizedResponseFailsRatherThanTruncating(t *testing.T) {
+	segs := makeSegments(2)
+	s := newHLSServer(t, segs)
+	restore := maxSegmentBytes
+	maxSegmentBytes = 500 // the first segment is 1000 bytes
+	defer func() { maxSegmentBytes = restore }()
+
+	_, err := DownloadHLS(context.Background(), HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: t.TempDir(), Connections: 1, MaxRetries: 1,
+	})
+	if err == nil {
+		t.Fatal("a response past the cap was accepted; silently keeping the first N bytes " +
+			"produces a file that looks fine and plays wrong")
+	}
+	if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("err = %v, want it to say the response was too large", err)
+	}
+}
+
+func TestAFailedStartLeavesNothingBehind(t *testing.T) {
+	segs := makeSegments(3)
+	s := newHLSServer(t, segs)
+	s.failAt[0] = http.StatusForbidden
+
+	dir := t.TempDir()
+	opts := HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip.ts",
+		Connections: 1, MaxRetries: 1,
+	}
+	if _, err := DownloadHLS(context.Background(), opts); err == nil {
+		t.Fatal("expected the download to fail")
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Errorf("an empty file was left behind: %v", names)
+	}
+
+	s.mu.Lock()
+	delete(s.failAt, 0)
+	s.mu.Unlock()
+
+	target, err := DownloadHLS(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(target) != "clip.ts" {
+		t.Errorf("retried into %s; a failed attempt that wrote nothing must not burn the name",
+			filepath.Base(target))
+	}
+}
+
+func TestRaisingTheConnectionCountAddsConnections(t *testing.T) {
+	segs := makeSegments(48)
+	s := newHLSServer(t, segs)
+	for i := range segs {
+		s.delay[i] = 60 * time.Millisecond // long enough to overlap
+	}
+	var limit atomic.Int32
+	limit.Store(2)
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		limit.Store(8)
+	}()
+
+	_, err := DownloadHLS(context.Background(), HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: t.TempDir(), Filename: "clip.ts",
+		Connections: 2, ConnLimit: func() int { return int(limit.Load()) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peak := s.peakConcurrency(); peak < 5 {
+		t.Errorf("peak concurrency was %d; the connection count was raised to 8 part way "+
+			"through and nothing picked it up", peak)
+	}
+}
+
+func TestProgressIsReportedWhileASegmentIsStillArriving(t *testing.T) {
+	segs := makeSegments(3)
+	s := newHLSServer(t, segs)
+	s.delay[0] = 1500 * time.Millisecond
+
+	var mu sync.Mutex
+	first := time.Duration(-1)
+	start := time.Now()
+	_, err := DownloadHLS(context.Background(), HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: t.TempDir(), Filename: "clip.ts", Connections: 2,
+		OnProgress: func(p HLSProgress) {
+			mu.Lock()
+			if first < 0 {
+				first = time.Since(start)
+			}
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if first < 0 || first > time.Second {
+		t.Errorf("the first progress report came after %v; while a slow segment is in flight "+
+			"the display freezes and the speed shown goes stale", first)
 	}
 }
