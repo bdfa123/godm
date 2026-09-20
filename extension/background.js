@@ -502,6 +502,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     listMedia().then(sendResponse);
     return true;
   }
+  if (msg && msg.type === "godm-config") {
+    daemonConfig().then(sendResponse);
+    return true;
+  }
   if (msg && msg.type === "godm-media-inspect") {
     inspectStream(msg).then(sendResponse);
     return true;
@@ -609,10 +613,17 @@ async function listMedia() {
   };
 }
 
+async function daemonConfig() {
+  const resp = await callHost({ type: "config" });
+  await setHostState(!!resp.ok, resp.error);
+  return resp;
+}
+
 async function inspectStream(msg) {
   const resp = await callHost({
     type: "inspect",
     url: msg.url,
+    kind: msg.kind || "",
     cookie: await cookieHeader(msg.url),
     referrer: msg.page || "",
     userAgent: navigator.userAgent
@@ -626,7 +637,7 @@ async function submitStream(msg) {
   const resp = await callHost({
     type: "download",
     url: msg.url,
-    kind: msg.kind === "hls" ? "hls" : "",
+    kind: msg.kind === "hls" || msg.kind === "yt-dlp" ? msg.kind : "",
     variant: typeof msg.variant === "number" ? msg.variant : -1,
     filename: msg.filename || "",
     cookie: await cookieHeader(msg.url),

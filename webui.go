@@ -408,6 +408,10 @@ function metaLine(t) {
       if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
       if (t.resumable) bits.push("<b>" + t.active + "</b> of " + t.conns + " connections active");
       if (t.quality) bits.push(esc(t.quality));
+      // A merged video arrives as two streams, so say which one is running or
+      // the bar looks like it started over for no reason.
+      if (t.stage === "video") bits.push("video track");
+      else if (t.stage === "audio") bits.push("audio track");
       else if (t.size !== -1) bits.push("single connection · server cannot resume");
       break;
     case "queued":

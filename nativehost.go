@@ -46,6 +46,9 @@ type nativeResponse struct {
 	Error  string      `json:"error,omitempty"`
 	Tasks  []TaskView  `json:"tasks,omitempty"`
 	Info   *StreamInfo `json:"info,omitempty"`
+	// Config lets the popup ask what the daemon can do — whether yt-dlp is
+	// installed, where downloads land — without holding the daemon token.
+	Config map[string]any `json:"config,omitempty"`
 	// UI carries the authenticated manager URL so the popup can open it
 	// without the extension ever storing the daemon token.
 	UI string `json:"ui,omitempty"`
@@ -119,6 +122,13 @@ func handleNative(req nativeRequest) nativeResponse {
 		}
 		log.Printf("accepted %s -> %s", req.URL, id)
 		return nativeResponse{OK: true, ID: id}
+
+	case "config":
+		cfg, err := c.config()
+		if err != nil {
+			return nativeResponse{Error: err.Error()}
+		}
+		return nativeResponse{OK: true, Config: cfg, UI: uiURL}
 
 	case "inspect":
 		info, err := c.inspect(req.job(req.URL, req.Filename, req.Cookie))

@@ -60,11 +60,14 @@ type TaskView struct {
 	// Kind is empty for an ordinary file. "hls" means a segmented stream,
 	// where progress is counted in segments because the final size is only
 	// ever an estimate until the last one lands.
-	Kind         string    `json:"kind,omitempty"`
-	Quality      string    `json:"quality,omitempty"`
-	SegDone      int       `json:"segments_done,omitempty"`
-	SegTotal     int       `json:"segments_total,omitempty"`
-	Duration     float64   `json:"duration,omitempty"`
+	Kind     string  `json:"kind,omitempty"`
+	Quality  string  `json:"quality,omitempty"`
+	SegDone  int     `json:"segments_done,omitempty"`
+	SegTotal int     `json:"segments_total,omitempty"`
+	Duration float64 `json:"duration,omitempty"`
+	// Stage says which half of a merged video is arriving, for the tools that
+	// fetch picture and sound separately and join them at the end.
+	Stage        string    `json:"stage,omitempty"`
 	AddedAt      time.Time `json:"added_at"`
 	StartedAt    time.Time `json:"started_at,omitempty"`
 	EndedAt      time.Time `json:"ended_at,omitempty"`
@@ -83,6 +86,13 @@ type jobRequest struct {
 	Kind string `json:"kind,omitempty"`
 	// Variant picks a quality from a master playlist; -1 takes the best.
 	Variant int `json:"variant,omitempty"`
+}
+
+// isYTDLPJob is true only when the caller asks for it by name. A site needing
+// yt-dlp cannot be told from its URL, and guessing would send ordinary links
+// off to an external program for no reason.
+func isYTDLPJob(req jobRequest) bool {
+	return strings.EqualFold(req.Kind, "yt-dlp")
 }
 
 // isHLSJob decides which engine runs the job.
@@ -140,6 +150,38 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 		t.view.Size = si.Size
 	}
 	t.view.Resumable = si.Resumable
+}
+
+func (t *managedTask) ytStart(gen int, si YTStart) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gen != gen || si.Title == "" {
+		return
+	}
+	if t.view.Path == "" {
+		t.view.Filename = si.Title
+	}
+}
+
+// ytProgress takes yt-dlp's own speed rather than working one out from the
+// byte count. A merged video arrives as two streams, so the count starts over
+// part way through, and anything derived from it would read as a large
+// negative at the join.
+func (t *managedTask) ytProgress(gen int, p YTProgress) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gen != gen {
+		return
+	}
+	t.view.Received = p.Downloaded
+	t.view.Size = p.Total
+	t.view.Speed = p.Speed
+	t.view.Stage = p.Stage
+	t.view.Kind = "yt-dlp"
+	// Neither a connection count nor a segment map means anything here: the
+	// external tool decides how it fetches.
+	t.view.Resumable = false
+	t.view.Active, t.view.Conns = 0, 0
 }
 
 func (t *managedTask) hlsStart(gen int, si HLSStart) {
@@ -415,7 +457,28 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 
 	var donePath string
 	var err error
-	if isHLSJob(req) {
+	switch {
+	case isYTDLPJob(req):
+		donePath, err = RunYTDLP(ctx, YTDLPOptions{
+			URL:     req.URL,
+			OutDir:  outDir,
+			Headers: req.Headers,
+			// For yt-dlp the variant is a picture height, not a position in a
+			// list of streams.
+			Format: ytdlpFormatFor(req.Variant),
+			OnStart: func(si YTStart) {
+				mt.ytStart(gen, si)
+				m.dirty.Store(true)
+			},
+			OnUpdate: func(p YTProgress) {
+				mt.ytProgress(gen, p)
+				m.dirty.Store(true)
+			},
+		})
+		if err != nil {
+			donePath = ""
+		}
+	case isHLSJob(req):
 		donePath, err = DownloadHLS(ctx, HLSOptions{
 			URL:         req.URL,
 			Headers:     req.Headers,
@@ -436,7 +499,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 		if err != nil {
 			donePath = ""
 		}
-	} else {
+	default:
 		var res *Result
 		res, err = Download(ctx, Options{
 			URL:         req.URL,
@@ -1194,7 +1257,13 @@ func (s *server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	info, err := InspectHLS(ctx, HLSOptions{URL: req.URL, Headers: req.Headers})
+	var info *StreamInfo
+	var err error
+	if isYTDLPJob(req) {
+		info, err = InspectYTDLP(ctx, YTDLPOptions{URL: req.URL, Headers: req.Headers})
+	} else {
+		info, err = InspectHLS(ctx, HLSOptions{URL: req.URL, Headers: req.Headers})
+	}
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -1305,6 +1374,7 @@ func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"limit":              s.mgr.Limit(),
 		"notifications":      s.mgr.Notifications(),
 		"can_browse_folders": canBrowseFolders,
+		"ytdlp":              YTDLPAvailable(),
 	})
 }
 

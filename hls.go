@@ -1050,6 +1050,7 @@ func (r *hlsRun) report() {
 // and which qualities it carries.
 type StreamInfo struct {
 	Kind     string        `json:"kind"`
+	Title    string        `json:"title,omitempty"`
 	Duration float64       `json:"duration,omitempty"`
 	Segments int           `json:"segments,omitempty"`
 	Variants []VariantView `json:"variants,omitempty"`

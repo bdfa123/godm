@@ -91,6 +91,14 @@ func (c *daemonClient) submitBatch(reqs []jobRequest) ([]string, []string, error
 	return out.IDs, out.Errors, nil
 }
 
+func (c *daemonClient) config() (map[string]any, error) {
+	var out map[string]any
+	if err := c.do(http.MethodGet, "/api/config", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *daemonClient) inspect(req jobRequest) (*StreamInfo, error) {
 	var out struct {
 		OK    bool        `json:"ok"`
