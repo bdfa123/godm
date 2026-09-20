@@ -497,3 +497,42 @@ func TestDownloadHLSReportsProgressBySegment(t *testing.T) {
 		t.Errorf("final byte count = %d, want %d", last.Bytes, len(joined(segs)))
 	}
 }
+
+// ---------- routing through the task manager ----------
+
+func TestManagerRoutesPlaylistsToTheHLSEngine(t *testing.T) {
+	segs := makeSegments(6)
+	s := newHLSServer(t, segs)
+	dir := t.TempDir()
+	m := NewManager(dir, 2)
+
+	id, err := m.Add(jobRequest{URL: s.URL + "/master.m3u8", Connections: 4, Variant: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the stream to finish", stateIs(m, id, StateDone))
+
+	v, ok := findTask(m, id)
+	if !ok {
+		t.Fatal("the task disappeared from the list")
+	}
+	if v.Kind != "hls" {
+		t.Errorf("kind = %q, want hls: a .m3u8 URL must not go to the byte-range engine", v.Kind)
+	}
+	if v.SegDone != 6 || v.SegTotal != 6 {
+		t.Errorf("segments = %d/%d, want 6/6", v.SegDone, v.SegTotal)
+	}
+	if v.Quality != "1080p · 5.2 Mbps" {
+		t.Errorf("quality = %q, want the best variant from the master playlist", v.Quality)
+	}
+	if v.Duration != 24 {
+		t.Errorf("duration = %v, want 24", v.Duration)
+	}
+	got, err := os.ReadFile(v.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, joined(segs)) {
+		t.Fatal("the saved file does not match the stream")
+	}
+}

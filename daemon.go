@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,24 +43,32 @@ const (
 
 // TaskView is what the UI and the extension see.
 type TaskView struct {
-	ID           string        `json:"id"`
-	URL          string        `json:"url"`
-	Referrer     string        `json:"referrer,omitempty"`
-	Filename     string        `json:"filename"`
-	Path         string        `json:"path"`
-	State        TaskState     `json:"state"`
-	Error        string        `json:"error,omitempty"`
-	Size         int64         `json:"size"`
-	Received     int64         `json:"received"`
-	Speed        int64         `json:"speed"`
-	Conns        int           `json:"conns"`
-	Active       int           `json:"active"`
-	Resumable    bool          `json:"resumable"`
-	Segments     []SegmentView `json:"segments,omitempty"`
-	AddedAt      time.Time     `json:"added_at"`
-	StartedAt    time.Time     `json:"started_at,omitempty"`
-	EndedAt      time.Time     `json:"ended_at,omitempty"`
-	RefreshUntil time.Time     `json:"refresh_until,omitempty"`
+	ID        string        `json:"id"`
+	URL       string        `json:"url"`
+	Referrer  string        `json:"referrer,omitempty"`
+	Filename  string        `json:"filename"`
+	Path      string        `json:"path"`
+	State     TaskState     `json:"state"`
+	Error     string        `json:"error,omitempty"`
+	Size      int64         `json:"size"`
+	Received  int64         `json:"received"`
+	Speed     int64         `json:"speed"`
+	Conns     int           `json:"conns"`
+	Active    int           `json:"active"`
+	Resumable bool          `json:"resumable"`
+	Segments  []SegmentView `json:"segments,omitempty"`
+	// Kind is empty for an ordinary file. "hls" means a segmented stream,
+	// where progress is counted in segments because the final size is only
+	// ever an estimate until the last one lands.
+	Kind         string    `json:"kind,omitempty"`
+	Quality      string    `json:"quality,omitempty"`
+	SegDone      int       `json:"segments_done,omitempty"`
+	SegTotal     int       `json:"segments_total,omitempty"`
+	Duration     float64   `json:"duration,omitempty"`
+	AddedAt      time.Time `json:"added_at"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+	EndedAt      time.Time `json:"ended_at,omitempty"`
+	RefreshUntil time.Time `json:"refresh_until,omitempty"`
 }
 
 type jobRequest struct {
@@ -69,6 +78,24 @@ type jobRequest struct {
 	Headers     map[string]string `json:"headers"`
 	Connections int               `json:"connections"`
 	OutDir      string            `json:"out_dir"`
+	// Kind lets the caller say outright that this is a stream playlist. When
+	// it is empty the URL decides, which covers links pasted by hand.
+	Kind string `json:"kind,omitempty"`
+	// Variant picks a quality from a master playlist; -1 takes the best.
+	Variant int `json:"variant,omitempty"`
+}
+
+// isHLSJob decides which engine runs the job.
+func isHLSJob(req jobRequest) bool {
+	if req.Kind != "" {
+		return strings.EqualFold(req.Kind, "hls")
+	}
+	u, err := url.Parse(req.URL)
+	if err != nil {
+		return false
+	}
+	p := strings.ToLower(u.Path)
+	return strings.HasSuffix(p, ".m3u8") || strings.HasSuffix(p, ".m3u")
 }
 
 type managedTask struct {
@@ -113,6 +140,42 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 		t.view.Size = si.Size
 	}
 	t.view.Resumable = si.Resumable
+}
+
+func (t *managedTask) hlsStart(gen int, si HLSStart) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gen != gen {
+		return
+	}
+	t.view.Path = si.Target
+	t.view.Filename = filepath.Base(si.Target)
+	t.view.Kind = "hls"
+	t.view.SegTotal = si.Segments
+	t.view.Duration = si.Duration
+	t.view.Resumable = true // a segment stream always picks up where it stopped
+	if si.Chosen >= 0 && si.Chosen < len(si.Variants) {
+		t.view.Quality = si.Variants[si.Chosen].Label()
+	}
+}
+
+// hlsProgress reuses the byte-range smoothing for speed, then adds the counts
+// that only a segment stream has.
+func (t *managedTask) hlsProgress(gen int, p HLSProgress) {
+	t.progress(gen, Progress{
+		Received: p.Bytes,
+		Total:    p.Estimate,
+		Active:   p.Active,
+		Limit:    p.Limit,
+	})
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.gen != gen {
+		return
+	}
+	t.view.SegDone = p.Segments
+	t.view.SegTotal = p.TotalSegments
+	t.view.Duration = p.Duration
 }
 
 // progress folds raw byte counts into an exponentially smoothed rate so the UI
@@ -350,30 +413,59 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 	mt.inFlight = true
 	mt.mu.Unlock()
 
-	res, err := Download(ctx, Options{
-		URL:         req.URL,
-		Headers:     req.Headers,
-		OutDir:      outDir,
-		Filename:    filename,
-		Connections: req.Connections,
-		ConnLimit:   func() int { return int(mt.connLimit.Load()) },
-		Refresh:     refresh,
-		OnStart: func(si StartInfo) {
-			mt.onStart(gen, si)
-			m.dirty.Store(true)
-		},
-		OnProgress: func(p Progress) {
-			mt.progress(gen, p)
-			m.dirty.Store(true)
-		},
-	})
+	var donePath string
+	var err error
+	if isHLSJob(req) {
+		donePath, err = DownloadHLS(ctx, HLSOptions{
+			URL:         req.URL,
+			Headers:     req.Headers,
+			OutDir:      outDir,
+			Filename:    filename,
+			Connections: req.Connections,
+			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
+			Variant:     req.Variant,
+			OnStart: func(si HLSStart) {
+				mt.hlsStart(gen, si)
+				m.dirty.Store(true)
+			},
+			OnProgress: func(p HLSProgress) {
+				mt.hlsProgress(gen, p)
+				m.dirty.Store(true)
+			},
+		})
+		if err != nil {
+			donePath = ""
+		}
+	} else {
+		var res *Result
+		res, err = Download(ctx, Options{
+			URL:         req.URL,
+			Headers:     req.Headers,
+			OutDir:      outDir,
+			Filename:    filename,
+			Connections: req.Connections,
+			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
+			Refresh:     refresh,
+			OnStart: func(si StartInfo) {
+				mt.onStart(gen, si)
+				m.dirty.Store(true)
+			},
+			OnProgress: func(p Progress) {
+				mt.progress(gen, p)
+				m.dirty.Store(true)
+			},
+		})
+		if err == nil {
+			donePath = res.Path
+		}
+	}
 	m.afterRun(mt)
 
 	var expired *LinkExpiredError
 	var mismatch *RefreshMismatchError
 	switch {
 	case err == nil:
-		m.finishRun(mt, gen, StateDone, "", res.Path)
+		m.finishRun(mt, gen, StateDone, "", donePath)
 	case ctx.Err() != nil:
 		m.finishRun(mt, gen, StatePaused, "", "")
 	case errors.As(err, &expired), errors.As(err, &mismatch):

@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -415,6 +416,8 @@ type HLSProgress struct {
 	Bytes         int64 // written so far
 	Estimate      int64 // projected final size, refined as segments land
 	Duration      float64
+	Active        int // connections currently fetching a segment
+	Limit         int // connections allowed right now
 }
 
 // hlsState is the sidecar for a segment download. Segments are appended in
@@ -461,6 +464,8 @@ type hlsRun struct {
 	// initDone records that EXT-X-MAP has been written. It is not implied by
 	// "no segments yet": a crash between the two would otherwise write it twice.
 	initDone bool
+
+	fetching atomic.Int32 // connections with a segment request in flight
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -763,7 +768,9 @@ func (r *hlsRun) worker(ctx context.Context) {
 		r.next++
 		r.mu.Unlock()
 
+		r.fetching.Add(1)
 		data, err := r.fetchSegment(ctx, &r.media.Segments[i])
+		r.fetching.Add(-1)
 
 		r.mu.Lock()
 		if err != nil {
@@ -982,5 +989,7 @@ func (r *hlsRun) report() {
 		Bytes:         r.bytes,
 		Estimate:      est,
 		Duration:      r.media.TotalDuration,
+		Active:        int(r.fetching.Load()),
+		Limit:         r.limit(),
 	})
 }
