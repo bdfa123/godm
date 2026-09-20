@@ -1,5 +1,9 @@
 "use strict";
 
+// The rules for spotting video live in their own file so they can be tested
+// without a browser.
+importScripts("sniff.js");
+
 const HOST_NAME = "com.godm.host";
 
 // How long a failed host check keeps takeover switched off, and how long a URL
@@ -114,14 +118,6 @@ function extensionOf(name) {
   const dot = clean.lastIndexOf(".");
   if (dot < 0 || dot === clean.length - 1) return "";
   return clean.slice(dot + 1).toLowerCase();
-}
-
-function pathOf(u) {
-  try {
-    return decodeURIComponent(new URL(u).pathname);
-  } catch (e) {
-    return "";
-  }
 }
 
 function shouldTakeOver(item, cfg) {
@@ -523,51 +519,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 const MEDIA_TTL_MS = 30 * 60 * 1000;
 const MEDIA_MAX_PER_TAB = 40;
-// Below this a lone media response is a preview clip, an ad bumper or a
-// notification sound rather than something worth a download manager.
-const MEDIA_MIN_BYTES = 1 << 20;
-
-const PLAYLIST_TYPE = /^(application\/(vnd\.apple\.mpegurl|x-mpegurl|mpegurl)|audio\/(x-)?mpegurl)$/i;
-const DASH_TYPE = /^application\/dash\+xml$/i;
-// Segments are media responses too. Without this, every .ts in a two-hour film
-// would be offered as its own download.
-const SEGMENT_PATH = /\.(ts|m4s|cmfv|cmfa|fmp4)$/i;
-const SEGMENT_TYPE = /^video\/(mp2t|iso\.segment)$/i;
-
-function headerMap(list) {
-  const h = {};
-  for (const item of list || []) h[String(item.name).toLowerCase()] = item.value;
-  return h;
-}
-
-function originOf(u) {
-  try {
-    return new URL(u).origin;
-  } catch (e) {
-    return "";
-  }
-}
-
-// streamGroup is the directory a playlist lives in. A master playlist and the
-// variant playlists it names almost always share one.
-function streamGroup(u) {
-  try {
-    const p = new URL(u);
-    return p.origin + p.pathname.replace(/[^/]*$/, "");
-  } catch (e) {
-    return u;
-  }
-}
-
-function classifyMedia(url, contentType, length) {
-  const path = pathOf(url);
-  if (/\.m3u8?$/i.test(path) || PLAYLIST_TYPE.test(contentType)) return "hls";
-  if (/\.mpd$/i.test(path) || DASH_TYPE.test(contentType)) return "dash";
-  if (SEGMENT_PATH.test(path) || SEGMENT_TYPE.test(contentType)) return "";
-  if (/^(video|audio)\//i.test(contentType) && length >= MEDIA_MIN_BYTES) return "file";
-  return "";
-}
-
 async function mediaFor(tabId) {
   const key = "media:" + tabId;
   const got = await chrome.storage.session.get(key);
@@ -604,33 +555,15 @@ async function noteMedia(d) {
 
   let added = false;
   await withMedia(d.tabId, async (list) => {
-    if (list.some((m) => m.url === d.url)) return null;
-    if (kind === "file") {
-      // A media response from a host that is already serving this tab a
-      // playlist is one of its segments, not a file of its own.
-      if (list.some((m) => m.kind !== "file" && m.origin === originOf(d.url))) return null;
-    } else if (list.some((m) => m.kind !== "file" && m.group === streamGroup(d.url))) {
-      // The master playlist is requested before the variants it names, and a
-      // player re-fetches the same playlist as it goes. First one wins, so a
-      // stream shows up as a single entry.
-      return null;
-    }
     let title = "";
     try {
       title = (await chrome.tabs.get(d.tabId)).title || "";
     } catch (e) {
       // The tab closed while we were looking at its traffic.
     }
-    list.push({
-      url: d.url,
-      kind: kind,
-      type: contentType,
-      size: length,
-      at: Date.now(),
-      group: streamGroup(d.url),
-      origin: originOf(d.url),
-      title: title
-    });
+    const item = mediaEntry(d.url, kind, contentType, length, title, Date.now());
+    if (!shouldRecord(list, item)) return null;
+    list.push(item);
     added = true;
     return list;
   });
