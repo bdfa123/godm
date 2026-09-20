@@ -993,3 +993,80 @@ func (r *hlsRun) report() {
 		Limit:         r.limit(),
 	})
 }
+
+// ---------- inspection ----------
+
+// StreamInfo is what a browser needs in order to offer a choice before
+// anything is downloaded: whether this really is a stream, how long it runs,
+// and which qualities it carries.
+type StreamInfo struct {
+	Kind     string        `json:"kind"`
+	Duration float64       `json:"duration,omitempty"`
+	Segments int           `json:"segments,omitempty"`
+	Variants []VariantView `json:"variants,omitempty"`
+	// Best is the variant a player on a fast link would settle on, or -1 when
+	// the playlist offers no choice.
+	Best int `json:"best"`
+}
+
+type VariantView struct {
+	Index      int    `json:"index"`
+	Label      string `json:"label"`
+	Height     int    `json:"height,omitempty"`
+	Bandwidth  int    `json:"bandwidth,omitempty"`
+	Resolution string `json:"resolution,omitempty"`
+}
+
+// InspectHLS reads a playlist without downloading it. A DRM-protected or live
+// stream reports its error here, so the user finds out before a task is
+// created rather than watching one fail.
+func InspectHLS(ctx context.Context, o HLSOptions) (*StreamInfo, error) {
+	if o.MaxRetries <= 0 {
+		o.MaxRetries = defaultRetries
+	}
+	client := newClient()
+	base, err := url.Parse(o.URL)
+	if err != nil {
+		return nil, fmt.Errorf("bad playlist URL: %w", err)
+	}
+	body, err := fetchPlaylist(ctx, client, o, o.URL)
+	if err != nil {
+		return nil, err
+	}
+	master, media, err := parsePlaylist(body, base)
+	if err != nil {
+		return nil, err
+	}
+
+	info := &StreamInfo{Kind: "hls", Best: -1}
+	if master != nil {
+		info.Best = master.best()
+		for i, v := range master.Variants {
+			info.Variants = append(info.Variants, VariantView{
+				Index:      i,
+				Label:      v.Label(),
+				Height:     v.Height(),
+				Bandwidth:  v.Bandwidth,
+				Resolution: v.Resolution,
+			})
+		}
+		// One more request buys the duration and segment count for the quality
+		// that will actually be downloaded, which is what the user wants to see.
+		chosen := master.Variants[info.Best]
+		if vb, err := url.Parse(chosen.URI); err == nil {
+			if body, err := fetchPlaylist(ctx, client, o, chosen.URI); err == nil {
+				if _, m2, err := parsePlaylist(body, vb); err == nil && m2 != nil {
+					media = m2
+				}
+			}
+		}
+	}
+	if media != nil {
+		info.Duration = media.TotalDuration
+		info.Segments = len(media.Segments)
+		if !media.Complete {
+			return nil, &LiveStreamError{}
+		}
+	}
+	return info, nil
+}

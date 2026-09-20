@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -88,6 +89,21 @@ func (c *daemonClient) submitBatch(reqs []jobRequest) ([]string, []string, error
 		return nil, nil, err
 	}
 	return out.IDs, out.Errors, nil
+}
+
+func (c *daemonClient) inspect(req jobRequest) (*StreamInfo, error) {
+	var out struct {
+		OK    bool        `json:"ok"`
+		Error string      `json:"error"`
+		Info  *StreamInfo `json:"info"`
+	}
+	if err := c.do(http.MethodPost, "/api/inspect", req, &out); err != nil {
+		return nil, err
+	}
+	if !out.OK {
+		return nil, errors.New(out.Error)
+	}
+	return out.Info, nil
 }
 
 func (c *daemonClient) tasks() ([]TaskView, error) {

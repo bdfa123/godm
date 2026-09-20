@@ -194,9 +194,28 @@ let activeCount = 0;
 
 function bumpBadge(delta) {
   activeCount = Math.max(0, activeCount + delta);
-  chrome.action.setBadgeBackgroundColor({ color: "#2f6df6" });
-  chrome.action.setBadgeText({ text: activeCount ? String(activeCount) : "" });
+  paintBadge();
   if (activeCount) setTimeout(() => bumpBadge(-1), 4000);
+}
+
+// One badge, two things worth counting. A download just handed over is the
+// louder news, so it wins while it is showing; otherwise the badge says how
+// many videos were spotted on the tab in front.
+async function paintBadge() {
+  if (activeCount > 0) {
+    chrome.action.setBadgeBackgroundColor({ color: "#2f6df6" });
+    chrome.action.setBadgeText({ text: String(activeCount) });
+    return;
+  }
+  let found = 0;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab) found = (await mediaFor(tab.id)).length;
+  } catch (e) {
+    // No window in focus, or the tab went away between the two calls.
+  }
+  chrome.action.setBadgeBackgroundColor({ color: "#1f9d55" });
+  chrome.action.setBadgeText({ text: found ? String(found) : "" });
 }
 
 // The decision is made in onDeterminingFilename rather than onCreated. When
@@ -474,6 +493,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     submitPicked(msg).then(sendResponse);
     return true;
   }
+  if (msg && msg.type === "godm-media") {
+    listMedia().then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-media-inspect") {
+    inspectStream(msg).then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-media-download") {
+    submitStream(msg).then(sendResponse);
+    return true;
+  }
   callHost(msg).then(async (resp) => {
     if (msg && (msg.type === "ping" || msg.type === "tasks")) {
       await setHostState(!!resp.ok, resp.error);
@@ -482,3 +513,186 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   });
   return true; // keep the channel open for the async reply
 });
+
+// ---------- media sniffing ----------
+//
+// A page that plays video always fetches either a playlist (HLS .m3u8, DASH
+// .mpd) or one long media response. Watching responses go by is enough to find
+// it: nothing is blocked, nothing is injected into the page, and a page that
+// plays nothing costs a regex per response.
+
+const MEDIA_TTL_MS = 30 * 60 * 1000;
+const MEDIA_MAX_PER_TAB = 40;
+// Below this a lone media response is a preview clip, an ad bumper or a
+// notification sound rather than something worth a download manager.
+const MEDIA_MIN_BYTES = 1 << 20;
+
+const PLAYLIST_TYPE = /^(application\/(vnd\.apple\.mpegurl|x-mpegurl|mpegurl)|audio\/(x-)?mpegurl)$/i;
+const DASH_TYPE = /^application\/dash\+xml$/i;
+// Segments are media responses too. Without this, every .ts in a two-hour film
+// would be offered as its own download.
+const SEGMENT_PATH = /\.(ts|m4s|cmfv|cmfa|fmp4)$/i;
+const SEGMENT_TYPE = /^video\/(mp2t|iso\.segment)$/i;
+
+function headerMap(list) {
+  const h = {};
+  for (const item of list || []) h[String(item.name).toLowerCase()] = item.value;
+  return h;
+}
+
+function originOf(u) {
+  try {
+    return new URL(u).origin;
+  } catch (e) {
+    return "";
+  }
+}
+
+// streamGroup is the directory a playlist lives in. A master playlist and the
+// variant playlists it names almost always share one.
+function streamGroup(u) {
+  try {
+    const p = new URL(u);
+    return p.origin + p.pathname.replace(/[^/]*$/, "");
+  } catch (e) {
+    return u;
+  }
+}
+
+function classifyMedia(url, contentType, length) {
+  const path = pathOf(url);
+  if (/\.m3u8?$/i.test(path) || PLAYLIST_TYPE.test(contentType)) return "hls";
+  if (/\.mpd$/i.test(path) || DASH_TYPE.test(contentType)) return "dash";
+  if (SEGMENT_PATH.test(path) || SEGMENT_TYPE.test(contentType)) return "";
+  if (/^(video|audio)\//i.test(contentType) && length >= MEDIA_MIN_BYTES) return "file";
+  return "";
+}
+
+async function mediaFor(tabId) {
+  const key = "media:" + tabId;
+  const got = await chrome.storage.session.get(key);
+  const now = Date.now();
+  return (got[key] || []).filter((m) => now - m.at < MEDIA_TTL_MS);
+}
+
+// Responses arrive from several connections at once, so read-modify-write on
+// the stored list has to be serialised or entries go missing.
+let mediaQueue = Promise.resolve();
+
+function withMedia(tabId, fn) {
+  mediaQueue = mediaQueue
+    .then(async () => {
+      const list = await mediaFor(tabId);
+      const next = await fn(list);
+      if (next) {
+        await chrome.storage.session.set({
+          ["media:" + tabId]: next.slice(-MEDIA_MAX_PER_TAB)
+        });
+      }
+    })
+    .catch((err) => console.warn("godm: media store", err));
+  return mediaQueue;
+}
+
+async function noteMedia(d) {
+  if (d.tabId < 0 || !/^https?:/i.test(d.url || "")) return;
+  const h = headerMap(d.responseHeaders);
+  const contentType = (h["content-type"] || "").split(";")[0].trim().toLowerCase();
+  const length = parseInt(h["content-length"] || "0", 10) || 0;
+  const kind = classifyMedia(d.url, contentType, length);
+  if (!kind) return;
+
+  let added = false;
+  await withMedia(d.tabId, async (list) => {
+    if (list.some((m) => m.url === d.url)) return null;
+    if (kind === "file") {
+      // A media response from a host that is already serving this tab a
+      // playlist is one of its segments, not a file of its own.
+      if (list.some((m) => m.kind !== "file" && m.origin === originOf(d.url))) return null;
+    } else if (list.some((m) => m.kind !== "file" && m.group === streamGroup(d.url))) {
+      // The master playlist is requested before the variants it names, and a
+      // player re-fetches the same playlist as it goes. First one wins, so a
+      // stream shows up as a single entry.
+      return null;
+    }
+    let title = "";
+    try {
+      title = (await chrome.tabs.get(d.tabId)).title || "";
+    } catch (e) {
+      // The tab closed while we were looking at its traffic.
+    }
+    list.push({
+      url: d.url,
+      kind: kind,
+      type: contentType,
+      size: length,
+      at: Date.now(),
+      group: streamGroup(d.url),
+      origin: originOf(d.url),
+      title: title
+    });
+    added = true;
+    return list;
+  });
+  if (added) paintBadge();
+}
+
+chrome.webRequest.onHeadersReceived.addListener(
+  (d) => { noteMedia(d); },
+  { urls: ["http://*/*", "https://*/*"] },
+  ["responseHeaders"]
+);
+
+// What was found belongs to the page that was open. A new page, including the
+// in-page navigations a video site does without reloading, starts empty.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === "loading" && info.url) {
+    chrome.storage.session.remove("media:" + tabId);
+    paintBadge();
+  }
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.session.remove("media:" + tabId);
+});
+chrome.tabs.onActivated.addListener(() => paintBadge());
+
+async function listMedia() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tabs[0]) return { ok: true, items: [] };
+  return {
+    ok: true,
+    items: await mediaFor(tabs[0].id),
+    title: tabs[0].title || "",
+    page: tabs[0].url || ""
+  };
+}
+
+async function inspectStream(msg) {
+  const resp = await callHost({
+    type: "inspect",
+    url: msg.url,
+    cookie: await cookieHeader(msg.url),
+    referrer: msg.page || "",
+    userAgent: navigator.userAgent
+  });
+  await setHostState(!!resp.ok, resp.error);
+  return resp;
+}
+
+async function submitStream(msg) {
+  const cfg = await getConfig();
+  const resp = await callHost({
+    type: "download",
+    url: msg.url,
+    kind: msg.kind === "hls" ? "hls" : "",
+    variant: typeof msg.variant === "number" ? msg.variant : -1,
+    filename: msg.filename || "",
+    cookie: await cookieHeader(msg.url),
+    referrer: msg.page || "",
+    userAgent: navigator.userAgent,
+    connections: msg.connections || cfg.connections
+  });
+  await setHostState(!!resp.ok, resp.error);
+  if (resp.ok) bumpBadge(1);
+  return resp;
+}

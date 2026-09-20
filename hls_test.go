@@ -536,3 +536,60 @@ func TestManagerRoutesPlaylistsToTheHLSEngine(t *testing.T) {
 		t.Fatal("the saved file does not match the stream")
 	}
 }
+
+// ---------- inspection ----------
+
+func TestInspectListsQualitiesWithoutFetchingAnySegment(t *testing.T) {
+	segs := makeSegments(7)
+	s := newHLSServer(t, segs)
+
+	info, err := InspectHLS(context.Background(), HLSOptions{URL: s.URL + "/master.m3u8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Kind != "hls" || info.Best != 2 || len(info.Variants) != 3 {
+		t.Fatalf("info = %+v", info)
+	}
+	if info.Variants[0].Height != 360 || info.Variants[2].Label != "1080p · 5.2 Mbps" {
+		t.Errorf("variants = %+v", info.Variants)
+	}
+	// Duration and segment count come from the quality that would actually be
+	// downloaded, not from the master playlist, which carries neither.
+	if info.Segments != 7 || info.Duration != 28 {
+		t.Errorf("got %d segments / %v s, want 7 / 28", info.Segments, info.Duration)
+	}
+	for i := range segs {
+		if n := s.hitCount(fmt.Sprintf("/seg%d.ts", i)); n != 0 {
+			t.Fatalf("inspecting fetched segment %d; looking at a stream must not start downloading it", i)
+		}
+	}
+}
+
+func TestInspectReportsDRMAndLiveBeforeATaskIsCreated(t *testing.T) {
+	drm := "#EXTM3U\n" +
+		`#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://k",KEYFORMAT="com.apple.streamingkeydelivery"` +
+		"\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+	live := "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n"
+
+	for name, body := range map[string]string{"drm": drm, "live": live} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, body)
+		}))
+		_, err := InspectHLS(context.Background(), HLSOptions{URL: srv.URL + "/index.m3u8"})
+		srv.Close()
+		if err == nil {
+			t.Errorf("%s: inspect accepted a stream it cannot download", name)
+			continue
+		}
+		switch name {
+		case "drm":
+			if _, ok := err.(*DRMError); !ok {
+				t.Errorf("drm: err = %v, want a DRMError", err)
+			}
+		case "live":
+			if _, ok := err.(*LiveStreamError); !ok {
+				t.Errorf("live: err = %v, want a LiveStreamError", err)
+			}
+		}
+	}
+}

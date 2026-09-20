@@ -1114,6 +1114,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/address", s.guard(post(s.handleAddress)))
 	mux.HandleFunc("/api/limit", s.guard(post(s.handleLimit)))
 	mux.HandleFunc("/api/connections", s.guard(post(s.handleConnections)))
+	mux.HandleFunc("/api/inspect", s.guard(post(s.handleInspect)))
 	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
 	mux.HandleFunc("/api/browse", s.guard(post(s.handleBrowse)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
@@ -1179,6 +1180,26 @@ func (s *server) idAction(fn func(string) bool) http.HandlerFunc {
 
 func (s *server) handlePing(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "version": version, "pid": os.Getpid()})
+}
+
+// handleInspect reports what a playlist contains without downloading it. A
+// refusal (DRM, a live stream) comes back as ok:false with the reason, not as
+// an HTTP error, so the caller can show the user why rather than "request
+// failed".
+func (s *server) handleInspect(w http.ResponseWriter, r *http.Request) {
+	var req jobRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	info, err := InspectHLS(ctx, HLSOptions{URL: req.URL, Headers: req.Headers})
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "info": info})
 }
 
 func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {

@@ -14,7 +14,7 @@ import (
 const maxNativeMessage = 8 << 20
 
 type nativeRequest struct {
-	Type        string            `json:"type"` // download | batch | tasks | ping
+	Type        string            `json:"type"` // download | batch | inspect | tasks | ping
 	URL         string            `json:"url"`
 	Filename    string            `json:"filename"`
 	Referrer    string            `json:"referrer"`
@@ -24,6 +24,10 @@ type nativeRequest struct {
 	Connections int               `json:"connections"`
 	OutDir      string            `json:"outDir"`
 	Items       []batchItem       `json:"items"`
+	// Kind says outright that the URL is a stream playlist. Variant picks a
+	// quality from it; absent means take the best on offer.
+	Kind    string `json:"kind"`
+	Variant *int   `json:"variant"`
 }
 
 // batchItem is one link picked from a page. Cookies are per item because the
@@ -35,12 +39,13 @@ type batchItem struct {
 }
 
 type nativeResponse struct {
-	OK     bool       `json:"ok"`
-	ID     string     `json:"id,omitempty"`
-	IDs    []string   `json:"ids,omitempty"`
-	Errors []string   `json:"errors,omitempty"`
-	Error  string     `json:"error,omitempty"`
-	Tasks  []TaskView `json:"tasks,omitempty"`
+	OK     bool        `json:"ok"`
+	ID     string      `json:"id,omitempty"`
+	IDs    []string    `json:"ids,omitempty"`
+	Errors []string    `json:"errors,omitempty"`
+	Error  string      `json:"error,omitempty"`
+	Tasks  []TaskView  `json:"tasks,omitempty"`
+	Info   *StreamInfo `json:"info,omitempty"`
 	// UI carries the authenticated manager URL so the popup can open it
 	// without the extension ever storing the daemon token.
 	UI string `json:"ui,omitempty"`
@@ -115,6 +120,13 @@ func handleNative(req nativeRequest) nativeResponse {
 		log.Printf("accepted %s -> %s", req.URL, id)
 		return nativeResponse{OK: true, ID: id}
 
+	case "inspect":
+		info, err := c.inspect(req.job(req.URL, req.Filename, req.Cookie))
+		if err != nil {
+			return nativeResponse{Error: err.Error()}
+		}
+		return nativeResponse{OK: true, Info: info}
+
 	case "batch":
 		jobs := make([]jobRequest, 0, len(req.Items))
 		for _, it := range req.Items {
@@ -150,6 +162,10 @@ func (req nativeRequest) job(url, filename, cookie string) jobRequest {
 	if req.UserAgent != "" {
 		headers["User-Agent"] = req.UserAgent
 	}
+	variant := -1
+	if req.Variant != nil {
+		variant = *req.Variant
+	}
 	return jobRequest{
 		URL:         url,
 		Filename:    filename,
@@ -157,6 +173,8 @@ func (req nativeRequest) job(url, filename, cookie string) jobRequest {
 		Headers:     headers,
 		Connections: req.Connections,
 		OutDir:      req.OutDir,
+		Kind:        req.Kind,
+		Variant:     variant,
 	}
 }
 

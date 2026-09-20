@@ -7,6 +7,7 @@
     "downloads",
     "cookies",
     "nativeMessaging",
+    "webRequest",
     "storage",
     "notifications",
     "contextMenus",
