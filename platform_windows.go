@@ -44,6 +44,20 @@ func spawnDetached(exe string, args ...string) error {
 	return cmd.Process.Release()
 }
 
+// spawnApp starts the manager window. Unlike spawnDetached it must not ask for
+// a hidden window: that flag applies to the first window the process shows,
+// which here is the window the user asked for.
+func spawnApp(exe string) error {
+	cmd := exec.Command(exe, "app")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: detachedProcess | createNewProcGroup,
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
 func nativeHostRegRoots() []string {
 	return []string{chromeRegRoot, edgeRegRoot, braveRegRoot, chromiumRegRoot}
 }

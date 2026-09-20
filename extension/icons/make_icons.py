@@ -71,7 +71,7 @@ def tile_alpha(size):
     return [[v * inv for v in row] for row in alpha]
 
 
-def write_png(path, size):
+def png_bytes(size):
     glyph = coverage(size)
     tile = tile_alpha(size)
 
@@ -94,10 +94,30 @@ def write_png(path, size):
     png += chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
     png += chunk(b"IEND", b"")
+    return png
 
+
+def write_png(path, size):
+    data = png_bytes(size)
     with open(path, "wb") as f:
-        f.write(png)
-    return len(png)
+        f.write(data)
+    return len(data)
+
+
+def write_ico(path, sizes):
+    """Windows .ico holding one PNG per size, for the tray and the window."""
+    images = [png_bytes(s) for s in sizes]
+    header = struct.pack("<HHH", 0, 1, len(sizes))
+    offset = len(header) + 16 * len(sizes)
+    entries, body = b"", b""
+    for size, data in zip(sizes, images):
+        dim = 0 if size >= 256 else size  # 0 means 256 in the directory
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset)
+        offset += len(data)
+        body += data
+    with open(path, "wb") as f:
+        f.write(header + entries + body)
+    return offset
 
 
 if __name__ == "__main__":
@@ -105,3 +125,8 @@ if __name__ == "__main__":
     for s in (16, 48, 128):
         p = os.path.join(here, "%d.png" % s)
         print("%s (%d bytes)" % (p, write_png(p, s)))
+
+    assets = os.path.join(here, "..", "..", "assets")
+    os.makedirs(assets, exist_ok=True)
+    ico = os.path.normpath(os.path.join(assets, "godm.ico"))
+    print("%s (%d bytes)" % (ico, write_ico(ico, (16, 20, 24, 32, 40, 48, 64, 128, 256))))

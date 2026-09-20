@@ -90,6 +90,8 @@ func openInBrowser(url string) error {
 	return exec.Command(bin, url).Start()
 }
 
+func spawnApp(exe string) error { return spawnDetached(exe, "app") }
+
 func showInFolder(path string) error {
 	dir := path
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {

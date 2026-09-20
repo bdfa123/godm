@@ -173,18 +173,64 @@ type Manager struct {
 	store   string // tasks.json; empty disables persistence
 	dirty   atomic.Bool
 	openURL func(string) error
+
+	notifyOn atomic.Bool
+	// announce is what tells the user a download finished or needs them. The
+	// tray provides it; tests replace it.
+	announce func(title, text, open string)
 }
 
 func NewManager(outDir string, parallel int) *Manager {
 	if parallel <= 0 {
 		parallel = 3
 	}
-	return &Manager{
-		tasks:   map[string]*managedTask{},
-		limit:   clampLimit(parallel),
-		wake:    make(chan struct{}),
-		outDir:  outDir,
-		openURL: openInBrowser,
+	m := &Manager{
+		tasks:    map[string]*managedTask{},
+		limit:    clampLimit(parallel),
+		wake:     make(chan struct{}),
+		outDir:   outDir,
+		openURL:  openInBrowser,
+		announce: trayNotify,
+	}
+	m.notifyOn.Store(true)
+	return m
+}
+
+func (m *Manager) Notifications() bool { return m.notifyOn.Load() }
+
+func (m *Manager) SetNotifications(on bool) {
+	m.notifyOn.Store(on)
+	m.dirty.Store(true)
+}
+
+func (m *Manager) OutDir() string { return m.outDir }
+
+// announceFinish tells the user what happened to a download once it stops
+// moving. Pausing is their own doing, so it stays quiet.
+func (m *Manager) announceFinish(v TaskView, st TaskState) {
+	if m.announce == nil || !m.notifyOn.Load() {
+		return
+	}
+	name := v.Filename
+	if name == "" {
+		name = v.URL
+	}
+	switch st {
+	case StateDone:
+		text := name
+		if v.Size > 0 {
+			text += "\n" + humanBytes(v.Size)
+			if !v.StartedAt.IsZero() && !v.EndedAt.IsZero() {
+				if secs := v.EndedAt.Sub(v.StartedAt).Seconds(); secs > 0 {
+					text += fmt.Sprintf(" in %s", time.Duration(secs*float64(time.Second)).Round(time.Second))
+				}
+			}
+		}
+		m.announce("Download complete", text, v.Path)
+	case StateNeedsRefresh:
+		m.announce("Download link expired", name+"\nOpen godm to fetch a fresh link and continue.", "app")
+	case StateError:
+		m.announce("Download failed", name+"\n"+v.Error, "app")
 	}
 }
 
@@ -453,12 +499,15 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		}
 		mt.view.Segments = segs
 	}
+	view := mt.view
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 
 	m.mu.Lock()
 	m.broadcastLocked()
 	m.mu.Unlock()
+
+	go m.announceFinish(view, st)
 }
 
 func (m *Manager) Pause(id string) bool {
@@ -811,6 +860,7 @@ type savedTask struct {
 type savedList struct {
 	Version int         `json:"version"`
 	Limit   int         `json:"limit"`
+	Notify  *bool       `json:"notify,omitempty"`
 	Tasks   []savedTask `json:"tasks"`
 }
 
@@ -822,7 +872,8 @@ func (m *Manager) save() error {
 		return nil
 	}
 	m.mu.Lock()
-	list := savedList{Version: 1, Limit: m.limit}
+	notify := m.notifyOn.Load()
+	list := savedList{Version: 1, Limit: m.limit, Notify: &notify}
 	for _, id := range m.order {
 		t := m.tasks[id]
 		t.mu.Lock()
@@ -865,6 +916,9 @@ func (m *Manager) load() error {
 	defer m.mu.Unlock()
 	if list.Limit > 0 {
 		m.limit = clampLimit(list.Limit)
+	}
+	if list.Notify != nil {
+		m.notifyOn.Store(*list.Notify)
 	}
 	for _, st := range list.Tasks {
 		v := st.View
@@ -929,6 +983,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 		log.Printf("could not restore the task list: %v", err)
 	}
 	go mgr.saveLoop()
+	startTray(mgr)
 	s := &server{mgr: mgr, token: token}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -967,6 +1022,8 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/address", s.guard(post(s.handleAddress)))
 	mux.HandleFunc("/api/limit", s.guard(post(s.handleLimit)))
 	mux.HandleFunc("/api/connections", s.guard(post(s.handleConnections)))
+	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
+	mux.HandleFunc("/api/browse", s.guard(post(s.handleBrowse)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
 
 	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
@@ -1122,6 +1179,30 @@ func (s *server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "connections": got})
+}
+
+// handleConfig tells the extension where downloads go and how godm is set up,
+// so its confirmation dialog can show real defaults.
+func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{
+		"ok":                 true,
+		"out_dir":            s.mgr.OutDir(),
+		"connections":        DefaultConnections,
+		"max_connections":    MaxConnections,
+		"limit":              s.mgr.Limit(),
+		"notifications":      s.mgr.Notifications(),
+		"can_browse_folders": canBrowseFolders,
+	})
+}
+
+// handleBrowse opens the native folder chooser on the tray's UI thread.
+func (s *server) handleBrowse(w http.ResponseWriter, r *http.Request) {
+	path, err := browseFolder(r.URL.Query().Get("current"))
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": path})
 }
 
 func (s *server) handleOpen(w http.ResponseWriter, r *http.Request) {
