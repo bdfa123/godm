@@ -54,6 +54,10 @@ type Options struct {
 	OnProgress func(Progress)
 }
 
+// defaultRetries is how many times a request is retried before a download is
+// called off, unless the caller says otherwise.
+const defaultRetries = 5
+
 func clampConnections(n int) int {
 	if n < 1 {
 		return 1
@@ -75,7 +79,7 @@ func (o *Options) applyDefaults() {
 		o.MinSplit = 512 << 10
 	}
 	if o.MaxRetries <= 0 {
-		o.MaxRetries = 5
+		o.MaxRetries = defaultRetries
 	}
 	if o.OutDir == "" {
 		o.OutDir = "."

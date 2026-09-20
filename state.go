@@ -11,7 +11,11 @@ const stateVersion = 1
 // State is the sidecar written next to the partial file so a killed process can
 // pick up exactly where each segment stopped.
 type State struct {
-	Version  int       `json:"version"`
+	Version int `json:"version"`
+	// Kind is empty for a byte-range download. A segment download (HLS) writes
+	// its own shape into the same sidecar path, and loadState must not mistake
+	// one for the other: they resume in completely different ways.
+	Kind     string    `json:"kind,omitempty"`
 	URL      string    `json:"url"`
 	FinalURL string    `json:"final_url"`
 	Size     int64     `json:"size"`
@@ -35,7 +39,7 @@ func loadState(target string) (*State, bool) {
 		return nil, false
 	}
 	var s State
-	if err := json.Unmarshal(b, &s); err != nil || s.Version != stateVersion {
+	if err := json.Unmarshal(b, &s); err != nil || s.Version != stateVersion || s.Kind != "" {
 		return nil, false
 	}
 	return &s, true
@@ -48,7 +52,12 @@ func saveState(target string, s *State) error {
 	if err != nil {
 		return err
 	}
-	p := statePath(target)
+	return writeFileAtomic(statePath(target), b)
+}
+
+// writeFileAtomic replaces a file in one step, so a reader either sees the old
+// contents or the new ones and never a half-written mix.
+func writeFileAtomic(p string, b []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(p), ".godm-*")
 	if err != nil {
 		return err
