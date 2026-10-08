@@ -189,6 +189,8 @@ type tray struct {
 	pending string // what a click on the current balloon opens
 
 	browse chan browseRequest
+
+	taskbarCreated uintptr // broadcast when Explorer restarts
 }
 
 var theTray struct {
@@ -251,10 +253,12 @@ func (t *tray) run() error {
 		log.Printf("start menu shortcut: %v", err)
 	}
 
+	t.taskbarCreated, _, _ = procRegisterWindowMsg.Call(uintptr(unsafe.Pointer(utf16("TaskbarCreated"))))
+
 	className := utf16("godmTrayWindow")
 	wc := wndClassEx{
 		Size:      uint32(unsafe.Sizeof(wndClassEx{})),
-		WndProc:   syscall.NewCallback(trayWndProc),
+		WndProc:   syscall.NewCallback(t.wndProc),
 		ClassName: className,
 	}
 	if atom, _, err := procRegisterClassEx.Call(uintptr(unsafe.Pointer(&wc))); atom == 0 {
@@ -287,7 +291,6 @@ func (t *tray) run() error {
 	log.Printf("tray icon added")
 
 	procSetTimer.Call(hwnd, 1, 2000, 0) // tooltip refresh
-	taskbarCreated, _, _ := procRegisterWindowMsg.Call(uintptr(unsafe.Pointer(utf16("TaskbarCreated"))))
 
 	var msg winMsg
 	for {
@@ -295,11 +298,6 @@ func (t *tray) run() error {
 		if int32(ret) <= 0 {
 			break
 		}
-		if msg.Message == uint32(taskbarCreated) {
-			procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
-			continue
-		}
-		t.handle(msg)
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		procDispatchMessage.Call(uintptr(unsafe.Pointer(&msg)))
 	}
@@ -307,11 +305,27 @@ func (t *tray) run() error {
 	return nil
 }
 
-// trayWndProc only needs to pass everything through; the loop above inspects
-// messages before dispatching them.
-func trayWndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
-	ret, _, _ := procDefWindowProc.Call(hwnd, msg, wparam, lparam)
-	return ret
+// wndProc handles everything in the window procedure rather than the loop.
+// Explorer delivers icon clicks and TaskbarCreated as sent messages, which
+// GetMessage dispatches straight to here and never returns to the loop, so a
+// loop-side check never sees a single click.
+func (t *tray) wndProc(hwnd, msg, wparam, lparam uintptr) uintptr {
+	switch {
+	case msg == wmTimer:
+		t.updateTooltip()
+	case msg == wmTrayEvent:
+		t.showQueuedNote()
+	case msg == wmTrayBrowse:
+		t.serveBrowse()
+	case msg == wmTrayCallback:
+		t.onIcon(uint32(lparam))
+	case t.taskbarCreated != 0 && msg == t.taskbarCreated:
+		procShellNotifyIcon.Call(nimAdd, uintptr(unsafe.Pointer(&t.nid)))
+	default:
+		ret, _, _ := procDefWindowProc.Call(hwnd, msg, wparam, lparam)
+		return ret
+	}
+	return 0
 }
 
 // iconFile keeps the .ico on disk, where both LoadImage and the Start menu
@@ -335,29 +349,20 @@ func (t *tray) loadIcon() (uintptr, error) {
 	return h, nil
 }
 
-func (t *tray) handle(msg winMsg) {
-	switch msg.Message {
-	case wmTimer:
-		t.updateTooltip()
-	case wmTrayEvent:
-		t.showQueuedNote()
-	case wmTrayBrowse:
-		t.serveBrowse()
-	case wmTrayCallback:
-		switch uint32(msg.LParam) {
-		case 0x0202: // WM_LBUTTONUP
+func (t *tray) onIcon(event uint32) {
+	switch event {
+	case 0x0202: // WM_LBUTTONUP
+		openAppWindow()
+	case 0x0205, 0x007B: // WM_RBUTTONUP, WM_CONTEXTMENU
+		t.showMenu()
+	case ninBalloonUserClick:
+		t.mu.Lock()
+		open := t.pending
+		t.mu.Unlock()
+		if open == "" || open == "app" {
 			openAppWindow()
-		case 0x0205, 0x007B: // WM_RBUTTONUP, WM_CONTEXTMENU
-			t.showMenu()
-		case ninBalloonUserClick:
-			t.mu.Lock()
-			open := t.pending
-			t.mu.Unlock()
-			if open == "" || open == "app" {
-				openAppWindow()
-			} else {
-				showInFolder(open)
-			}
+		} else {
+			showInFolder(open)
 		}
 	}
 }
@@ -477,8 +482,11 @@ func (t *tray) showMenu() {
 }
 
 // openAppWindow brings the manager window up, starting it if it is not open.
+// The tray's own hidden window is also titled "godm", so the lookup has to name
+// the class go-webview2 registers as well, or it finds that one and stops.
 func openAppWindow() {
-	if h, _, _ := procFindWindow.Call(0, uintptr(unsafe.Pointer(utf16("godm")))); h != 0 {
+	if h, _, _ := procFindWindow.Call(uintptr(unsafe.Pointer(utf16("webview"))),
+		uintptr(unsafe.Pointer(utf16("godm")))); h != 0 {
 		procShowWindowTray.Call(h, swRestore)
 		procSetForegroundWin.Call(h)
 		return
