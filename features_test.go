@@ -466,6 +466,74 @@ func stateIs(m *Manager, id string, st TaskState) func() bool {
 	}
 }
 
+func TestManagerDeduplicatesAnActiveDownload(t *testing.T) {
+	m := NewManager(t.TempDir(), 1)
+	// Keep the task queued so this test never needs the network and cannot race
+	// a tiny download finishing between the two submissions.
+	m.mu.Lock()
+	m.running = m.limit
+	m.mu.Unlock()
+
+	first, err := m.Add(jobRequest{URL: "https://example.invalid/file.bin", Filename: "file.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := m.Add(jobRequest{URL: "https://example.invalid/file.bin", Filename: "file (1).bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("duplicate got id %q, want existing id %q", second, first)
+	}
+	if got := len(m.List()); got != 1 {
+		t.Fatalf("task count = %d, want 1", got)
+	}
+	m.Pause(first)
+}
+
+func TestManagerOnlyQueuesOneResume(t *testing.T) {
+	m := NewManager(t.TempDir(), 1)
+	m.mu.Lock()
+	m.running = m.limit
+	mt := &managedTask{
+		view:   TaskView{ID: "paused", URL: "https://example.invalid/file.bin", State: StatePaused},
+		req:    jobRequest{URL: "https://example.invalid/file.bin"},
+		outDir: t.TempDir(),
+	}
+	m.tasks["paused"] = mt
+	m.order = append(m.order, "paused")
+	m.mu.Unlock()
+
+	if !m.Resume("paused") {
+		t.Fatal("first resume was refused")
+	}
+	if m.Resume("paused") {
+		t.Fatal("second resume started another run")
+	}
+	if got := mt.snapshot().State; got != StateQueued {
+		t.Fatalf("state = %s, want queued", got)
+	}
+	m.Pause("paused")
+}
+
+func TestFinishRunUsesTheCompletedFileSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "merged.mp4")
+	const contents = "video-and-audio"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(t.TempDir(), 1)
+	m.announce = nil
+	mt := &managedTask{view: TaskView{ID: "yt", Size: 3, Received: 3, State: StateRunning}}
+	mt.gen = 1
+	m.finishRun(mt, 1, StateDone, "", path)
+
+	got := mt.snapshot()
+	if got.Size != int64(len(contents)) || got.Received != int64(len(contents)) {
+		t.Fatalf("completed size = %d/%d, want %d/%d", got.Received, got.Size, len(contents), len(contents))
+	}
+}
+
 func TestManagerAdoptsRefreshedLink(t *testing.T) {
 	payload := makePayload(2 << 20)
 	h := newExpiringServer(payload, 700<<10)

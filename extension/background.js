@@ -278,9 +278,16 @@ async function handleDownload(item) {
 
   try {
     await chrome.downloads.cancel(item.id);
-    await chrome.downloads.erase({ id: item.id });
   } catch (e) {
     console.warn("godm: could not cancel browser download", e);
+    return; // Chrome still owns it; submitting too would download it twice.
+  }
+  try {
+    await chrome.downloads.erase({ id: item.id });
+  } catch (e) {
+    // Erasing only removes the history row. The transfer is already stopped,
+    // so a history cleanup failure must not lose the handoff.
+    console.warn("godm: could not erase cancelled browser download", e);
   }
 
   // Hand over the URL the user actually clicked, not the redirect target.

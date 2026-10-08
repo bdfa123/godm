@@ -368,6 +368,20 @@ func validateURL(u string) error {
 	return nil
 }
 
+func sameActiveDownload(t *managedTask, req jobRequest, outDir string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	switch t.view.State {
+	case StateQueued, StateRunning:
+	default:
+		return false
+	}
+	return t.req.URL == req.URL &&
+		strings.EqualFold(t.req.Kind, req.Kind) &&
+		t.req.Variant == req.Variant &&
+		strings.EqualFold(filepath.Clean(t.outDir), filepath.Clean(outDir))
+}
+
 func (m *Manager) Add(req jobRequest) (string, error) {
 	if err := validateURL(req.URL); err != nil {
 		return "", err
@@ -389,6 +403,12 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	mt.connLimit.Store(int32(req.Connections))
 
 	m.mu.Lock()
+	for _, existingID := range m.order {
+		if existing := m.tasks[existingID]; existing != nil && sameActiveDownload(existing, req, outDir) {
+			m.mu.Unlock()
+			return existingID, nil
+		}
+	}
 	m.tasks[id] = mt
 	m.order = append(m.order, id)
 	m.broadcastLocked()
@@ -417,7 +437,9 @@ func (m *Manager) AddBatch(reqs []jobRequest) (ids []string, errs []string) {
 // engine to continue existing progress from a URL that differs from before.
 func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 	mt.mu.Lock()
-	if mt.removed {
+	// Resume, refresh and address changes reserve StateQueued before starting
+	// their goroutine. If Pause won the race in between, do not resurrect it.
+	if mt.removed || mt.view.State != StateQueued {
 		mt.mu.Unlock()
 		return
 	}
@@ -623,6 +645,12 @@ func (m *Manager) afterRun(mt *managedTask) {
 }
 
 func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path string) {
+	finalSize, haveFinalSize := int64(0), false
+	if st == StateDone && path != "" {
+		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
+			finalSize, haveFinalSize = fi.Size(), true
+		}
+	}
 	mt.mu.Lock()
 	if mt.gen != gen {
 		mt.mu.Unlock()
@@ -636,6 +664,9 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		mt.view.Filename = filepath.Base(path)
 	}
 	if st == StateDone {
+		if haveFinalSize {
+			mt.view.Size = finalSize
+		}
 		mt.view.EndedAt = time.Now()
 		mt.view.Received = mt.view.Size
 		mt.view.Segments = nil
@@ -672,12 +703,21 @@ func (m *Manager) Pause(id string) bool {
 	}
 	mt.mu.Lock()
 	st, cancel := mt.view.State, mt.cancel
-	if st == StateAwaitingRefresh {
+	if st == StateQueued {
+		// Mark it synchronously so a resume goroutine that has not begun yet
+		// observes the pause instead of creating a fresh context afterwards.
+		mt.view.State = StatePaused
+	} else if st == StateAwaitingRefresh {
 		mt.view.State, mt.view.RefreshUntil = StateNeedsRefresh, time.Time{}
 	}
 	mt.mu.Unlock()
 	if (st == StateQueued || st == StateRunning) && cancel != nil {
 		cancel()
+	}
+	if st == StateQueued {
+		m.mu.Lock()
+		m.broadcastLocked()
+		m.mu.Unlock()
 	}
 	m.dirty.Store(true)
 	return true
@@ -689,13 +729,20 @@ func (m *Manager) Resume(id string) bool {
 		return false
 	}
 	mt.mu.Lock()
-	st := mt.view.State
-	mt.mu.Unlock()
-	switch st {
+	switch mt.view.State {
 	case StatePaused, StateError, StateNeedsRefresh, StateAwaitingRefresh:
+		mt.view.State = StateQueued
+		mt.view.Error = ""
+		mt.view.RefreshUntil = time.Time{}
+		mt.mu.Unlock()
+		m.dirty.Store(true)
+		m.mu.Lock()
+		m.broadcastLocked()
+		m.mu.Unlock()
 		go m.start(mt, false, false)
 		return true
 	}
+	mt.mu.Unlock()
 	return false
 }
 
@@ -923,8 +970,13 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	}
 	mt.req.URL, mt.view.URL = url, url
 	hasProgress := mt.view.Path != "" && mt.view.Received > 0 && mt.view.State != StateDone
+	mt.view.State = StateQueued
+	mt.view.Error = ""
 	mt.mu.Unlock()
 	m.dirty.Store(true)
+	m.mu.Lock()
+	m.broadcastLocked()
+	m.mu.Unlock()
 	go m.start(mt, false, hasProgress)
 	return nil
 }
@@ -1116,30 +1168,47 @@ type server struct {
 	token string
 }
 
+func findRunningDaemon(timeout time.Duration) *daemonClient {
+	deadline := time.Now().Add(timeout)
+	for {
+		if c, err := newDaemonClient(); err == nil {
+			c.http.Timeout = 250 * time.Millisecond
+			if c.ping() == nil {
+				return c
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // RunDaemon binds loopback only and publishes its port so the native host and
 // the UI can find it.
 func RunDaemon(port int, outDir string, parallel int) error {
-	token, err := loadOrCreateToken()
-	if err != nil {
-		return err
-	}
-
-	// Refuse to become a second daemon. Without this check a double-click would
-	// start another instance, which loses the port race, falls back to an
-	// ephemeral port, and then clobbers the port file the first one published.
-	if c, err := newDaemonClient(); err == nil && c.ping() == nil {
+	// The ping handles normal repeat launches; the startup lease closes the
+	// check-then-listen gap when two processes are launched at the same instant.
+	if c := findRunningDaemon(0); c != nil {
 		log.Printf("a godm daemon is already running at %s; nothing to do", c.base)
 		return nil
 	}
-
-	mgr := NewManager(outDir, parallel)
-	mgr.store = filepath.Join(configDir(), "tasks.json")
-	if err := mgr.load(); err != nil {
-		log.Printf("could not restore the task list: %v", err)
+	releaseStartup, claimed, err := claimDaemonStartup()
+	if err != nil {
+		return fmt.Errorf("claim daemon startup: %w", err)
 	}
-	go mgr.saveLoop()
-	startTray(mgr)
-	s := &server{mgr: mgr, token: token}
+	if !claimed {
+		if c := findRunningDaemon(5 * time.Second); c != nil {
+			log.Printf("a godm daemon is already running at %s; nothing to do", c.base)
+			return nil
+		}
+		return errors.New("another godm daemon is still starting")
+	}
+	defer releaseStartup()
+	if c := findRunningDaemon(0); c != nil {
+		log.Printf("a godm daemon is already running at %s; nothing to do", c.base)
+		return nil
+	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
@@ -1149,7 +1218,21 @@ func RunDaemon(port int, outDir string, parallel int) error {
 			return err
 		}
 	}
+	defer ln.Close()
 	actual := ln.Addr().(*net.TCPAddr).Port
+
+	token, err := loadOrCreateToken()
+	if err != nil {
+		return err
+	}
+	mgr := NewManager(outDir, parallel)
+	mgr.store = filepath.Join(configDir(), "tasks.json")
+	if err := mgr.load(); err != nil {
+		log.Printf("could not restore the task list: %v", err)
+	}
+	go mgr.saveLoop()
+	s := &server{mgr: mgr, token: token}
+
 	if err := writePort(actual); err != nil {
 		return err
 	}
@@ -1182,9 +1265,29 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/browse", s.guard(post(s.handleBrowse)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
 
-	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	return srv.Serve(ln)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	ready := &daemonClient{
+		base:  fmt.Sprintf("http://127.0.0.1:%d", actual),
+		token: token,
+		http:  &http.Client{Timeout: 250 * time.Millisecond},
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for ready.ping() != nil {
+		select {
+		case err := <-serveErr:
+			return err
+		case <-time.After(25 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			return errors.New("godm daemon did not become ready")
+		}
+	}
+	startTray(mgr)
+	releaseStartup()
+	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
+	return <-serveErr
 }
 
 // guard enforces the bearer token and rejects cross-origin browser callers.

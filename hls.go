@@ -58,6 +58,15 @@ func (e *LiveStreamError) Error() string {
 	return "this is a live stream with no end marker; recording live streams is not supported yet"
 }
 
+// SeparateAudioError prevents a master playlist with an external audio
+// rendition from being saved as a plausible-looking but silent video file.
+// yt-dlp already has the demuxing and muxing support needed for these streams.
+type SeparateAudioError struct{ Group string }
+
+func (e *SeparateAudioError) Error() string {
+	return "this HLS quality keeps audio in a separate rendition; use the yt-dlp page download so audio and video can be merged"
+}
+
 type hlsKey struct {
 	Method string
 	URI    string
@@ -118,7 +127,12 @@ func (v hlsVariant) Height() int {
 }
 
 type hlsMaster struct {
-	Variants []hlsVariant
+	Variants    []hlsVariant
+	AudioGroups map[string]bool // group id -> at least one external URI
+}
+
+func (m *hlsMaster) hasSeparateAudio(v hlsVariant) bool {
+	return v.AudioGroup != "" && m.AudioGroups[v.AudioGroup]
 }
 
 // best returns the highest-bandwidth variant, which is what a player settles on
@@ -183,7 +197,7 @@ func parsePlaylist(body []byte, base *url.URL) (*hlsMaster, *hlsMedia, error) {
 }
 
 func parseMaster(body []byte, base *url.URL) (*hlsMaster, error) {
-	master := &hlsMaster{}
+	master := &hlsMaster{AudioGroups: map[string]bool{}}
 	var pending *hlsVariant
 	sc := bufio.NewScanner(bytes.NewReader(body))
 	sc.Buffer(make([]byte, 0, 64<<10), 8<<20)
@@ -203,6 +217,11 @@ func parseMaster(body []byte, base *url.URL) (*hlsMaster, error) {
 				Codecs:     a["CODECS"],
 				Name:       a["NAME"],
 				AudioGroup: a["AUDIO"],
+			}
+		case strings.HasPrefix(line, "#EXT-X-MEDIA:"):
+			a := parseAttrs(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+			if strings.EqualFold(a["TYPE"], "AUDIO") && a["GROUP-ID"] != "" && a["URI"] != "" {
+				master.AudioGroups[a["GROUP-ID"]] = true
 			}
 		case strings.HasPrefix(line, "#EXT-X-SESSION-KEY:"):
 			if err := checkKeyFormat(parseAttrs(strings.TrimPrefix(line, "#EXT-X-SESSION-KEY:"))); err != nil {
@@ -510,6 +529,9 @@ func DownloadHLS(ctx context.Context, o HLSOptions) (string, error) {
 		chosen = o.Variant
 		if chosen < 0 || chosen >= len(variants) {
 			chosen = master.best()
+		}
+		if master.hasSeparateAudio(variants[chosen]) {
+			return "", &SeparateAudioError{Group: variants[chosen].AudioGroup}
 		}
 		vURL := variants[chosen].URI
 		if base, err = url.Parse(vURL); err != nil {
@@ -1103,6 +1125,9 @@ func InspectHLS(ctx context.Context, o HLSOptions) (*StreamInfo, error) {
 		// One more request buys the duration and segment count for the quality
 		// that will actually be downloaded, which is what the user wants to see.
 		chosen := master.Variants[info.Best]
+		if master.hasSeparateAudio(chosen) {
+			return nil, &SeparateAudioError{Group: chosen.AudioGroup}
+		}
 		if vb, err := url.Parse(chosen.URI); err == nil {
 			if body, err := fetchPlaylist(ctx, client, o, chosen.URI); err == nil {
 				if _, m2, err := parsePlaylist(body, vb); err == nil && m2 != nil {

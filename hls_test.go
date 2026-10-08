@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -513,6 +514,49 @@ func TestDownloadHLSReportsProgressBySegment(t *testing.T) {
 	}
 	if last.Bytes != int64(len(joined(segs))) {
 		t.Errorf("final byte count = %d, want %d", last.Bytes, len(joined(segs)))
+	}
+}
+
+func TestHLSRejectsExternalAudioBeforeDownloadingVideo(t *testing.T) {
+	var mediaHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/master.m3u8" {
+			fmt.Fprint(w, "#EXTM3U\n"+
+				"#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"English\",DEFAULT=YES,URI=\"audio.m3u8\"\n"+
+				"#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.4d401f\",AUDIO=\"audio\"\n"+
+				"video.m3u8\n")
+			return
+		}
+		mediaHits.Add(1)
+		fmt.Fprint(w, "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nseg.ts\n#EXT-X-ENDLIST\n")
+	}))
+	defer srv.Close()
+
+	checks := []struct {
+		name string
+		run  func() error
+	}{
+		{"inspect", func() error {
+			_, err := InspectHLS(context.Background(), HLSOptions{URL: srv.URL + "/master.m3u8"})
+			return err
+		}},
+		{"download", func() error {
+			_, err := DownloadHLS(context.Background(), HLSOptions{
+				URL: srv.URL + "/master.m3u8", OutDir: t.TempDir(), Variant: -1,
+			})
+			return err
+		}},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			var separate *SeparateAudioError
+			if err := check.run(); !errors.As(err, &separate) {
+				t.Fatalf("error = %v, want SeparateAudioError", err)
+			}
+		})
+	}
+	if got := mediaHits.Load(); got != 0 {
+		t.Fatalf("fetched %d media playlists before rejecting separate audio", got)
 	}
 }
 

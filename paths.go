@@ -67,6 +67,54 @@ func virtualizedBy(realPath string) string {
 func tokenPath() string { return filepath.Join(configDir(), "token") }
 func portPath() string  { return filepath.Join(configDir(), "port") }
 func logPath() string   { return filepath.Join(configDir(), "godm.log") }
+func startupPath() string {
+	return filepath.Join(configDir(), "daemon.starting")
+}
+
+const staleStartupLease = 30 * time.Second
+
+// claimDaemonStartupAt serialises the short interval between checking for an
+// existing daemon and publishing a newly listening one. The marker is only a
+// startup lease, not a lifetime lock: once /api/ping answers, the port file is
+// the source of truth again. A crashed starter becomes recoverable after a
+// short grace period.
+func claimDaemonStartupAt(path string) (release func(), claimed bool, err error) {
+	marker := strconv.Itoa(os.Getpid()) + ":" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	for attempt := 0; attempt < 2; attempt++ {
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if openErr == nil {
+			if _, err = f.WriteString(marker); err == nil {
+				err = f.Close()
+			} else {
+				_ = f.Close()
+			}
+			if err != nil {
+				_ = os.Remove(path)
+				return nil, false, err
+			}
+			return func() {
+				// Never remove a lease that replaced ours after stale recovery.
+				if b, readErr := os.ReadFile(path); readErr == nil && string(b) == marker {
+					_ = os.Remove(path)
+				}
+			}, true, nil
+		}
+		if !os.IsExist(openErr) {
+			return nil, false, openErr
+		}
+		if fi, statErr := os.Stat(path); statErr == nil && time.Since(fi.ModTime()) > staleStartupLease {
+			if removeErr := os.Remove(path); removeErr == nil || os.IsNotExist(removeErr) {
+				continue
+			}
+		}
+		return nil, false, nil
+	}
+	return nil, false, nil
+}
+
+func claimDaemonStartup() (func(), bool, error) {
+	return claimDaemonStartupAt(startupPath())
+}
 
 // loadOrCreateToken returns the shared secret that gates the local HTTP API.
 // Without it any web page you visit could POST jobs to the daemon.
