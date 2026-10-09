@@ -25,7 +25,7 @@ let busy = false; // Start has been pressed and godm has not answered yet
 let browsing = false; // the folder chooser is open on the desktop
 let dirTouched = false; // the person has typed or picked a folder themselves
 let defaultDir = ""; // godm's own download folder, shown as the placeholder
-let expired = false;
+let over = false; // nothing left to do here: the request expired, or went back to Chrome
 
 // The folder goes to godm only when the person chose one. Sending the default
 // as if it had been chosen would also switch off godm's sorting by type,
@@ -41,12 +41,15 @@ function formValues() {
 // render decides what the status line says and whether Start can be pressed.
 // A mistake in the form outranks a note, because it is what stops Start.
 function render() {
-  const problem = expired ? "" : firstProblem(formValues());
+  const problem = over ? "" : firstProblem(formValues());
   ui.status.textContent = problem || note;
   ui.status.className = problem ? "err" : "";
-  ui.start.disabled = !!problem || busy || browsing || expired;
-  ui.browse.disabled = busy || browsing || expired;
-  for (const el of [ui.name, ui.dir, ui.conns, ui.dontAsk]) el.disabled = busy || expired;
+  ui.start.disabled = !!problem || busy || browsing || over;
+  ui.browse.disabled = busy || browsing || over;
+  // Once Start is pressed the job is on its way to godm and closing the window
+  // cannot call it back, so Cancel would only look as if it could.
+  ui.cancel.disabled = busy;
+  for (const el of [ui.name, ui.dir, ui.conns, ui.dontAsk]) el.disabled = busy || over;
 }
 
 // Closing the window is how Cancel works: the worker throws away what it was
@@ -60,9 +63,12 @@ async function closeSelf() {
   }
 }
 
-function showExpired() {
-  expired = true;
-  note = tr("err_request_expired");
+// finish ends the dialog's work: what is shown stays as it is and the only thing
+// left to do is close the window.
+function finish(text) {
+  over = true;
+  busy = false;
+  note = text;
   ui.cancel.textContent = tr("confirm_close");
   render();
 }
@@ -77,7 +83,14 @@ async function send(message) {
 
 ui.form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (busy || browsing || expired || firstProblem(formValues())) return;
+  if (busy || browsing || over) return;
+  // Start is disabled while the form has a mistake in it, so getting here with
+  // one means the page had not caught up. Say what is wrong rather than leave
+  // the person pressing a button that does nothing.
+  if (firstProblem(formValues())) {
+    render();
+    return;
+  }
   busy = true;
   note = tr("confirm_sending");
   render();
@@ -91,15 +104,13 @@ ui.form.addEventListener("submit", async (e) => {
     return;
   }
   if (resp && resp.expired) {
-    busy = false;
-    showExpired();
+    finish(tr("err_request_expired"));
     return;
   }
   if (resp && resp.handedBack) {
     // godm refused the job and the worker has already given the download back
     // to Chrome and sent a notification. Nothing is left to do here.
-    note = tr("confirm_handed_back", resp.error || tr("confirm_handed_back_default"));
-    render();
+    finish(tr("confirm_handed_back", resp.error || tr("confirm_handed_back_default")));
     setTimeout(closeSelf, 4000);
     return;
   }
@@ -111,14 +122,21 @@ ui.form.addEventListener("submit", async (e) => {
   render();
 });
 
-ui.cancel.addEventListener("click", closeSelf);
+ui.cancel.addEventListener("click", () => {
+  if (!busy) closeSelf();
+});
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !busy) closeSelf();
 });
 
-for (const el of [ui.name, ui.dir, ui.conns]) el.addEventListener("input", render);
+ui.name.addEventListener("input", render);
+ui.conns.addEventListener("input", render);
+// One listener, in this order: the folder only counts once it is known to have
+// been typed, so render has to come after dirTouched or a mistake in what was
+// just typed or pasted is not seen until the next key.
 ui.dir.addEventListener("input", () => {
   dirTouched = true;
+  render();
 });
 
 ui.browse.addEventListener("click", async () => {
@@ -162,7 +180,7 @@ async function loadConfig() {
 (async function init() {
   const held = heldKey ? (await chrome.storage.session.get(heldKey))[heldKey] : null;
   if (!held) {
-    showExpired();
+    finish(tr("err_request_expired"));
     return;
   }
   ui.url.textContent = held.url;

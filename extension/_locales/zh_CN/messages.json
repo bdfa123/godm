@@ -490,7 +490,7 @@
     "message": "不再询问"
   },
   "confirm_dont_ask_tip": {
-    "message": "关闭此对话框。您可以在扩展设置中重新开启。"
+    "message": "以后不再显示此对话框。您可以在扩展设置中重新开启。"
   },
   "confirm_cancel": {
     "message": "取消"

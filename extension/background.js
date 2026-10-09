@@ -107,20 +107,25 @@ async function takeoverDisabled() {
 
 // ---------- hand-back bookkeeping ----------
 
-async function markHandedBack(url) {
+async function markHandedBack(...urls) {
   const { handedBack } = await chrome.storage.session.get({ handedBack: {} });
   const now = Date.now();
   for (const [k, t] of Object.entries(handedBack)) {
     if (now - t > HANDBACK_TTL_MS) delete handedBack[k];
   }
-  handedBack[url] = now;
+  for (const url of urls) if (url) handedBack[url] = now;
   await chrome.storage.session.set({ handedBack });
 }
 
-async function wasHandedBack(url) {
+// Any one of the addresses a download is known by will do: the link that was
+// asked for, or the one it ended up at.
+async function wasHandedBack(...urls) {
   const { handedBack } = await chrome.storage.session.get({ handedBack: {} });
-  const t = handedBack[url];
-  return !!t && Date.now() - t < HANDBACK_TTL_MS;
+  const now = Date.now();
+  return urls.some((url) => {
+    const t = url && handedBack[url];
+    return !!t && now - t < HANDBACK_TTL_MS;
+  });
 }
 
 // ---------- takeover decision ----------
@@ -260,7 +265,7 @@ async function handleDownload(item) {
     console.debug("godm: host is down, leaving this to the browser -", url);
     return;
   }
-  if (url && (await wasHandedBack(url))) {
+  if (await wasHandedBack(url, item.url)) {
     console.debug("godm: already handed this back, not touching it again -", url);
     return;
   }
@@ -306,7 +311,8 @@ async function handleDownload(item) {
   const jobUrl = /^https?:\/\//i.test(item.url || "") ? item.url : url;
   const held = {
     url: jobUrl,
-    // What Chrome gets back if godm cannot take the job after all.
+    // Where the link ended up, so the copy Chrome starts again can be told
+    // from a new download if it ends up there once more.
     backUrl: url,
     referrer: item.referrer || "",
     filename: suggestName(item),
@@ -342,14 +348,16 @@ async function handleDownload(item) {
 // handOff sends one job to godm and, if that fails, gives the download back to
 // the browser. Both the direct path and the dialog's Start button end here, so
 // a refusal is handled the same way whichever way the download arrived.
-// Resolves {ok:true}, or {ok:false, handedBack:true, error}.
-async function handOff(held, job) {
-  const resp = await callHost(
-    Object.assign({}, job, {
-      cookie: await cookieHeader(job.url),
-      userAgent: navigator.userAgent
-    })
-  );
+// stillWanted, if given, is asked at the last moment before the job leaves and
+// stops it by answering false.
+// Resolves {ok:true}, {ok:false, expired:true, error}, or
+// {ok:false, handedBack:true, error}.
+async function handOff(held, job, stillWanted) {
+  const cookie = await cookieHeader(job.url);
+  if (stillWanted && !(await stillWanted())) {
+    return { ok: false, expired: true, error: tr("err_request_expired") };
+  }
+  const resp = await callHost(Object.assign({}, job, { cookie, userAgent: navigator.userAgent }));
 
   if (resp.ok) {
     bumpBadge(1);
@@ -357,10 +365,16 @@ async function handOff(held, job) {
   }
 
   // The host answered the ping but failed the job. Hand the download back and
-  // remember the URL so the replacement is not intercepted in turn.
-  const url = held.backUrl;
+  // remember the link so the replacement is not intercepted in turn.
+  //
+  // What Chrome gets is the link the person clicked, which is also what godm was
+  // given, and not the address it redirected to. That one is usually a signed
+  // URL, and a dialog may have waited for hours (entries are kept for a day)
+  // since it was issued. Asking the original again gets a fresh signature, which
+  // may be a different address, so both are remembered.
+  const url = held.url;
   await setHostState(false, resp.error);
-  await markHandedBack(url);
+  await markHandedBack(url, held.backUrl);
   console.error("godm: handoff failed -", resp.error);
   await notifyThrottled(
     "handoff-failed",
@@ -486,16 +500,23 @@ async function confirmStart(msg) {
     const built = buildJob(held, msg);
     if (built.error) return { ok: false, error: built.error };
 
-    if (msg.dontAsk) {
-      // A settings hiccup is no reason to lose the download.
+    // Closing the window drops the held download (see onRemoved above), so a
+    // window closed after Start but before the job leaves still counts as
+    // Cancel. That is the last point at which it can: a job already written to
+    // the host cannot be called back, the person did press Start, and the page
+    // offers no Cancel in the meantime. The download then goes ahead, or comes
+    // back to Chrome with a notification if godm refuses.
+    const result = await handOff(held, built.job, async () => !!(await chrome.storage.session.get(key))[key]);
+    // "Don't ask again" belongs to a Start that went through, so a cancelled
+    // one does not switch the dialog off. A settings hiccup is no reason to
+    // report the download itself as failed.
+    if (msg.dontAsk && !result.expired) {
       try {
         await chrome.storage.sync.set({ confirmDownload: false });
       } catch (e) {
         console.warn("godm: could not save the do-not-ask setting", e);
       }
     }
-
-    const result = await handOff(held, built.job);
     await chrome.storage.session.remove(key);
     return result;
   } finally {
