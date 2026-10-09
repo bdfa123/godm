@@ -1,44 +1,77 @@
 name: Release
 
 # Pushing a tag such as v0.1.0 builds Windows zips for amd64 and arm64 and
-# publishes them, with SHA256SUMS.txt, as a GitHub release for that tag.
+# publishes them, with SHA256SUMS.txt, as a GitHub release for that tag. The tag
+# has to be on a commit master contains, and the checks CI runs have to pass on
+# that commit first.
 on:
   push:
     tags: ['v*']
 
+permissions:
+  contents: read
+
 env:
   # Keep in step with $WinresVersion in scripts/build-release.ps1.
   GO_WINRES_VERSION: v0.3.3
+  # The exe is pure Go, as in CI and in scripts/build-release.ps1.
+  CGO_ENABLED: "0"
 
 jobs:
+  # A tag can be pushed on any commit, including one from a branch nobody has
+  # reviewed, and the release it makes is what people download and run.
+  verify:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the tag looks like a version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the whole history, to tell whether master contains the tagged commit
+          persist-credentials: false
+
+      - name: Check that master contains the tagged commit
+        shell: bash
+        run: |
+          commit=$(git rev-parse "refs/tags/$GITHUB_REF_NAME^{commit}")
+          if ! git merge-base --is-ancestor "$commit" refs/remotes/origin/master; then
+            echo "::error::Tag $GITHUB_REF_NAME points at $commit, which is not on master. Merge the change first, then tag master."
+            exit 1
+          fi
+
+  # The same jobs CI runs on a push: gofmt, vet, the Go tests, the extension
+  # tests, and the Linux build. They run at the tagged commit.
+  checks:
+    name: Checks
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
   release:
     name: Build and publish
+    needs: [verify, checks]
     runs-on: windows-latest
     timeout-minutes: 30
     permissions:
       contents: write # create the release and attach the files to it
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false # the release goes through the API, not git
 
-      - name: Check the tag looks like a version
-        shell: bash
-        run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Tag '$GITHUB_REF_NAME' must look like v1.2.3 or v1.2.3-rc.1"
-            exit 1
-          fi
-
+      # The same Go release line as CI, from the same file.
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
+          check-latest: true
           cache: false # a release should be built from the sources, not from a cache
-
-      # Do not publish what CI would reject.
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test
-        run: go test -count=1 ./...
 
       # Puts the icon, the version info and an application manifest into the
       # exe. The manifest is the "cli" one: godm.exe stays a console-subsystem

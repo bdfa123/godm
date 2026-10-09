@@ -5,6 +5,9 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  # The release workflow runs these same checks on the commit a tag points at,
+  # so what a release has to pass cannot drift away from what a push has to.
+  workflow_call:
 
 permissions:
   contents: read
@@ -13,6 +16,12 @@ permissions:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # The exe that ships is built with cgo off. The Windows runner has a C
+  # compiler, so without this the tests would build the cgo flavour of some
+  # dependencies, which no release contains.
+  CGO_ENABLED: "0"
 
 jobs:
   windows:
@@ -26,10 +35,17 @@ jobs:
         run: git config --global core.autocrlf false
 
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false # nothing here pushes
 
+      # .go-version names the Go release line to build with, and check-latest
+      # takes the newest patch release of it. The go line in go.mod is only the
+      # oldest Go the code accepts; setup-go would read it as exactly 1.24.0,
+      # which no longer gets security fixes.
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
+          check-latest: true
 
       - uses: actions/setup-node@v7
         with:
@@ -64,10 +80,13 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: .go-version
+          check-latest: true
 
       - name: go vet
         run: go vet ./...
