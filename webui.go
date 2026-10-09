@@ -313,7 +313,7 @@ I18N.en = {
   "top.limit": "Downloads at once",
   "top.limit.tip": "How many files download at the same time; the rest wait in line",
   "top.speed": "Speed limit",
-  "top.speed.tip": "The most all downloads together may use. Each download can be limited on its own as well.",
+  "top.speed.tip": "The most all downloads together may use. Each download can be limited on its own as well. Downloads made by yt-dlp are not limited.",
   "top.pauseAll": "Pause all",
   "top.resumeAll": "Resume all",
   "top.add": "+ Add links",
@@ -422,7 +422,7 @@ I18N.en = {
   "toast.conns.other": "Using up to {n} connections for this download.",
   "toast.speed.task": "This download is limited to {speed}.",
   "toast.speed.taskNone": "This download has no limit of its own.",
-  "toast.speed.all": "All downloads together are limited to {speed}.",
+  "toast.speed.all": "All downloads together are limited to {speed}. Downloads made by yt-dlp are not limited.",
   "toast.speed.allNone": "Downloads are no longer speed limited.",
   "toast.address.bad": "That does not look like an http(s) link.",
   "toast.address.check": "Checking the new link…",
@@ -487,7 +487,7 @@ I18N.zh = {
   "top.limit": "同时下载数",
   "top.limit.tip": "同时下载的任务数量，其余任务排队等待",
   "top.speed": "限速",
-  "top.speed.tip": "所有任务合计最多可使用的速度。每个任务也可以单独限速。",
+  "top.speed.tip": "所有任务合计最多可使用的速度。每个任务也可以单独限速。由 yt-dlp 进行的下载不受此限制。",
   "top.pauseAll": "全部暂停",
   "top.resumeAll": "全部继续",
   "top.add": "+ 添加链接",
@@ -596,7 +596,7 @@ I18N.zh = {
   "toast.conns.other": "此任务最多使用 {n} 个连接。",
   "toast.speed.task": "此任务限速为 {speed}。",
   "toast.speed.taskNone": "此任务没有单独限速。",
-  "toast.speed.all": "所有任务合计限速 {speed}。",
+  "toast.speed.all": "所有任务合计限速 {speed}。由 yt-dlp 进行的下载不受限制。",
   "toast.speed.allNone": "已取消限速。",
   "toast.address.bad": "这不是有效的 http(s) 链接。",
   "toast.address.check": "正在检查新链接…",
@@ -1041,16 +1041,53 @@ function render() {
 
   var shown = tasks.filter(function (t) { return inTab(t, S.tab); });
   var list = document.getElementById("list");
-  // Re-rendering would close a dropdown the user is in the middle of choosing from.
+  // Rebuilding the list would close a dropdown the user is in the middle of
+  // choosing from. A select that was opened and left with Escape keeps focus
+  // too, and cannot be told from one that is still open, so skipping the
+  // render while it has focus froze every card until the next click. The
+  // select stays where it is and everything around it is refreshed.
   var a = document.activeElement;
-  if (a && a.tagName === "SELECT" && list.contains(a)) return;
+  var held = a && a.tagName === "SELECT" && list.contains(a) ? a : null;
   if (!shown.length) {
     list.innerHTML = tasks.length
       ? '<div class="empty"><b>' + tr("empty.view.title") + "</b>" + tr("empty.view.text") + "</div>"
       : '<div class="empty"><b>' + tr("empty.first.title") + "</b>" + tr("empty.first.text") + "</div>";
   } else {
-    list.innerHTML = shown.map(card).join("");
+    var html = shown.map(card).join("");
+    if (!held || !refreshAround(list, html, held)) list.innerHTML = html;
   }
+}
+
+// refreshAround puts the cards in html into the list while leaving the select
+// held in the document, which is what keeps its menu open and its focus.
+// The new cards are built off to the side; then, from the select up to the
+// list, the nodes beside the old one are swapped for those beside its twin in
+// the new cards. False means the select has no twin (its task is gone or
+// finished, or it sits somewhere else in the card), and nothing was touched:
+// the caller rebuilds the list.
+function refreshAround(list, html, held) {
+  var attr = held.hasAttribute("data-speed") ? "data-speed" : "data-conns";
+  var id = held.getAttribute(attr);
+  var box = document.createElement("div");
+  box.innerHTML = html;
+  var twin = null;
+  box.querySelectorAll("select[" + attr + "]").forEach(function (s) { if (s.getAttribute(attr) === id) twin = s; });
+  if (!twin) return false;
+  var up = function (n, top) { var d = 0; while (n && n !== top) { n = n.parentNode; d++; } return n ? d : -1; };
+  var depth = up(held, list);
+  if (depth < 0 || depth !== up(twin, box)) return false;
+
+  var old = held;
+  while (old !== list) {
+    var op = old.parentNode, np = twin.parentNode;
+    while (op.firstChild !== old) op.removeChild(op.firstChild);
+    while (old.nextSibling) op.removeChild(old.nextSibling);
+    while (np.firstChild !== twin) op.insertBefore(np.firstChild, old);
+    while (twin.nextSibling) op.appendChild(twin.nextSibling);
+    old = op;
+    twin = np;
+  }
+  return true;
 }
 
 function poll() {
@@ -1373,7 +1410,9 @@ document.getElementById("torrentFile").addEventListener("change", function (e) {
   var files = Array.prototype.slice.call(e.target.files || []);
   e.target.value = "";
   if (!files.length) return;
-  hide("addDlg");
+  // Links typed in the dialog are not added by this, and hiding the dialog would
+  // lose them the next time it is opened. With none typed there is nothing to keep.
+  if (!parseLinks(document.getElementById("addText").value).length) hide("addDlg");
   var added = 0, failed = [];
   files.reduce(function (chain, f) {
     return chain.then(function () {
