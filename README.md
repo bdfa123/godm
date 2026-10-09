@@ -1,5 +1,7 @@
 # godm
 
+[![CI](https://github.com/bdfa123/godm/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/bdfa123/godm/actions/workflows/ci.yml)
+
 A segmented, resumable download manager that takes over browser downloads —
 the IDM architecture, minus the DLL injection that modern Chrome no longer
 allows. Windows is the main target; the CLI and the daemon also build for
@@ -29,6 +31,23 @@ Chrome/Edge extension  ──native messaging──>  godm.exe (thin host)
 
 The only Go dependency is [go-webview2](https://github.com/jchv/go-webview2)
 for the manager window, which is pure Go, so no cgo is needed.
+
+## Download
+
+Windows builds are on the [Releases page](https://github.com/bdfa123/godm/releases/latest):
+`godm-<version>-windows-amd64.zip` for most PCs and `windows-arm64` for Windows
+on ARM. `SHA256SUMS.txt` next to them lists the checksums.
+
+1. Unzip it into a folder you will keep, such as `C:\Tools\godm`. The browser
+   remembers where the extension was loaded from, so do not move it afterwards.
+2. Double-click `godm.exe`. The manager window opens and the background service
+   starts.
+3. To take over browser downloads, load the `extension/` folder unpacked and run
+   `godm.exe install --ext-id <id>` from a terminal in that folder. The steps
+   are under [Browser takeover](#browser-takeover).
+
+The builds are not code-signed, so Windows SmartScreen may say "Windows
+protected your PC" the first time. Choose **More info**, then **Run anyway**.
 
 ## Build
 
