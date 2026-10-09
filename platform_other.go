@@ -92,6 +92,17 @@ func openInBrowser(url string) error {
 
 func spawnApp(exe string) error { return spawnDetached(exe, "app") }
 
+// playerPaths covers the macOS app bundles; elsewhere players are on PATH.
+func playerPaths(name string) []string {
+	switch name {
+	case "mpv":
+		return []string{"/Applications/mpv.app/Contents/MacOS/mpv"}
+	case "vlc":
+		return []string{"/Applications/VLC.app/Contents/MacOS/VLC"}
+	}
+	return nil
+}
+
 func showInFolder(path string) error {
 	dir := path
 	if fi, err := os.Stat(path); err == nil && !fi.IsDir() {

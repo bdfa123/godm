@@ -458,11 +458,22 @@ function banner(t) {
   return "";
 }
 
+// playable is true for a video that can be watched now: a finished one, or an
+// ordinary file whose size is known, which the player can read while the rest
+// arrives. Streams and yt-dlp downloads only become one file at the end.
+function playable(t, ext) {
+  if (kindOf(ext) !== "video" && kindOf(ext) !== "audio") return false;
+  if (t.state === "done") return !!t.path;
+  if (t.kind || !(t.size > 0) || t.resumable === false) return false;
+  return t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error";
+}
+
 function card(t) {
   var name = nameOf(t), ext = extOf(name), open = !!S.open[t.id];
   var hasSize = t.size > 0;
   var pct = t.state === "done" ? 100 : progressOf(t);
   var acts = [];
+  if (playable(t, ext)) acts.push(["play", t.state === "done" ? "Play" : "Play now"]);
   if (t.state === "running" || t.state === "queued") acts.push(["pause", "Pause"]);
   if (t.state === "paused") acts.push(["resume", "Resume"]);
   if (t.path) acts.push(["open", t.state === "done" ? "Show in folder" : "Open folder"]);
@@ -569,7 +580,14 @@ document.getElementById("list").addEventListener("click", function (e) {
   if (!b) return;
   var id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
   var t = S.tasks.filter(function (x) { return x.id === id; })[0];
-  if (act === "pause") post("/api/pause?id=" + q(id)).then(poll).catch(fail);
+  if (act === "play") {
+    post("/api/play?id=" + q(id)).then(function (r) {
+      if (!r.ok) return toast(r.error, "err");
+      if (t && t.state !== "done") toast("Opening the player — the download follows where you watch.");
+      poll();
+    }).catch(fail);
+  }
+  else if (act === "pause") post("/api/pause?id=" + q(id)).then(poll).catch(fail);
   else if (act === "resume") post("/api/resume?id=" + q(id)).then(poll).catch(fail);
   else if (act === "open") post("/api/open?id=" + q(id)).then(function (r) { if (!r.ok) toast(r.error, "err"); }).catch(fail);
   else if (act === "conns") { S.open[id] = !S.open[id]; render(); }

@@ -50,6 +50,14 @@ type Options struct {
 	// not, the download is refused instead of silently starting over.
 	Refresh bool
 
+	// Playback, when set, lets a player read the file while it downloads: the
+	// connections gather just ahead of wherever it is reading.
+	Playback *Playback
+	// StreamPiece is the most each connection takes at a time while a player
+	// reads. Pieces right at the player are smaller, so the bytes it needs
+	// first do not wait on one connection; this is the size they grow to.
+	StreamPiece int64
+
 	OnStart    func(StartInfo)
 	OnProgress func(Progress)
 }
@@ -77,6 +85,12 @@ func (o *Options) applyDefaults() {
 		// Small enough that the last megabyte of a file is still shared out,
 		// large enough that opening a connection is not most of the work.
 		o.MinSplit = 512 << 10
+	}
+	if o.StreamPiece <= 0 {
+		o.StreamPiece = 8 << 20
+	}
+	if o.StreamPiece < o.MinSplit {
+		o.StreamPiece = o.MinSplit
 	}
 	if o.MaxRetries <= 0 {
 		o.MaxRetries = defaultRetries
@@ -184,6 +198,25 @@ func (s *Segment) splitInHalf(minPiece int64) *Segment {
 	return ns
 }
 
+// splitAt gives everything from at onwards to a new segment, as long as the
+// connection keeps at least minKeep of unfinished work and the new segment
+// gets at least minGive. It is how a player gets the bytes it needs next
+// instead of whatever happens to be in the middle.
+func (s *Segment) splitAt(at, minKeep, minGive int64) *Segment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	end := s.end.Load()
+	if end < 0 {
+		return nil
+	}
+	if cur := s.Start + s.done.Load(); at-cur < minKeep || end-at+1 < minGive {
+		return nil
+	}
+	ns := newSegment(at, end)
+	s.end.Store(at - 1)
+	return ns
+}
+
 // SegmentView is a point-in-time copy of a Segment for display.
 type SegmentView struct {
 	Start int64  `json:"start"`
@@ -244,6 +277,13 @@ func (e *RefreshMismatchError) Error() string { return "cannot resume from this 
 
 // errYield stops a connection because the connection limit was lowered.
 var errYield = errors.New("connection released: the connection limit was lowered")
+
+// errMove stops a connection so it can fetch what a player is waiting for.
+var errMove = errors.New("connection moved to where the player is reading")
+
+// moveCheckEvery is how often a connection asks whether a player needs it
+// somewhere else.
+const moveCheckEvery = 200 * time.Millisecond
 
 // Download runs a job to completion, resuming from a sidecar state file if one
 // matches. It is safe to cancel through ctx; progress survives in the sidecar.
@@ -307,6 +347,10 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	}
 	for _, s := range plan.segs {
 		t.received.Add(s.done.Load())
+	}
+	if o.Playback != nil {
+		o.Playback.attach(t)
+		defer o.Playback.detach(t)
 	}
 
 	if o.OnStart != nil {
@@ -732,6 +776,9 @@ func (t *task) worker(ctx context.Context) error {
 			yielded = true
 			return nil
 		}
+		if errors.Is(err, errMove) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -756,9 +803,16 @@ func (t *task) yieldSlot() bool {
 // is one, otherwise the back half of the largest range another connection is
 // still working through. The second case is what stops a single slow
 // connection from being left alone with the end of the file.
+//
+// While a player reads the file, work at and after where it reads comes first.
 func (t *task) claim() *Segment {
 	t.segMu.Lock()
 	defer t.segMu.Unlock()
+	if f, ok := t.focus(); ok {
+		if s, _ := t.streamClaimLocked(f, t.firstMissingLocked(f), math.MaxInt64, false); s != nil {
+			return s
+		}
+	}
 	for _, s := range t.segs {
 		if !s.busy && !s.complete() {
 			s.busy = true
@@ -774,15 +828,139 @@ func (t *task) claim() *Segment {
 		return nil
 	}
 	ns.busy = true
-	for i, s := range t.segs {
-		if s == big {
+	t.insertAfterLocked(big, ns)
+	return ns
+}
+
+func (t *task) insertAfterLocked(s, ns *Segment) {
+	for i, x := range t.segs {
+		if x == s {
 			t.segs = append(t.segs, nil)
 			copy(t.segs[i+2:], t.segs[i+1:])
 			t.segs[i+1] = ns
-			break
+			return
 		}
 	}
-	return ns
+}
+
+// focus is where a player is reading, if one is. Only a file whose ranges can
+// be fetched in any order can be steered.
+func (t *task) focus() (int64, bool) {
+	if t.opts.Playback == nil || !t.probe.Resumable || t.probe.Size <= 0 {
+		return 0, false
+	}
+	return t.opts.Playback.focusAt()
+}
+
+// firstMissingLocked returns the first byte at or after off that is not on
+// disk yet, or the end of the file when everything from off onwards is there.
+// Each segment holds its bytes as one run from its start, which makes this a
+// single walk.
+func (t *task) firstMissingLocked(off int64) int64 {
+	for _, s := range t.segs {
+		e := s.end.Load()
+		if e >= 0 && e < off {
+			continue
+		}
+		if have := s.Start + s.done.Load(); off < have {
+			off = have
+		}
+		if e < 0 || off <= e {
+			return off
+		}
+	}
+	return off
+}
+
+// pieceAt is how much a connection d bytes ahead of the player keeps before
+// the rest of its range is handed on. Pieces start small at the player, so
+// several connections share the bytes it needs first, and grow to full size
+// further out where a request should be mostly payload.
+func (t *task) pieceAt(d int64) int64 {
+	if d < t.opts.MinSplit {
+		return t.opts.MinSplit
+	}
+	if d > t.opts.StreamPiece {
+		return t.opts.StreamPiece
+	}
+	return d
+}
+
+// streamClaimLocked finds work for a connection while a player reads at f
+// and waits on byte g, the first one missing from there. It hands out the
+// first unfinished bytes from g on, a piece at a time, so the connections line
+// up one behind another ahead of the player instead of spreading over the
+// whole file. Only work that starts before limit counts, and with dry set it
+// only reports whether there is any.
+func (t *task) streamClaimLocked(f, g, limit int64, dry bool) (*Segment, bool) {
+	for _, s := range t.segs {
+		e := s.end.Load()
+		if e < g || s.complete() {
+			continue
+		}
+		cur := s.Start + s.done.Load()
+		var at int64
+		// A piece is normally worth a connection only from MinSplit up, but
+		// not when the player is waiting on exactly these bytes: the index of
+		// a Matroska file is a few hundred KB at the very end, and a seek
+		// cannot finish without it.
+		minGive := t.opts.MinSplit
+		switch {
+		case cur < g && g-cur >= t.opts.MinSplit:
+			// Bytes before the player can wait; start where it is.
+			at, minGive = g, 1
+		case s.busy:
+			// Its connection keeps the next piece; take the one after.
+			at = cur + t.pieceAt(cur-f)
+			if e-at+1 < minGive && cur-f < t.opts.StreamPiece {
+				// Too little left past that piece, but the player is about
+				// to need it: share what is left, the way the end of a file
+				// is shared, rather than leave one connection to it.
+				at = cur + (e-cur+1)/2
+			}
+		default:
+			at = cur
+		}
+		if at >= limit || (at > cur && e-at+1 < minGive) {
+			continue
+		}
+		if dry {
+			return nil, true
+		}
+		if at == cur {
+			s.busy = true
+			return s, true
+		}
+		ns := s.splitAt(at, t.opts.MinSplit, minGive)
+		if ns == nil {
+			continue // its connection got there first
+		}
+		ns.busy = true
+		t.insertAfterLocked(s, ns)
+		return ns, true
+	}
+	return nil, false
+}
+
+// shouldMove reports that a player is waiting on bytes this connection is not
+// near, and that there is work for it where the player reads. Connections
+// already lined up ahead of the player stay put.
+func (t *task) shouldMove(seg *Segment) bool {
+	f, ok := t.focus()
+	if !ok {
+		return false
+	}
+	t.segMu.Lock()
+	defer t.segMu.Unlock()
+	g := t.firstMissingLocked(f)
+	lead := g + t.opts.StreamPiece*int64(t.limit())
+	// A connection just short of the player is the one about to deliver its
+	// bytes; moving it would only cost a reconnect and hand the range back.
+	if cur := seg.Start + seg.done.Load(); cur >= g-t.opts.MinSplit && cur < lead {
+		return false
+	}
+	_, found := t.streamClaimLocked(f, g, lead, true)
+	return found
 }
 
 func (t *task) unclaim(s *Segment) {
@@ -850,7 +1028,7 @@ func (t *task) runSegment(ctx context.Context, seg *Segment) error {
 				seg.set(SegWaiting, "")
 			}
 			return nil
-		case errors.Is(err, errYield):
+		case errors.Is(err, errYield), errors.Is(err, errMove):
 			seg.set(SegWaiting, "")
 			return err
 		case ctx.Err() != nil:
@@ -903,9 +1081,16 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	seg.set(SegActive, "")
 
 	buf := make([]byte, readBufSize)
+	var looked time.Time
 	for {
 		if t.yieldSlot() {
 			return errYield
+		}
+		if now := time.Now(); now.Sub(looked) >= moveCheckEvery {
+			looked = now
+			if t.shouldMove(seg) {
+				return errMove
+			}
 		}
 		n, rerr := resp.Body.Read(buf)
 		if n > 0 {
@@ -1198,7 +1383,7 @@ func isRetryableStatus(code int) bool {
 }
 
 func retryable(err error) bool {
-	if err == nil || errors.Is(err, errYield) {
+	if err == nil || errors.Is(err, errYield) || errors.Is(err, errMove) {
 		return false
 	}
 	var le *LinkExpiredError

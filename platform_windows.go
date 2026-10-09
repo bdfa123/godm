@@ -58,6 +58,26 @@ func spawnApp(exe string) error {
 	return cmd.Process.Release()
 }
 
+// playerPaths lists where the installers put a player that is not on PATH.
+func playerPaths(name string) []string {
+	var rel []string
+	switch name {
+	case "mpv":
+		rel = []string{`MPV Player\mpv.exe`, `mpv\mpv.exe`, `Programs\mpv\mpv.exe`}
+	case "vlc":
+		rel = []string{`VideoLAN\VLC\vlc.exe`}
+	}
+	var out []string
+	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
+		if root := os.Getenv(env); root != "" {
+			for _, r := range rel {
+				out = append(out, root+`\`+r)
+			}
+		}
+	}
+	return out
+}
+
 func nativeHostRegRoots() []string {
 	return []string{chromeRegRoot, edgeRegRoot, braveRegRoot, chromiumRegRoot}
 }

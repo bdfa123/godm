@@ -130,6 +130,9 @@ type managedTask struct {
 	lastRecv int64
 	lastAt   time.Time
 	speedEMA float64
+
+	// play lets a media player read the file before it has finished.
+	play Playback
 }
 
 func (t *managedTask) snapshot() TaskView {
@@ -283,6 +286,9 @@ type Manager struct {
 	// announce is what tells the user a download finished or needs them. The
 	// tray provides it; tests replace it.
 	announce func(title, text, open string)
+	// streamPiece is the engine's piece size while a player reads; zero keeps
+	// the engine default. Tests shrink it to fit their small files.
+	streamPiece int64
 }
 
 func NewManager(outDir string, parallel int) *Manager {
@@ -531,6 +537,8 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 			Connections: req.Connections,
 			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
 			Refresh:     refresh,
+			Playback:    &mt.play,
+			StreamPiece: m.streamPiece,
 			OnStart: func(si StartInfo) {
 				mt.onStart(gen, si)
 				m.dirty.Store(true)
@@ -1166,6 +1174,7 @@ func (m *Manager) saveLoop() {
 type server struct {
 	mgr   *Manager
 	token string
+	port  int // where a player is sent to read a download in progress
 }
 
 func findRunningDaemon(timeout time.Duration) *daemonClient {
@@ -1231,7 +1240,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 		log.Printf("could not restore the task list: %v", err)
 	}
 	go mgr.saveLoop()
-	s := &server{mgr: mgr, token: token}
+	s := &server{mgr: mgr, token: token, port: actual}
 
 	if err := writePort(actual); err != nil {
 		return err
@@ -1264,6 +1273,8 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
 	mux.HandleFunc("/api/browse", s.guard(post(s.handleBrowse)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
+	mux.HandleFunc("/api/play", s.guard(post(s.handlePlay)))
+	mux.HandleFunc("/stream/", s.guard(s.handleStream))
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)
