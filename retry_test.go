@@ -418,10 +418,10 @@ func TestCapFromAPassingRefusalLiftsAgain(t *testing.T) {
 }
 
 // A server that keeps to its limit is asked for one connection more only now
-// and then, with a single request each time: a try that is turned away is not
-// retried, and the one after it waits longer.
+// and then, with a single request: a try that is turned away is not retried,
+// as a retry would only be turned away too.
 func TestAServerThatKeepsItsLimitIsOnlyAskedNowAndThen(t *testing.T) {
-	payload := makePayload(10 << 20)
+	payload := makePayload(10 << 20) // four ranges of about three seconds each
 	h := &refusingServer{slowServer: slowServer{payload: payload, chunk: 16 << 10, delay: 20 * time.Millisecond}, max: 3}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -436,24 +436,26 @@ func TestAServerThatKeepsItsLimitIsOnlyAskedNowAndThen(t *testing.T) {
 	}
 	checkFile(t, res.Path, payload)
 
-	// The fourth connection is turned away twice in the first half second,
-	// which is how the cap is learned. Every refusal after that is a try.
+	// The fourth connection is turned away in the first half second, which
+	// is how the cap is learned; the first refusal after that is the first
+	// try. Later ones are not looked at: once a range is finished its
+	// connection asks for the next, and can be turned away for a moment
+	// while the server still counts the request it has just finished.
 	all := h.refusals()
-	var tries []time.Time
-	prev := all[0]
-	for _, at := range all {
-		if at.Sub(all[0]) < 750*time.Millisecond {
-			prev = at
-			continue
+	first := -1
+	for i, at := range all {
+		if at.Sub(all[0]) >= 750*time.Millisecond {
+			first = i
+			break
 		}
-		tries = append(tries, at)
-		if gap := at.Sub(prev); gap < probe*3/4 {
-			t.Errorf("turned away %v after the request before; tries should be %v apart", gap.Round(time.Millisecond), probe)
-		}
-		prev = at
 	}
-	if len(tries) == 0 {
+	if first < 0 {
 		t.Fatalf("no connection past the cap was tried in %d refusals", len(all))
+	}
+	for _, at := range all[first+1:] {
+		if gap := at.Sub(all[first]); gap < probe*3/4 {
+			t.Errorf("a try turned away was asked again %v later", gap.Round(time.Millisecond))
+		}
 	}
 }
 
