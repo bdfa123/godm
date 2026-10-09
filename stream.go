@@ -164,6 +164,35 @@ func (t *managedTask) stillArriving() bool {
 	return false
 }
 
+// addPlayer counts a stream request that is about to open the file; stop
+// ends it. It reports false once the task has been removed.
+func (t *managedTask) addPlayer(stop func()) (uint64, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.removed {
+		return 0, false
+	}
+	if t.players == nil {
+		t.players = map[uint64]func(){}
+	}
+	t.playerSeq++
+	t.players[t.playerSeq] = stop
+	return t.playerSeq, true
+}
+
+// dropPlayer is called once a stream request has closed the file. If the
+// download was deleted meanwhile, the last one to let go deletes the file.
+func (t *managedTask) dropPlayer(id uint64) {
+	t.mu.Lock()
+	delete(t.players, id)
+	del := t.deleteAfter && !t.inFlight && len(t.players) == 0
+	path := t.view.Path
+	t.mu.Unlock()
+	if del {
+		deleteDownload(path)
+	}
+}
+
 // waitStreamable waits for a download that was just started to learn where
 // its file is and how big it is, which a player needs before the first byte.
 func waitStreamable(ctx context.Context, mt *managedTask) (TaskView, error) {
@@ -214,6 +243,22 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	// Deleting the download ends this request, and the file goes once the
+	// request has closed it.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	rc := http.NewResponseController(w)
+	player, ok := mt.addPlayer(func() {
+		cancel()
+		// A player that stopped reading leaves a write blocked, and this
+		// ends that too.
+		rc.SetWriteDeadline(time.Now())
+	})
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	defer mt.dropPlayer(player)
 	f, err := os.Open(v.Path)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -253,7 +298,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	streamRange(r.Context(), mt, f, w, start, end)
+	streamRange(ctx, mt, f, w, start, end)
 }
 
 // streamRange copies bytes start..end to w as they land on disk.

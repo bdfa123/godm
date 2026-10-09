@@ -147,6 +147,12 @@ type managedTask struct {
 
 	// play lets a media player read the file before it has finished.
 	play Playback
+	// players are the stream requests holding the file open, each with what
+	// ends it. Windows will not delete a file that is open, so deleting the
+	// download ends them and waits for the last to let go, as it waits for
+	// the run.
+	players   map[uint64]func()
+	playerSeq uint64
 }
 
 func (t *managedTask) snapshot() TaskView {
@@ -697,7 +703,7 @@ func (m *Manager) release() {
 func (m *Manager) afterRun(mt *managedTask) {
 	mt.mu.Lock()
 	mt.inFlight = false
-	del, path := mt.deleteAfter, mt.view.Path
+	del, path := mt.deleteAfter && len(mt.players) == 0, mt.view.Path
 	mt.mu.Unlock()
 	if del {
 		deleteDownload(path)
@@ -826,7 +832,7 @@ func (m *Manager) ResumeAll() {
 }
 
 // Remove drops a task. With deleteFile the partial or finished file goes too;
-// if a run still has it open, deletion waits until that run lets go.
+// if a run or a player still has it open, deletion waits until they let go.
 func (m *Manager) Remove(id string, deleteFile bool) bool {
 	m.mu.Lock()
 	mt, ok := m.tasks[id]
@@ -840,10 +846,19 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 
 	mt.mu.Lock()
 	mt.removed = true
-	cancel, path, busy := mt.cancel, mt.view.Path, mt.inFlight
+	cancel, path := mt.cancel, mt.view.Path
+	busy := mt.inFlight || len(mt.players) > 0
 	bt := isBTJob(mt.req)
-	if deleteFile && busy && !bt {
-		mt.deleteAfter = true
+	if deleteFile && !bt {
+		if busy {
+			mt.deleteAfter = true
+		}
+		// Players reading the file are cut off so it can go. This happens
+		// under the lock because a request drops out under it before it
+		// ends, so no stop reaches a connection gone on to another request.
+		for _, stop := range mt.players {
+			stop()
+		}
 	}
 	mt.mu.Unlock()
 

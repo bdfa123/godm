@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -227,6 +228,98 @@ func TestStreamServesARangeBeforeTheDownloadFinishes(t *testing.T) {
 			t.Errorf("%s: status %d, want %d", path, resp.StatusCode, want)
 		}
 	}
+}
+
+// A player streaming a download holds its file open, and Windows will not
+// delete a file that is open. Removing the download with its file has to end
+// the stream and delete the file once the player's request lets go of it,
+// not take the sidecar and leave the file behind.
+func TestRemoveWithDeleteWhileAPlayerStreams(t *testing.T) {
+	payload := makePayload(8 << 20)
+	src := httptest.NewServer(&slowServer{payload: payload, chunk: 8 << 10, delay: 20 * time.Millisecond})
+	defer src.Close()
+
+	m := NewManager(t.TempDir(), 2)
+	m.announce = nil
+	m.streamPiece = 128 << 10
+	s := &server{mgr: m, token: "tok"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream/", s.guard(s.handleStream))
+	api := httptest.NewServer(mux)
+	defer api.Close()
+
+	id, err := m.Add(jobRequest{URL: src.URL + "/film.mkv", Connections: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	waitFor(t, 10*time.Second, "the download to start", func() bool {
+		v, _ := findTask(m, id)
+		path = v.Path
+		return path != "" && v.Received > 0
+	})
+
+	// The response starts once the first bytes are read from the file, so
+	// the file is open by the time it arrives.
+	resp, err := http.Get(api.URL + "/stream/" + id + "/film.mkv?token=tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan struct{})
+	go func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		close(ended)
+	}()
+
+	m.Remove(id, true)
+	select {
+	case <-ended:
+	case <-time.After(streamGrace - time.Second):
+		t.Error("the player's request carried on after its download was deleted")
+	}
+	waitFor(t, 10*time.Second, "the file and its sidecar to be deleted", func() bool {
+		_, err1 := os.Stat(path)
+		_, err2 := os.Stat(statePath(path))
+		return os.IsNotExist(err1) && os.IsNotExist(err2)
+	})
+}
+
+// A paused player stops reading, and the request serving it then sits in a
+// write that never finishes, with the file open. Deleting the download has
+// to end that write too.
+func TestRemoveWithDeleteEndsAPlayerThatStoppedReading(t *testing.T) {
+	src := httptest.NewServer(&rangedHandler{payload: makePayload(32 << 20)})
+	defer src.Close()
+
+	m := NewManager(t.TempDir(), 2)
+	m.announce = nil
+	s := &server{mgr: m, token: "tok"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream/", s.guard(s.handleStream))
+	api := httptest.NewServer(mux)
+	defer api.Close()
+
+	id, err := m.Add(jobRequest{URL: src.URL + "/film.mkv", Connections: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "completion", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+
+	resp, err := http.Get(api.URL + "/stream/" + id + "/film.mkv?token=tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	// Read nothing, so the response fills whatever the connection buffers.
+	time.Sleep(300 * time.Millisecond)
+
+	m.Remove(id, true)
+	waitFor(t, 10*time.Second, "the file to be deleted", func() bool {
+		_, err := os.Stat(v.Path)
+		return os.IsNotExist(err)
+	})
 }
 
 func TestPlayOpensTheFileOrTheStream(t *testing.T) {
