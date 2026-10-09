@@ -728,6 +728,39 @@ func TestRemovingATorrentDeletesOnlyWhatItWrote(t *testing.T) {
 	}
 }
 
+func TestRemovingATorrentMidDownloadLeavesNoFiles(t *testing.T) {
+	src := t.TempDir()
+	var files []tfile
+	for i := 1; i <= 6; i++ {
+		files = append(files, tfile{fmt.Sprintf("S01/e%02d.mkv", i), makePayload(700 << 10)})
+	}
+	mi := makeTorrent(t, src, "Show", 64<<10, files...)
+	seed := newSeeder(t, src, mi, 0)
+
+	// The client writes chunks with its lock let go, so a removal in the
+	// middle of a download nearly always lands while some are in flight.
+	for i := 0; i < 5; i++ {
+		m := newBTManager(t)
+		id, err := m.Add(jobRequest{URL: magnetOf(mi, "Show", seed.addr())})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tor := waitLoaded(t, m, id)
+		waitFor(t, 20*time.Second, "some of the show", func() bool { return tor.BytesCompleted() > 1<<20 })
+		v, _ := findTask(m, id)
+		if !m.Remove(id, true) {
+			t.Fatal("remove refused")
+		}
+		waitFor(t, 10*time.Second, fmt.Sprintf("run %d: the show's folder to go", i), func() bool { return !pathExists(v.Path) })
+		// A write still in flight at the delete would bring a file back.
+		time.Sleep(300 * time.Millisecond)
+		if pathExists(v.Path) {
+			t.Fatalf("run %d: %s came back after it was deleted", i, v.Path)
+		}
+		m.shutdownBT()
+	}
+}
+
 func TestTorrentStreamServesARangeBeforeTheDownloadFinishes(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string

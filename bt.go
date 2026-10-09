@@ -222,12 +222,16 @@ type btEngine struct {
 	// everything on 127.0.0.1 with no DHT and no trackers.
 	configure func(*torrent.ClientConfig)
 
-	mu      sync.Mutex
-	cl      *torrent.Client
-	pc      storage.PieceCompletion
-	slog    *slog.Logger // the client's warnings, into godm's log
-	fslog   *slog.Logger // the file storage's, errors only
-	loaded  map[metainfo.Hash]*btLoaded
+	mu     sync.Mutex
+	cl     *torrent.Client
+	pc     storage.PieceCompletion
+	slog   *slog.Logger // the client's warnings, into godm's log
+	fslog  *slog.Logger // the file storage's, errors only
+	loaded map[metainfo.Hash]*btLoaded
+	// stores is the storage each task's torrent last wrote through. It
+	// outlives the torrent's time in the client, so that removing the task can
+	// wait for the last writes even while a run is still dropping it.
+	stores  map[*managedTask]*btStorage
 	closed  bool
 	policy  SeedPolicy
 	changed chan struct{} // closed and replaced when the policy changes
@@ -424,12 +428,34 @@ func (e *btEngine) add(mt *managedTask, spec *torrent.TorrentSpec) (*torrent.Tor
 		l.t.Drop()
 		delete(e.loaded, spec.InfoHash)
 	}
+	if e.stores == nil {
+		e.stores = map[*managedTask]*btStorage{}
+	}
+	e.stores[mt] = st
 	t, _, err := cl.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, nil, err
 	}
 	e.loaded[spec.InfoHash] = &btLoaded{t: t, mt: mt}
 	return t, st, nil
+}
+
+// forget takes a removed task's torrent out of the client and returns once
+// nothing can change its files any more, with its info if it had any. Drop
+// alone does not promise that when the run is dropping the torrent at the
+// same moment: the second caller finds it gone and does not wait.
+func (e *btEngine) forget(mt *managedTask) *metainfo.Info {
+	info := e.drop(mt)
+	e.mu.Lock()
+	st := e.stores[mt]
+	delete(e.stores, mt)
+	e.mu.Unlock()
+	if st != nil {
+		if i := st.stop(); i != nil {
+			info = i
+		}
+	}
+	return info
 }
 
 // drop takes a task's torrent out of the client, closing its connections and
@@ -472,7 +498,7 @@ func (e *btEngine) client() *torrent.Client {
 func (e *btEngine) close() {
 	e.mu.Lock()
 	cl, pc := e.cl, e.pc
-	e.cl, e.pc, e.loaded, e.closed = nil, nil, nil, true
+	e.cl, e.pc, e.loaded, e.stores, e.closed = nil, nil, nil, nil, true
 	e.mu.Unlock()
 	if cl != nil {
 		cl.Close()
@@ -678,9 +704,44 @@ type btStorage struct {
 	pc     storage.PieceCompletion
 	slog   *slog.Logger
 	failed chan error // the files could not be placed; the run reports it
+
+	// gate is held shared by every change to the files or the piece records,
+	// and exclusively by stop. The client writes chunks with its own lock let
+	// go, and dropping a torrent does not wait for those writes, so without
+	// this a removal could delete a file that a write then recreates, or that
+	// a write still holds open, which Windows refuses to delete.
+	gate    sync.RWMutex
+	stopped bool
+	info    *metainfo.Info // once the storage is open
+}
+
+// errStorageStopped is what a write gets once its torrent has let go.
+var errStorageStopped = errors.New("the torrent has stopped writing")
+
+// stop waits for the changes in progress and refuses any after them. It
+// returns the torrent's info if the storage was ever opened.
+func (s *btStorage) stop() *metainfo.Info {
+	s.gate.Lock()
+	defer s.gate.Unlock()
+	s.stopped = true
+	return s.info
+}
+
+// enter admits one change; leave with s.gate.RUnlock.
+func (s *btStorage) enter() bool {
+	s.gate.RLock()
+	if s.stopped {
+		s.gate.RUnlock()
+		return false
+	}
+	return true
 }
 
 func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih metainfo.Hash) (storage.TorrentImpl, error) {
+	if !s.enter() {
+		return storage.TorrentImpl{}, errStorageStopped
+	}
+	defer s.gate.RUnlock()
 	root, err := s.mt.claimTorrentRoot(info, ih)
 	if err != nil {
 		select {
@@ -703,7 +764,72 @@ func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih met
 		UsePartFiles: g.Some(false),
 		Logger:       s.slog,
 	})
-	return files.OpenTorrent(ctx, info, ih)
+	impl, err := files.OpenTorrent(ctx, info, ih)
+	if err != nil {
+		return impl, err
+	}
+	s.info = info // stop reads it only once this has let go of the gate
+	out := impl
+	out.Piece = func(p metainfo.Piece) storage.PieceImpl {
+		return btPiece{PieceImpl: impl.Piece(p), s: s, length: p.Length()}
+	}
+	if impl.PieceWithHash != nil {
+		out.PieceWithHash = func(p metainfo.Piece, h g.Option[[]byte]) storage.PieceImpl {
+			return btPiece{PieceImpl: impl.PieceWithHash(p, h), s: s, length: p.Length()}
+		}
+	}
+	// The client closes the storage once it has dropped the torrent and the
+	// last piece check is over. Waiting here for the writes makes the drop
+	// wait for them too, so a paused torrent has let go of its files.
+	out.Close = func() error {
+		s.stop()
+		if impl.Close != nil {
+			return impl.Close()
+		}
+		return nil
+	}
+	return out, nil
+}
+
+// btPiece passes one piece through to the file storage, but only while its
+// torrent's storage has not stopped.
+type btPiece struct {
+	storage.PieceImpl
+	s      *btStorage
+	length int64
+}
+
+func (p btPiece) WriteAt(b []byte, off int64) (int, error) {
+	if !p.s.enter() {
+		return 0, errStorageStopped
+	}
+	defer p.s.gate.RUnlock()
+	return p.PieceImpl.WriteAt(b, off)
+}
+
+func (p btPiece) MarkComplete() error {
+	if !p.s.enter() {
+		return errStorageStopped
+	}
+	defer p.s.gate.RUnlock()
+	return p.PieceImpl.MarkComplete()
+}
+
+func (p btPiece) MarkNotComplete() error {
+	if !p.s.enter() {
+		return errStorageStopped
+	}
+	defer p.s.gate.RUnlock()
+	return p.PieceImpl.MarkNotComplete()
+}
+
+// WriteTo keeps the file storage's own way of reading a whole piece, which is
+// what checking it uses, rather than one ReadAt after another.
+func (p btPiece) WriteTo(w io.Writer) (int64, error) {
+	if wt, ok := p.PieceImpl.(io.WriterTo); ok {
+		return wt.WriteTo(w)
+	}
+	return io.Copy(w, io.NewSectionReader(p.PieceImpl, 0, p.length))
 }
 
 // claimTorrentRoot decides where a torrent goes: one file, or one folder
@@ -846,40 +972,85 @@ func torrentMediaPath(v TaskView) (string, error) {
 	return p, nil
 }
 
+// btDeleteFor is how long deleting a removed torrent's files keeps trying.
+// Windows will not delete a file that something has open, and a player or a
+// virus scanner may hold one for a moment after the torrent let go of it.
+const btDeleteFor = 15 * time.Second
+
 // deleteTorrentFiles removes what a torrent wrote, and the folders it made once
 // they are empty. Only those files: someone may have put their own in there.
+// What will not go is tried again for a while, then named in the log.
 func deleteTorrentFiles(root string, info *metainfo.Info) {
-	if info == nil || !info.IsDir() {
-		// A single file, or a folder claimed for a magnet whose metainfo never
-		// arrived, which is empty if it is ours alone.
-		os.Remove(root)
-		return
+	var files, dirs []string
+	if info == nil {
+		// Without the file list all that can go is the claimed name itself:
+		// a file, or a folder that is empty if it is ours alone.
+		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
+			dirs = []string{root}
+		} else {
+			files = []string{root}
+		}
+	} else if !info.IsDir() {
+		files = []string{root}
+	} else {
+		seen := map[string]bool{}
+		for _, fi := range info.UpvertedFiles() {
+			p := filepath.Join(append([]string{root}, torrentRelPath(&fi)...)...)
+			files = append(files, p)
+			for d := filepath.Dir(p); len(d) > len(root); d = filepath.Dir(d) {
+				if !seen[d] {
+					seen[d] = true
+					dirs = append(dirs, d)
+				}
+			}
+		}
+		// Deepest first, so each folder is empty by the time it is reached.
+		sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+		dirs = append(dirs, root)
 	}
-	dirs := map[string]bool{}
-	for _, fi := range info.UpvertedFiles() {
-		p := filepath.Join(append([]string{root}, torrentRelPath(&fi)...)...)
-		os.Remove(p)
-		for d := filepath.Dir(p); len(d) > len(root); d = filepath.Dir(d) {
-			dirs[d] = true
+	deadline := time.Now().Add(btDeleteFor)
+	for wait := 50 * time.Millisecond; ; wait = min(2*wait, time.Second) {
+		left := removeTorrentPaths(files, dirs)
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("removing a torrent's files: could not delete %s", strings.Join(left, "; "))
+			return
+		}
+		time.Sleep(wait)
+	}
+}
+
+// removeTorrentPaths deletes files, then dirs in order, and reports what is
+// still there and should not be. A folder that is not empty is no failure of
+// its own: either a file of ours in it is already reported, or what it holds
+// is someone else's.
+func removeTorrentPaths(files, dirs []string) (left []string) {
+	for _, p := range files {
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			left = append(left, err.Error())
 		}
 	}
-	list := make([]string, 0, len(dirs))
-	for d := range dirs {
-		list = append(list, d)
+	for _, d := range dirs {
+		err := os.Remove(d)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if entries, rerr := os.ReadDir(d); rerr == nil && len(entries) > 0 {
+			continue
+		}
+		left = append(left, err.Error())
 	}
-	// Deepest first, so each folder is empty by the time it is reached.
-	sort.Slice(list, func(i, j int) bool { return len(list[i]) > len(list[j]) })
-	for _, d := range list {
-		os.Remove(d)
-	}
-	os.Remove(root)
+	return left
 }
 
 // forgetTorrent cleans up after a removed torrent task: the torrent leaves the
 // client, its kept metainfo and piece records go, and with deleteFiles so do
 // the files it wrote.
 func (m *Manager) forgetTorrent(mt *managedTask, deleteFiles bool) {
-	info := m.bt.drop(mt)
+	// Only once nothing can write to the files, or the delete could miss one.
+	info := m.bt.forget(mt)
 	mt.mu.Lock()
 	link, root := mt.req.URL, mt.view.Path
 	mt.mu.Unlock()
