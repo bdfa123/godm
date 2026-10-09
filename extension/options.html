@@ -23,6 +23,7 @@
   textarea { min-height: 74px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
   .inline { display: flex; align-items: center; gap: 8px; font-weight: 600; }
   .inline input { width: auto; }
+  .hint { color: var(--muted); font-size: 12px; margin: -8px 0 14px 26px; }
   button { padding: 8px 18px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
   #status { margin-left: 12px; color: var(--ok); font-size: 13px; }
   code { background: rgba(127,127,127,.16); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
@@ -48,6 +49,8 @@
   <legend>Interception</legend>
   <label class="inline"><input type="checkbox" id="enabled"> Take over browser downloads</label>
   <label class="inline"><input type="checkbox" id="takeAll"> Take over everything, ignoring the file type list</label>
+  <label class="inline"><input type="checkbox" id="confirmDownload"> Ask before starting each download</label>
+  <div class="hint">Shows a window to change the file name, save folder and connections, or to cancel. Cancelling downloads nothing. Links picked from a page are added without asking.</div>
   <label>
     <span class="t">File types</span>
     <span class="h">Comma separated extensions. Ignored when "take over everything" is on.</span>

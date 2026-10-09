@@ -14,7 +14,7 @@ import (
 const maxNativeMessage = 8 << 20
 
 type nativeRequest struct {
-	Type        string            `json:"type"` // download | batch | inspect | tasks | ping
+	Type        string            `json:"type"` // download | batch | inspect | config | browse | tasks | ping
 	URL         string            `json:"url"`
 	Filename    string            `json:"filename"`
 	Referrer    string            `json:"referrer"`
@@ -28,6 +28,8 @@ type nativeRequest struct {
 	// quality from it; absent means take the best on offer.
 	Kind    string `json:"kind"`
 	Variant *int   `json:"variant"`
+	// Current is the folder a "browse" request should open the chooser at.
+	Current string `json:"current"`
 }
 
 // batchItem is one link picked from a page. Cookies are per item because the
@@ -52,6 +54,9 @@ type nativeResponse struct {
 	// UI carries the authenticated manager URL so the popup can open it
 	// without the extension ever storing the daemon token.
 	UI string `json:"ui,omitempty"`
+	// Path is the folder picked in a "browse" request. It is empty with OK set
+	// when the user closed the chooser without picking anything.
+	Path string `json:"path,omitempty"`
 }
 
 // RunNativeHost speaks the Chrome native-messaging protocol on stdio:
@@ -100,7 +105,12 @@ func handleNative(req nativeRequest) nativeResponse {
 		log.Printf("daemon unavailable: %v", err)
 		return nativeResponse{Error: err.Error()}
 	}
+	return forwardNative(c, req)
+}
 
+// forwardNative is the part of handleNative that needs a daemon to talk to,
+// split out so it can be tested against a stand-in for one.
+func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	uiURL := c.base + "/?token=" + c.token
 
 	switch req.Type {
@@ -129,6 +139,15 @@ func handleNative(req nativeRequest) nativeResponse {
 			return nativeResponse{Error: err.Error()}
 		}
 		return nativeResponse{OK: true, Config: cfg, UI: uiURL}
+
+	case "browse":
+		// The native folder chooser belongs to the daemon's tray thread, so the
+		// confirmation dialog asks for it through here.
+		path, err := c.browse(req.Current)
+		if err != nil {
+			return nativeResponse{Error: err.Error()}
+		}
+		return nativeResponse{OK: true, Path: path}
 
 	case "inspect":
 		info, err := c.inspect(req.job(req.URL, req.Filename, req.Cookie))

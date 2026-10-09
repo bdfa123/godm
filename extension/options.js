@@ -2,6 +2,7 @@
 
 const DEFAULTS = {
   enabled: true,
+  confirmDownload: true,
   takeAll: false,
   minSize: 1048576,
   connections: 8,
@@ -10,7 +11,7 @@ const DEFAULTS = {
   blocklist: ""
 };
 
-const fields = ["enabled", "takeAll", "minSize", "connections", "extensions", "blocklist"];
+const fields = ["enabled", "takeAll", "confirmDownload", "minSize", "connections", "extensions", "blocklist"];
 
 function load() {
   chrome.storage.sync.get(DEFAULTS, (cfg) => {

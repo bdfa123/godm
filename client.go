@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -97,6 +98,26 @@ func (c *daemonClient) config() (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// browse opens the daemon's folder chooser and waits for the answer. A person
+// is choosing, so the usual short timeout would cut them off; the daemon gives
+// up on its own after three minutes.
+func (c *daemonClient) browse(current string) (string, error) {
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+		Path  string `json:"path"`
+	}
+	slow := *c
+	slow.http = &http.Client{Timeout: 4 * time.Minute}
+	if err := slow.do(http.MethodPost, "/api/browse?current="+url.QueryEscape(current), nil, &out); err != nil {
+		return "", err
+	}
+	if !out.OK {
+		return "", errors.New(out.Error)
+	}
+	return out.Path, nil
 }
 
 func (c *daemonClient) inspect(req jobRequest) (*StreamInfo, error) {

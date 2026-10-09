@@ -1,8 +1,8 @@
 "use strict";
 
-// The rules for spotting video live in their own file so they can be tested
-// without a browser.
-importScripts("sniff.js");
+// The rules for spotting video, and for checking what the download dialog
+// sends back, live in their own files so they can be tested without a browser.
+importScripts("sniff.js", "handoff.js");
 
 const HOST_NAME = "com.godm.host";
 
@@ -12,8 +12,18 @@ const HOST_RECHECK_MS = 60000;
 const HANDBACK_TTL_MS = 120000;
 const NOTIFY_COOLDOWN_MS = 60000;
 
+// A confirmation dialog that has been sitting this long was forgotten about.
+const CONFIRM_TTL_MS = 24 * 60 * 60 * 1000;
+const CONFIRM_WIDTH = 540;
+const CONFIRM_HEIGHT = 370;
+// The folder chooser waits for a person; the daemon itself gives up after three
+// minutes, so this only has to outlast that.
+const BROWSE_TIMEOUT_MS = 4 * 60 * 1000 + 10000;
+
 const DEFAULTS = {
   enabled: true,
+  // Ask for a name, folder and connection count before each takeover.
+  confirmDownload: true,
   takeAll: false,
   minSize: 1048576, // 1 MiB, only applied when the browser already knows the size
   connections: 8,
@@ -29,7 +39,7 @@ async function getConfig() {
 
 // ---------- native host ----------
 
-function callHost(message) {
+function callHost(message, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     const done = (v) => {
@@ -52,7 +62,7 @@ function callHost(message) {
     }
     // The host is a thin client to the daemon and answers immediately; if it
     // does not, something is wrong and we want to fail over, not hang.
-    setTimeout(() => done({ ok: false, error: "native host timed out" }), 15000);
+    setTimeout(() => done({ ok: false, error: "native host timed out" }), timeoutMs || 15000);
   });
 }
 
@@ -294,23 +304,61 @@ async function handleDownload(item) {
   // Signed CDN links expire within minutes; godm follows redirects itself, so
   // starting from the original gets a fresh signature every time it resumes.
   const jobUrl = /^https?:\/\//i.test(item.url || "") ? item.url : url;
-  const resp = await callHost({
-    type: "download",
+  const held = {
     url: jobUrl,
-    filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
+    // What Chrome gets back if godm cannot take the job after all.
+    backUrl: url,
     referrer: item.referrer || "",
-    cookie: await cookieHeader(jobUrl),
-    userAgent: navigator.userAgent,
+    filename: suggestName(item),
+    size: pickSize(item),
     connections: cfg.connections
+  };
+
+  if (cfg.confirmDownload) {
+    // The dialog owns the download from here: Start hands it to godm, Cancel or
+    // closing the window drops it, which is what the person asked for by
+    // choosing to be asked.
+    let asked = false;
+    try {
+      asked = await openConfirm(held);
+    } catch (e) {
+      console.warn("godm: confirmation dialog failed", e);
+    }
+    if (asked) return;
+    // No window to ask in. The browser's copy is already cancelled, so doing
+    // nothing would lose the file; carry on as if the dialog were switched off.
+    console.warn("godm: could not open the confirmation dialog, handing over directly");
+  }
+  await handOff(held, {
+    type: "download",
+    url: held.url,
+    filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
+    referrer: held.referrer,
+    connections: held.connections,
+    outDir: ""
   });
+}
+
+// handOff sends one job to godm and, if that fails, gives the download back to
+// the browser. Both the direct path and the dialog's Start button end here, so
+// a refusal is handled the same way whichever way the download arrived.
+// Resolves {ok:true}, or {ok:false, handedBack:true, error}.
+async function handOff(held, job) {
+  const resp = await callHost(
+    Object.assign({}, job, {
+      cookie: await cookieHeader(job.url),
+      userAgent: navigator.userAgent
+    })
+  );
 
   if (resp.ok) {
     bumpBadge(1);
-    return;
+    return { ok: true };
   }
 
   // The host answered the ping but failed the job. Hand the download back and
   // remember the URL so the replacement is not intercepted in turn.
+  const url = held.backUrl;
   await setHostState(false, resp.error);
   await markHandedBack(url);
   console.error("godm: handoff failed -", resp.error);
@@ -328,6 +376,142 @@ async function handleDownload(item) {
       "godm failed and Chrome refused the retry.\n" + url
     );
   }
+  return { ok: false, handedBack: true, error: resp.error || "unknown error" };
+}
+
+// ---------- download confirmation dialog ----------
+//
+// Each dialog is its own extension window, told apart by a key in the URL. What
+// the worker needs to finish the job lives in session storage under that key,
+// not in a variable: the worker is torn down when idle, a person can sit in a
+// dialog far longer than that, and several downloads can be waiting at once.
+//
+//   confirm:<id>        the held download, written before the window opens
+//   confirmwin:<winId>  which key a window belongs to, so closing the window
+//                       (Cancel, the X, Escape) can throw the held one away
+
+// Start can arrive twice (a double click, a retry after a lost reply) while the
+// first is still talking to the host. Only the first may send the job.
+const startingNow = new Set();
+
+// Downloads that arrive together each ask to open a dialog at once. Taken in
+// turn, every one sees the dialogs already waiting and fans out from them;
+// taken together, each would count none and they would stack exactly.
+let confirmQueue = Promise.resolve();
+
+function openConfirm(held) {
+  const run = confirmQueue.then(() => openConfirmNow(held));
+  confirmQueue = run.catch(() => {}); // one failure must not block the next
+  return run;
+}
+
+async function openConfirmNow(held) {
+  const now = Date.now();
+  let waiting = 0;
+  const stale = [];
+  for (const [k, v] of Object.entries(await chrome.storage.session.get(null))) {
+    if (!k.startsWith("confirm:")) continue;
+    if (now - (v.at || 0) > CONFIRM_TTL_MS) stale.push(k);
+    else waiting++;
+  }
+  if (stale.length) await chrome.storage.session.remove(stale);
+
+  const key = "confirm:" + now + "-" + Math.random().toString(36).slice(2, 8);
+  await chrome.storage.session.set({ [key]: Object.assign({ at: now }, held) });
+
+  let parent = null;
+  try {
+    const wins = await chrome.windows.getAll();
+    const normal = wins.filter((w) => w.type === "normal");
+    parent = normal.find((w) => w.focused) || normal[0] || null;
+  } catch (e) {
+    // No parent to centre over; the browser will place the dialog.
+  }
+  const bounds = dialogBounds(parent, waiting, CONFIRM_WIDTH, CONFIRM_HEIGHT);
+  const page = chrome.runtime.getURL("confirm.html?k=" + encodeURIComponent(key));
+
+  let win = null;
+  try {
+    win = await chrome.windows.create(Object.assign({ url: page, type: "popup", focused: true }, bounds));
+  } catch (e) {
+    // A position the browser considers off-screen is refused outright. The
+    // size alone is always acceptable.
+    try {
+      win = await chrome.windows.create({
+        url: page,
+        type: "popup",
+        focused: true,
+        width: CONFIRM_WIDTH,
+        height: CONFIRM_HEIGHT
+      });
+    } catch (e2) {
+      console.warn("godm: cannot open a window", e2);
+    }
+  }
+  if (!win) {
+    await chrome.storage.session.remove(key);
+    return false;
+  }
+  // The window is up, so the dialog now owns the download whatever happens
+  // here. Failing to note which window it is only means closing it cannot tidy
+  // up after itself; the stale-entry sweep above does that eventually.
+  try {
+    await chrome.storage.session.set({ ["confirmwin:" + win.id]: key });
+  } catch (e) {
+    console.warn("godm: could not record the dialog window", e);
+  }
+  return true;
+}
+
+// A dialog window going away without Start means "do not download this".
+chrome.windows.onRemoved.addListener(async (windowId) => {
+  const wk = "confirmwin:" + windowId;
+  const got = await chrome.storage.session.get(wk);
+  if (!got[wk]) return;
+  await chrome.storage.session.remove([wk, got[wk]]);
+});
+
+// confirmStart runs when the dialog's Start button is pressed. The page only
+// reports what is in its form; the checks are repeated here, and the held
+// download is only given up once godm has answered, so a worker that dies
+// halfway leaves the dialog able to try again.
+async function confirmStart(msg) {
+  const key = msg && msg.key;
+  if (typeof key !== "string" || !key.startsWith("confirm:")) {
+    return { ok: false, error: "Unknown download request." };
+  }
+  if (startingNow.has(key)) return { ok: false, error: "Already starting." };
+  startingNow.add(key);
+  try {
+    const held = (await chrome.storage.session.get(key))[key];
+    if (!held) {
+      return { ok: false, expired: true, error: "This download request has expired. Start it again from the page." };
+    }
+    const built = buildJob(held, msg);
+    if (built.error) return { ok: false, error: built.error };
+
+    if (msg.dontAsk) {
+      // A settings hiccup is no reason to lose the download.
+      try {
+        await chrome.storage.sync.set({ confirmDownload: false });
+      } catch (e) {
+        console.warn("godm: could not save the do-not-ask setting", e);
+      }
+    }
+
+    const result = await handOff(held, built.job);
+    await chrome.storage.session.remove(key);
+    return result;
+  } finally {
+    startingNow.delete(key);
+  }
+}
+
+async function browseFolder(current) {
+  return callHost(
+    { type: "browse", current: typeof current === "string" ? current : "" },
+    BROWSE_TIMEOUT_MS
+  );
 }
 
 // ---------- right-click entry point ----------
@@ -503,6 +687,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   if (msg && msg.type === "godm-batch") {
     submitPicked(msg).then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-confirm-start") {
+    confirmStart(msg)
+      .catch((e) => ({ ok: false, error: String(e) }))
+      .then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-browse") {
+    browseFolder(msg.current).then(sendResponse);
     return true;
   }
   if (msg && msg.type === "godm-media") {
