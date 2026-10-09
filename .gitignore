@@ -2,5 +2,9 @@ godm.exe
 godm.exe~
 *.godm
 godm-*.exe
+*.exe~
+*.exe.bak
 .diag-*.txt
 .devcfg/
+# working notes for the next session on this machine
+HANDOFF.md
