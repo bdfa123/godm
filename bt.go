@@ -713,7 +713,21 @@ func (m *Manager) AddTorrentFile(data []byte, outDir string) (string, error) {
 	if err := m.bt.saveMetainfo(ih, mi); err != nil {
 		return "", err
 	}
-	return m.Add(jobRequest{URL: link, Kind: "bt", OutDir: outDir})
+	id, err := m.Add(jobRequest{URL: link, Kind: "bt", OutDir: outDir})
+	if err != nil {
+		m.dropUnownedMetainfo(ih, nil)
+	}
+	return id, err
+}
+
+// dropUnownedMetainfo deletes the kept copy of a torrent's metainfo unless a
+// task other than mt holds that torrent. A copy saved for a task that is gone
+// would otherwise stay in the config folder for good: it is only ever
+// deleted when its task is removed.
+func (m *Manager) dropUnownedMetainfo(ih metainfo.Hash, mt *managedTask) {
+	if m.bt.dir != "" && m.torrentOwner(ih, mt) == nil {
+		os.Remove(m.bt.metainfoPath(ih))
+	}
 }
 
 // fetchTorrentFile downloads a .torrent from the web and keeps it, returning
@@ -769,10 +783,22 @@ func (m *Manager) torrentSpec(ctx context.Context, mt *managedTask) (*torrent.To
 			return nil, err
 		}
 		// The list keeps showing the link the user gave; the job remembers
-		// the torrent, so a restart does not need that link again.
+		// the torrent, so a restart does not need that link again. Removing
+		// the task cleans up after the torrent its job names, so a removal
+		// that came while the file was arriving, when the job still named
+		// the web link, has left the copy for this to delete.
 		mt.mu.Lock()
-		mt.req.URL = link
+		removed := mt.removed
+		if !removed {
+			mt.req.URL = link
+		}
 		mt.mu.Unlock()
+		if removed {
+			if ih, ok := magnetInfoHash(link); ok {
+				m.dropUnownedMetainfo(ih, mt)
+			}
+			return nil, context.Canceled
+		}
 		m.dirty.Store(true)
 		req.URL = link
 	}
@@ -1386,6 +1412,10 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 		mi := tor.Metainfo()
 		if err := m.bt.saveMetainfo(tor.InfoHash(), &mi); err != nil {
 			log.Printf("keeping the metainfo of %s: %v", tor.Name(), err)
+		} else if mt.isRemoved() {
+			// Removed while this was being written, so its cleanup may have
+			// run before there was anything to clean.
+			m.dropUnownedMetainfo(tor.InfoHash(), mt)
 		}
 	}
 	mt.torrentDetails(info, tor.Length())

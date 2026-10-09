@@ -801,6 +801,32 @@ func TestTorrentLinkIsFetchedAndKept(t *testing.T) {
 	}
 }
 
+func TestATorrentRemovedAsItsFileArrivesKeepsNoCopy(t *testing.T) {
+	src := t.TempDir()
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: makePayload(100 << 10)})
+	link := serveTorrentFile(t, mi)
+	m := newBTManager(t)
+	m.mu.Lock()
+	m.running = m.limit // the run is driven by hand below
+	m.mu.Unlock()
+	id, err := m.Add(jobRequest{URL: link})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mt := taskOf(m, id)
+	// The removal cleans up after the web link, which names no torrent yet.
+	m.Remove(id, true)
+	time.Sleep(200 * time.Millisecond)
+	// Then the .torrent finishes arriving, as it would for a removal that came
+	// after the last byte was read.
+	if _, err := m.torrentSpec(t.Context(), mt); err == nil {
+		t.Error("a removed task carried on as if it were still in the list")
+	}
+	if _, err := os.Stat(m.bt.metainfoPath(mi.HashInfoBytes())); !os.IsNotExist(err) {
+		t.Errorf("the .torrent fetched for a removed task was kept: %v", err)
+	}
+}
+
 func TestADuplicateTorrentLeavesTheOriginalAlone(t *testing.T) {
 	src := t.TempDir()
 	payload := makePayload(512 << 10)
