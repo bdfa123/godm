@@ -219,7 +219,8 @@ func (ls rateLimits) wait(ctx context.Context, n int, first bool) error {
 }
 
 // readPaced is io.ReadAll keeping to the limits, for a response that has to
-// be held whole, as a stream segment is.
+// be held whole, as a stream segment is. ctx ends the waits for the limits; it
+// should be the download's, not the request's, which a stall guard cancels.
 func readPaced(ctx context.Context, r io.Reader, ls rateLimits) ([]byte, error) {
 	b := make([]byte, 0, 512)
 	for {

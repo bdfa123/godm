@@ -1174,9 +1174,9 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 
 	// Each attempt gets its own context so a stalled one can be ended without
 	// touching the rest of the download.
-	ctx, cancel := context.WithCancel(ctx)
+	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.probe.FinalURL, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, t.probe.FinalURL, nil)
 	if err != nil {
 		return err
 	}
@@ -1228,7 +1228,11 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 				return werr
 			}
 			// Pay for the bytes once they are on disk: a player waiting on
-			// them has them now, and the wait falls on the next read.
+			// them has them now, and the wait falls on the next read. It is
+			// paid under the download's context: when the guard reports a
+			// stall along with these bytes it has cancelled the request's,
+			// and the stall, which is retried, would come out as a
+			// cancellation, which ends the download.
 			if limits.limited() {
 				if err := limits.wait(ctx, n, t.playerWaitsOn(seg)); err != nil {
 					return err

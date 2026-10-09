@@ -962,9 +962,9 @@ func (r *hlsRun) getWithRetry(ctx context.Context, u string, offset, length int6
 }
 
 func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
+	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -994,7 +994,9 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	defer body.stop()
 	// Read one byte past the cap: io.LimitReader stops silently at the limit,
 	// and a segment quietly cut short produces a file of the right shape that
-	// plays wrong.
+	// plays wrong. The speed limit is paid under the run's context, not the
+	// request's, which the guard has already cancelled when it reports a
+	// stall along with the last bytes.
 	data, err := readPaced(ctx, io.LimitReader(body, limit+1), r.opts.Limiters)
 	if err != nil {
 		return nil, err

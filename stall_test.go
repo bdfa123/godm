@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -256,4 +258,68 @@ func TestStallGuardOnlyCountsTimeInsideRead(t *testing.T) {
 	if !retryable(err) {
 		t.Error("a stall must be retried")
 	}
+}
+
+// lateBytesTransport answers every request at once, then holds the body until
+// the request is cancelled and hands over some bytes at that very moment: data
+// landing just as the stall guard gives up on the connection.
+type lateBytesTransport struct{ size int }
+
+func (lt lateBytesTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	start, end := rangeOf(r, lt.size)
+	h := http.Header{}
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, lt.size))
+	return &http.Response{
+		StatusCode: http.StatusPartialContent, Status: "206 Partial Content",
+		Header: h, Body: io.NopCloser(lateBytes{r.Context()}), Request: r,
+	}, nil
+}
+
+type lateBytes struct{ ctx context.Context }
+
+func (b lateBytes) Read(p []byte) (int, error) {
+	<-b.ctx.Done()
+	return copy(p, bytes.Repeat([]byte{'x'}, 256)), nil
+}
+
+// The guard cancels the request, so paying the speed limit for the bytes that
+// arrived with the stall must not wait on the request's context: that turns
+// the stall into a cancellation, which is never retried, and one silent
+// connection would end the whole download.
+func TestStallAsBytesArriveUnderASpeedLimitIsRetried(t *testing.T) {
+	const stall = 20 * time.Millisecond
+	client := &http.Client{Transport: lateBytesTransport{size: 1 << 20}}
+	// A tenth of a second's credit is the most a limit saves up, so paying
+	// for 256 bytes at 1000 a second always has to wait.
+	limits := func() []*RateLimiter { return []*RateLimiter{NewRateLimiter(1000)} }
+	isStall := func(what string, err error) {
+		t.Helper()
+		var se *stallError
+		if !errors.As(err, &se) || !retryable(err) {
+			t.Errorf("%s: got %v, want the stall, which is retried", what, err)
+		}
+	}
+
+	f, err := os.Create(filepath.Join(t.TempDir(), "f.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	seg := newSegment(0, 1<<20-1)
+	tk := &task{
+		opts:   Options{Connections: 1, StallTimeout: stall, Limiters: limits()},
+		probe:  &ProbeResult{FinalURL: "http://files.example/f.bin", Size: 1 << 20, Resumable: true},
+		file:   f,
+		client: client,
+		segs:   []*Segment{seg},
+	}
+	isStall("a range", tk.trySegment(context.Background(), seg))
+	if got := seg.done.Load(); got != 256 {
+		t.Errorf("%d bytes of the range kept, want the 256 that arrived", got)
+	}
+
+	r := &hlsRun{opts: HLSOptions{StallTimeout: stall, Limiters: limits()}, client: client}
+	_, err = r.getOnce(context.Background(), "http://files.example/seg0.ts", 0, 0)
+	isStall("a stream segment", err)
 }

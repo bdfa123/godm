@@ -43,7 +43,10 @@ type stallGuard struct {
 	fired atomic.Bool
 }
 
-// newStallGuard wraps r; cancel must end the request r belongs to.
+// newStallGuard wraps r; cancel must end the request r belongs to. Bytes that
+// come back with a stall are real, so whatever the caller does with them next,
+// such as paying a speed limit, must not wait on the request's context: by
+// then it has been cancelled, and the stall would come out as a cancellation.
 func newStallGuard(r io.Reader, after time.Duration, cancel context.CancelFunc) *stallGuard {
 	g := &stallGuard{r: r, after: stallTimeoutOr(after)}
 	g.timer = time.AfterFunc(g.after, func() {
