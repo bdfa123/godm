@@ -8,3 +8,7 @@ godm-*.exe
 .devcfg/
 # working notes for the next session on this machine
 HANDOFF.md
+# release zips from scripts/build-release.ps1, and the icon and version
+# resources go-winres generates for the linker while it runs
+/dist/
+*.syso

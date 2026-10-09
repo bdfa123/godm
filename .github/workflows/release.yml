@@ -1,0 +1,72 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds Windows zips for amd64 and arm64 and
+# publishes them, with SHA256SUMS.txt, as a GitHub release for that tag.
+on:
+  push:
+    tags: ['v*']
+
+env:
+  # Keep in step with $WinresVersion in scripts/build-release.ps1.
+  GO_WINRES_VERSION: v0.3.3
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the release and attach the files to it
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag looks like a version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '$GITHUB_REF_NAME' must look like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false # a release should be built from the sources, not from a cache
+
+      # Do not publish what CI would reject.
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      # Puts the icon, the version info and an application manifest into the
+      # exe. The manifest is the "cli" one: godm.exe stays a console-subsystem
+      # program because the native messaging host and the CLI need the console.
+      - name: Install go-winres
+        shell: bash
+        run: go install "github.com/tc-hib/go-winres@${GO_WINRES_VERSION}"
+
+      # scripts/build-release.ps1 is the same script anyone can run locally.
+      # -RequireWinres makes it fail rather than ship an exe without the icon.
+      - name: Build and package
+        shell: pwsh
+        run: ./scripts/build-release.ps1 -Version $env:GITHUB_REF_NAME -RequireWinres
+
+      # A tag with a suffix, such as v0.2.0-rc.1, is published as a pre-release.
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          args=(release create "$GITHUB_REF_NAME"
+            dist/*.zip dist/SHA256SUMS.txt
+            --title "$GITHUB_REF_NAME"
+            --notes-file .github/release-notes.md
+            --generate-notes
+            --verify-tag)
+          case "$GITHUB_REF_NAME" in
+            *-*) args+=(--prerelease) ;;
+          esac
+          gh "${args[@]}"
