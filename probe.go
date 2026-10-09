@@ -24,6 +24,8 @@ type ProbeResult struct {
 // CDNs 405 it, and some report Accept-Ranges on HEAD then ignore Range on GET.
 // Asking for bytes 0-0 costs nothing and gives us the truth.
 func Probe(ctx context.Context, c *http.Client, o Options) (*ProbeResult, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.URL, nil)
 	if err != nil {
 		return nil, err
@@ -36,7 +38,11 @@ func Probe(ctx context.Context, c *http.Client, o Options) (*ProbeResult, error)
 		return nil, fmt.Errorf("probe: %w", err)
 	}
 	defer func() {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		// Draining lets the connection be reused, but a server that ignored
+		// the Range and then stopped sending must not hold the download here.
+		body := newStallGuard(resp.Body, o.StallTimeout, cancel)
+		io.Copy(io.Discard, io.LimitReader(body, 4<<10))
+		body.stop()
 		resp.Body.Close()
 	}()
 

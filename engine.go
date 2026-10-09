@@ -43,6 +43,9 @@ type Options struct {
 	// split while both halves would be at least this big.
 	MinSplit   int64
 	MaxRetries int
+	// StallTimeout ends a connection that has received nothing for this long
+	// and retries it from where it got to. Zero means 30 seconds.
+	StallTimeout time.Duration
 
 	// Refresh resumes an interrupted download from a different URL, the way a
 	// download manager continues after the user fetches a fresh link. Saved
@@ -95,6 +98,7 @@ func (o *Options) applyDefaults() {
 	if o.MaxRetries <= 0 {
 		o.MaxRetries = defaultRetries
 	}
+	o.StallTimeout = stallTimeoutOr(o.StallTimeout)
 	if o.OutDir == "" {
 		o.OutDir = "."
 	}
@@ -1055,6 +1059,10 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	}
 	seg.set(SegConnecting, "")
 
+	// Each attempt gets its own context so a stalled one can be ended without
+	// touching the rest of the download.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.probe.FinalURL, nil)
 	if err != nil {
 		return err
@@ -1080,6 +1088,11 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	}
 	seg.set(SegActive, "")
 
+	// Without this a server that goes quiet part way through a range holds the
+	// connection forever, and when what is left is too small to split, the
+	// whole download with it.
+	body := newStallGuard(resp.Body, t.opts.StallTimeout, cancel)
+	defer body.stop()
 	buf := make([]byte, readBufSize)
 	var looked time.Time
 	for {
@@ -1092,7 +1105,7 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 				return errMove
 			}
 		}
-		n, rerr := resp.Body.Read(buf)
+		n, rerr := body.Read(buf)
 		if n > 0 {
 			reached, werr := t.store(seg, buf[:n], &offset)
 			if werr != nil {
@@ -1389,6 +1402,10 @@ func retryable(err error) bool {
 	var le *LinkExpiredError
 	if errors.As(err, &le) {
 		return false
+	}
+	var stalled *stallError
+	if errors.As(err, &stalled) {
+		return true
 	}
 	// Decide on the status code first; an expired signed URL (403) or a deleted
 	// object (404) will never fix itself, but a 429 or 503 will.

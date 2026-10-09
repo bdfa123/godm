@@ -412,6 +412,9 @@ type HLSOptions struct {
 	Connections int
 	ConnLimit   func() int
 	MaxRetries  int
+	// StallTimeout ends a request that has received nothing for this long and
+	// retries it. Zero means 30 seconds.
+	StallTimeout time.Duration
 
 	// Variant picks a stream from a master playlist. A negative value takes the
 	// highest bandwidth on offer, which is what a player on a fast link does.
@@ -957,6 +960,8 @@ func (r *hlsRun) getWithRetry(ctx context.Context, u string, offset, length int6
 }
 
 func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([]byte, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -981,10 +986,14 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	if length > 0 && length < limit {
 		limit = length
 	}
+	// A segment server that goes quiet mid-response would otherwise hold this
+	// connection, and with it every segment queued behind it, forever.
+	body := newStallGuard(resp.Body, r.opts.StallTimeout, cancel)
+	defer body.stop()
 	// Read one byte past the cap: io.LimitReader stops silently at the limit,
 	// and a segment quietly cut short produces a file of the right shape that
 	// plays wrong.
-	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, err
 	}
