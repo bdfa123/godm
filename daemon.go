@@ -292,6 +292,11 @@ type Manager struct {
 	// RunDaemon installs the real calls.
 	power powerOps
 	awake *awakeKeeper
+	// after is what to do when the downloads finish; see afterAction. It and
+	// afterSeen, whether a download has finished since it was set, are guarded
+	// by mu.
+	after     afterAction
+	afterSeen bool
 	// streamPiece is the engine's piece size while a player reads; zero keeps
 	// the engine default. Tests shrink it to fit their small files.
 	streamPiece int64
@@ -309,6 +314,7 @@ func NewManager(outDir string, parallel int) *Manager {
 		openURL:  openInBrowser,
 		announce: trayNotify,
 		settings: defaultSettings(),
+		after:    afterNothing,
 	}
 	m.notifyOn.Store(true)
 	return m
@@ -710,6 +716,9 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	m.broadcastLocked()
 	m.mu.Unlock()
 
+	if st != StatePaused {
+		m.checkAfterAll(st == StateDone)
+	}
 	go m.announceFinish(view, st)
 }
 
@@ -1434,7 +1443,7 @@ func (s *server) handleBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit()})
+	writeJSON(w, map[string]any{"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit(), "after_all": s.mgr.AfterAll()})
 }
 
 func (s *server) handlePauseAll(w http.ResponseWriter, r *http.Request) {

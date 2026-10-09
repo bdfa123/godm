@@ -90,6 +90,7 @@ const (
 	mfString    = 0x0000
 	mfSeparator = 0x0800
 	mfChecked   = 0x0008
+	mfPopup     = 0x0010
 	mfDefault   = 0x1000
 
 	tpmRightButton = 0x0002
@@ -110,8 +111,22 @@ const (
 	menuResumeAll
 	menuFolder
 	menuNotify
+	menuAfterNothing
+	menuAfterSleep
+	menuAfterShutdown
 	menuQuit
 )
+
+// afterItems are the choices under "When all downloads finish".
+var afterItems = []struct {
+	cmd    uintptr
+	action string
+	label  string
+}{
+	{menuAfterNothing, "nothing", "Do nothing"},
+	{menuAfterSleep, "sleep", "Sleep"},
+	{menuAfterShutdown, "shutdown", "Shut down"},
+}
 
 type notifyIconData struct {
 	CbSize           uint32
@@ -388,6 +403,14 @@ func (t *tray) updateTooltip() {
 	} else if queued > 0 {
 		tip = fmt.Sprintf("godm — %d waiting", queued)
 	}
+	// Armed by the user an hour ago and forgotten is exactly when the computer
+	// turning itself off would be a surprise.
+	switch t.mgr.AfterAll() {
+	case "sleep":
+		tip += " · sleeps when done"
+	case "shutdown":
+		tip += " · shuts down when done"
+	}
 	copyUTF16(t.nid.SzTip[:], tip)
 	t.nid.UFlags = nifMessage | nifIcon | nifTip
 	procShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&t.nid)))
@@ -450,6 +473,10 @@ func (t *tray) showMenu() {
 	procAppendMenu.Call(menu, mfString, menuFolder, uintptr(unsafe.Pointer(utf16("Open downloads folder"))))
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
 	procAppendMenu.Call(menu, notifyFlag, menuNotify, uintptr(unsafe.Pointer(utf16("Notify when downloads finish"))))
+	// The submenu goes away with its parent when the parent is destroyed.
+	if sub := afterMenu(t.mgr); sub != 0 {
+		procAppendMenu.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(utf16("When all downloads finish"))))
+	}
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
 	procAppendMenu.Call(menu, mfString, menuQuit, uintptr(unsafe.Pointer(utf16("Quit godm"))))
 
@@ -472,12 +499,51 @@ func (t *tray) showMenu() {
 		showInFolder(t.mgr.outDir)
 	case menuNotify:
 		t.mgr.SetNotifications(!t.mgr.Notifications())
+	case menuAfterNothing, menuAfterSleep, menuAfterShutdown:
+		t.chooseAfter(cmd)
 	case menuQuit:
 		log.Printf("quit requested from the tray")
 		t.mgr.PauseAll()
 		t.mgr.save()
 		procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&t.nid)))
 		os.Exit(0)
+	}
+}
+
+// afterMenu builds the submenu for what to do when the downloads finish. It
+// offers only what this computer can do and ticks the choice that is armed.
+func afterMenu(m *Manager) uintptr {
+	sub, _, _ := procCreatePopupMenu.Call()
+	if sub == 0 {
+		return 0
+	}
+	armed, offered := m.AfterAll(), m.AfterOptions()
+	for _, it := range afterItems {
+		ok := false
+		for _, o := range offered {
+			ok = ok || o == it.action
+		}
+		if !ok {
+			continue
+		}
+		flags := uintptr(mfString)
+		if it.action == armed {
+			flags |= mfChecked
+		}
+		procAppendMenu.Call(sub, flags, it.cmd, uintptr(unsafe.Pointer(utf16(it.label))))
+	}
+	return sub
+}
+
+// chooseAfter applies a pick from the submenu.
+func (t *tray) chooseAfter(cmd uintptr) {
+	for _, it := range afterItems {
+		if it.cmd != cmd {
+			continue
+		}
+		if err := t.mgr.UpdateSettings(settingsUpdate{AfterAll: &it.action}); err != nil {
+			log.Printf("tray: %v", err)
+		}
 	}
 }
 

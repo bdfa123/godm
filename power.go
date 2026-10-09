@@ -4,6 +4,7 @@ import (
 	"log"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // powerOps is how the daemon reaches the computer's power state. The real
@@ -14,6 +15,11 @@ type powerOps struct {
 	// the request when it is false. An awakeKeeper makes every call from the
 	// same OS thread.
 	keepAwake func(on bool) error
+	// sleep puts the computer to sleep and returns once it has woken again.
+	sleep func() error
+	// shutdown schedules a shutdown after the delay, which is the user's chance
+	// to cancel it, and returns at once.
+	shutdown func(delay time.Duration) error
 }
 
 // awakeKeeper owns the request to keep the system awake. Windows ties that

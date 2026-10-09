@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -228,7 +231,45 @@ func setAwake(on bool) error {
 	return nil
 }
 
+var (
+	powrprof            = syscall.NewLazyDLL("powrprof.dll")
+	procSetSuspendState = powrprof.NewProc("SetSuspendState")
+)
+
+// sleepNow puts the computer to sleep, not into hibernation, and returns when
+// it wakes. The result is a one-byte BOOLEAN, so the rest of the register is
+// not ours to read. The force flag does nothing on current Windows.
+func sleepNow() error {
+	r, _, err := procSetSuspendState.Call(0, 0, 0)
+	if byte(r) == 0 {
+		return fmt.Errorf("SetSuspendState: %v", err)
+	}
+	return nil
+}
+
+// shutdownArgs is the command line for a shutdown that waits first. The
+// comment is what Windows shows while it counts down.
+func shutdownArgs(delay time.Duration) []string {
+	return []string{"/s", "/t", strconv.Itoa(int(delay / time.Second)), "/c", "godm: all downloads finished"}
+}
+
+// shutdownIn lets shutdown.exe do the counting, so that the countdown is
+// Windows' own and "shutdown /a" from any prompt cancels it, even if godm is
+// gone by then.
+func shutdownIn(delay time.Duration) error {
+	exe := "shutdown.exe"
+	if root := os.Getenv("SystemRoot"); root != "" {
+		exe = filepath.Join(root, "System32", "shutdown.exe")
+	}
+	cmd := exec.Command(exe, shutdownArgs(delay)...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("shutdown.exe: %v", err)
+	}
+	return nil
+}
+
 // osPower is the real connection to the computer's power state.
 func osPower() powerOps {
-	return powerOps{keepAwake: setAwake}
+	return powerOps{keepAwake: setAwake, sleep: sleepNow, shutdown: shutdownIn}
 }

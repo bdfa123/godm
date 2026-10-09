@@ -172,7 +172,9 @@ const uiHTML = `<!doctype html>
   .dialog .foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 14px; flex-wrap: wrap; }
   .dialog .foot .grow { flex: 1; color: var(--muted); font-size: 12.5px; }
   .check { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
-  .dialog .hint { margin: 0 0 14px 26px; font-size: 12.5px; }
+  .dialog .set { margin: 0 0 16px; }
+  .dialog .set p { margin: 3px 0 0; font-size: 12.5px; }
+  .dialog .set .check + p { margin-left: 26px; }
 
   .toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30;
@@ -243,9 +245,13 @@ const uiHTML = `<!doctype html>
 <div class="scrim" id="setDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="setTitle">
     <h2 id="setTitle">Settings</h2>
-    <div id="awakeRow">
+    <div class="set" id="awakeRow">
       <label class="check"><input type="checkbox" id="setAwake"> Keep this PC awake while downloading</label>
-      <p class="hint">Stops Windows going to sleep on its own while a download is running. The screen can still turn off.</p>
+      <p>Stops Windows going to sleep on its own while a download is running. The screen can still turn off.</p>
+    </div>
+    <div class="set" id="afterRow">
+      <label class="field">When all downloads finish <select id="setAfter"></select></label>
+      <p>Happens once, then goes back to Do nothing, and is forgotten if godm restarts. Shut down waits 60 seconds first: press Win+R, type shutdown /a and press Enter to cancel.</p>
     </div>
     <div class="foot">
       <button class="btn" data-close="setDlg">Cancel</button>
@@ -522,9 +528,12 @@ function render() {
     if (t.state === "running") { running++; speed += t.speed || 0; }
     if (t.state === "queued") queued++;
   });
-  document.getElementById("stats").innerHTML = running
+  var line = running
     ? "<b>" + running + "</b> downloading · <b>" + human(speed) + "/s</b>" + (queued ? " · " + queued + " waiting" : "")
     : tasks.length ? (queued ? queued + " waiting" : "Idle") : "";
+  // A one-shot action armed and forgotten is the one that would surprise.
+  var armed = { sleep: "will sleep when finished", shutdown: "will shut down when finished" }[S.afterAll];
+  document.getElementById("stats").innerHTML = line + (armed ? (line ? " · " : "") + "<b>" + armed + "</b>" : "");
 
   var c = { all: tasks.length, active: 0, done: 0, attn: 0 };
   tasks.forEach(function (t) {
@@ -558,6 +567,7 @@ function poll() {
     S.online = true;
     document.getElementById("dot").classList.remove("off");
     S.tasks = d.tasks || [];
+    S.afterAll = d.after_all;
     if (d.limit && d.limit !== S.limit) { S.limit = d.limit; document.getElementById("limit").value = d.limit; }
     render();
   }).catch(function () {
@@ -720,11 +730,17 @@ document.getElementById("addGo").addEventListener("click", function () {
 // Only what the user changed is sent. A setting that changed on its own while
 // the dialog was open (a one-shot action that has already fired) must not be
 // put back by pressing Save.
+var AFTER_LABEL = { nothing: "Do nothing", sleep: "Sleep", shutdown: "Shut down" };
+var AFTER_DOES = { sleep: "put this PC to sleep", shutdown: "shut this PC down" };
 function openSettings() {
   api("/api/settings").then(function (d) {
     S.settings = d;
     document.getElementById("setAwake").checked = !!d.keep_awake;
     document.getElementById("awakeRow").hidden = !d.can_keep_awake;
+    var opts = d.after_all_options || [], sel = document.getElementById("setAfter");
+    sel.innerHTML = opts.map(function (o) { return '<option value="' + o + '">' + (AFTER_LABEL[o] || o) + "</option>"; }).join("");
+    sel.value = d.after_all;
+    document.getElementById("afterRow").hidden = opts.length < 2;
     show("setDlg");
   }).catch(fail);
 }
@@ -733,9 +749,16 @@ document.getElementById("setGo").addEventListener("click", function () {
   var was = S.settings, upd = {};
   var awake = document.getElementById("setAwake").checked;
   if (awake !== !!was.keep_awake) upd.keep_awake = awake;
+  var after = document.getElementById("setAfter").value;
+  if (after && after !== was.after_all) upd.after_all = after;
   hide("setDlg");
   if (!Object.keys(upd).length) return;
-  post("/api/settings", upd).then(function () { toast("Settings saved."); }).catch(fail);
+  post("/api/settings", upd).then(function (r) {
+    toast(upd.after_all && AFTER_DOES[r.after_all]
+      ? "godm will " + AFTER_DOES[r.after_all] + " when all downloads finish."
+      : "Settings saved.");
+    poll();
+  }).catch(fail);
 });
 
 // Pasting links anywhere outside a text field opens the add dialog with them.
