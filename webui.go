@@ -270,6 +270,10 @@ const uiHTML = `<!doctype html>
       <label class="field"><span data-i18n="set.after"></span> <select id="setAfter"></select></label>
       <p data-i18n="set.after.help"></p>
     </div>
+    <div class="set" id="seedRow" hidden>
+      <label class="field"><span data-i18n="set.seed"></span> <select id="setSeed"></select></label>
+      <p data-i18n="set.seed.help"></p>
+    </div>
     <div class="set">
       <label class="check"><input type="checkbox" id="setSort"> <span data-i18n="set.sort"></span></label>
       <p id="setSortHelp"></p>
@@ -460,6 +464,11 @@ I18N.en = {
   "after.nothing": "Do nothing",
   "after.sleep": "Sleep",
   "after.shutdown": "Shut down",
+  "set.seed": "After a torrent finishes",
+  "set.seed.help": "Seeding means other people can keep downloading the torrent from you. Stop uploading ends it the moment the download completes; seed to ratio 1.0 keeps uploading until as much has gone out as came in; keep seeding goes on until you remove the torrent or quit godm. This applies to every torrent.",
+  "seed.stop": "Stop uploading",
+  "seed.ratio": "Seed to ratio 1.0",
+  "seed.keep": "Keep seeding",
   "set.sort": "Sort new downloads into folders by type",
   "set.sort.help": "Inside {dir}. A download that comes with a folder of its own, like one you chose in the browser, goes where you said. Types godm does not recognise stay in the main folder, and downloads already in the list stay where they are. Leave a name empty to keep that type in the main folder.",
   "set.folder.ph": "main folder",
@@ -629,6 +638,11 @@ I18N.zh = {
   "after.nothing": "不执行任何操作",
   "after.sleep": "睡眠",
   "after.shutdown": "关机",
+  "set.seed": "种子下载完成后",
+  "set.seed.help": "做种是指让其他人可以继续从您这里下载该种子。“停止上传”会在下载完成时立即结束；“做种至分享率 1.0”会持续上传，直到上传量等于下载量；“持续做种”会一直进行，直到您移除该种子或退出 godm。此设置适用于所有种子。",
+  "seed.stop": "停止上传",
+  "seed.ratio": "做种至分享率 1.0",
+  "seed.keep": "持续做种",
   "set.sort": "按类型将新下载分到不同文件夹",
   "set.sort.help": "文件夹建在 {dir} 中。自带保存位置的下载（例如在浏览器中选好了文件夹的）仍保存到您指定的位置。godm 无法识别的类型留在默认文件夹，列表中已有的任务不会移动。某个类型的名称留空，则该类型仍放在默认文件夹。",
   "set.folder.ph": "默认文件夹",
@@ -1241,7 +1255,10 @@ document.getElementById("addGo").addEventListener("click", function () {
 // the dialog was open (a one-shot action that has already fired) must not be
 // put back by pressing Save.
 var AFTER_LABEL = { nothing: "after.nothing", sleep: "after.sleep", shutdown: "after.shutdown" };
-var AFTER_DOES = { sleep: "toast.after.sleep", shutdown: "toast.after.shutdown" };// The kinds match what the daemon sorts by; the names are only what to call them.
+var AFTER_DOES = { sleep: "toast.after.sleep", shutdown: "toast.after.shutdown" };
+// What a finished torrent does, by the daemon's name for it. A choice the page
+// has no words for is shown under the label the daemon sent.
+var SEED_LABEL = { stop: "seed.stop", ratio: "seed.ratio", keep: "seed.keep" };// The kinds match what the daemon sorts by; the names are only what to call them.
 var FOLDER_KINDS = [["video", "kind.video"], ["audio", "kind.audio"], ["archive", "kind.archive"], ["doc", "kind.doc"], ["app", "kind.app"], ["image", "kind.image"]];
 // A language is named in its own language wherever it is listed, so that it can
 // be found when the rest of the page is in one that cannot be read.
@@ -1269,6 +1286,11 @@ function fillSettingsText() {
     return '<option value="' + o + '">' + esc(AFTER_LABEL[o] ? tr(AFTER_LABEL[o]) : o) + "</option>";
   }).join("");
   after.value = picked;
+  var seed = document.getElementById("setSeed"), kept = seed.value || (S.seed && S.seed.policy);
+  seed.innerHTML = ((S.seed && S.seed.choices) || []).map(function (c) {
+    return '<option value="' + esc(c.value) + '">' + esc(SEED_LABEL[c.value] ? tr(SEED_LABEL[c.value]) : c.label) + "</option>";
+  }).join("");
+  seed.value = kept;
 }
 
 // setLang shows the page in a language, now. It is also how the page follows a
@@ -1288,14 +1310,19 @@ function setLang(setting) {
 }
 
 function openSettings() {
-  api("/api/settings").then(function (d) {
+  // The seeding policy is its own endpoint. A daemon without it just has no row.
+  Promise.all([api("/api/settings"), api("/api/seeding").catch(function () { return null; })]).then(function (res) {
+    var d = res[0];
     S.settings = d;
+    S.seed = res[1] && res[1].choices ? res[1] : null;
     document.getElementById("setAwake").checked = !!d.keep_awake;
     document.getElementById("awakeRow").hidden = !d.can_keep_awake;
     fillSettingsText();
     document.getElementById("setLang").value = d.language || "auto";
     document.getElementById("setAfter").value = d.after_all;
     document.getElementById("afterRow").hidden = (d.after_all_options || []).length < 2;
+    document.getElementById("seedRow").hidden = !S.seed;
+    if (S.seed) document.getElementById("setSeed").value = S.seed.policy;
     document.getElementById("setSort").checked = !!d.sort_by_type;
     folderInputs().forEach(function (i) { i.value = (d.folders || {})[i.getAttribute("data-folder")] || ""; });
     dimFolders();
@@ -1319,13 +1346,20 @@ document.getElementById("setGo").addEventListener("click", function () {
     if (i.value.trim() !== ((was.folders || {})[k] || "")) { names[k] = i.value; renamed = true; }
   });
   if (renamed) upd.folders = names;
-  if (!Object.keys(upd).length) return hide("setDlg");
+  // The seeding policy is saved through its own endpoint, and only if it moved.
+  var seed = document.getElementById("setSeed").value;
+  var seedChanged = !!S.seed && !!seed && seed !== S.seed.policy;
+  var changed = Object.keys(upd).length > 0;
+  if (!changed && !seedChanged) return hide("setDlg");
   // The dialog stays open if the daemon refuses, so a typo does not cost the rest.
-  post("/api/settings", upd).then(function (r) {
+  (changed ? post("/api/settings", upd) : Promise.resolve(null)).then(function (r) {
+    if (!seedChanged) return r;
+    return post("/api/seeding?policy=" + q(seed)).then(function () { return r; });
+  }).then(function (r) {
     hide("setDlg");
     // Before the toast, so that it is already in the new language.
-    if (r.language && r.language !== LANG_SETTING) setLang(r.language);
-    toast(upd.after_all && AFTER_DOES[r.after_all] ? tr(AFTER_DOES[r.after_all]) : tr("toast.saved"));
+    if (r && r.language && r.language !== LANG_SETTING) setLang(r.language);
+    toast(r && upd.after_all && AFTER_DOES[r.after_all] ? tr(AFTER_DOES[r.after_all]) : tr("toast.saved"));
     poll();
   }).catch(fail);
 });

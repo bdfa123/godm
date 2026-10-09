@@ -548,6 +548,27 @@ func isNameOnly(s string) bool {
 	return strings.Trim(s, "#%/·—… 0123456789") == "" || strings.EqualFold(s, "godm")
 }
 
+// The Settings dialog names each seeding choice in its own words, keyed by the
+// value the daemon uses, so a choice the daemon gains needs words there too.
+func TestEverySeedingChoiceHasWordsOnThePage(t *testing.T) {
+	m := regexp.MustCompile(`var SEED_LABEL = \{([^}]*)\};`).FindStringSubmatch(uiHTML)
+	if m == nil {
+		t.Fatal("the page has no SEED_LABEL")
+	}
+	onPage := map[string]string{}
+	for _, kv := range regexp.MustCompile(`(\w+): "([^"]+)"`).FindAllStringSubmatch(m[1], -1) {
+		onPage[kv[1]] = kv[2]
+	}
+	for _, c := range seedChoices {
+		if onPage[c["value"]] == "" {
+			t.Errorf("the page has no words for the seeding choice %q", c["value"])
+		}
+	}
+	if len(onPage) != len(seedChoices) {
+		t.Errorf("the page names %d seeding choices, the daemon offers %d", len(onPage), len(seedChoices))
+	}
+}
+
 // The page is one long script inside a Go string, which nothing else parses.
 func TestThePageScriptParses(t *testing.T) {
 	node, err := exec.LookPath("node")
