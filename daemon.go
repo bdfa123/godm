@@ -849,8 +849,10 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 	cancel, path := mt.cancel, mt.view.Path
 	busy := mt.inFlight || len(mt.players) > 0
 	bt := isBTJob(mt.req)
-	if deleteFile && !bt {
-		if busy {
+	if deleteFile {
+		// A torrent deletes its own files once the client lets go of them,
+		// retrying until they are free, so only a plain file waits here.
+		if busy && !bt {
 			mt.deleteAfter = true
 		}
 		// Players reading the file are cut off so it can go. This happens

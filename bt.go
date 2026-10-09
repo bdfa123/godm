@@ -1624,6 +1624,23 @@ func (m *Manager) waitTorrentMedia(ctx context.Context, mt *managedTask) (*torre
 // strangers and may be anything at all until their piece is checked. Ranges
 // work as for any file.
 func (s *server) streamTorrent(w http.ResponseWriter, r *http.Request, mt *managedTask) {
+	// Removing the torrent with its files ends this request, as it does for a
+	// plain file: a finished torrent is played straight from disk, and Windows
+	// will not delete a file a player still has open.
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	rc := http.NewResponseController(w)
+	player, ok := mt.addPlayer(func() {
+		cancel()
+		rc.SetWriteDeadline(time.Now())
+	})
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	defer mt.dropPlayer(player)
+	r = r.WithContext(ctx)
+
 	if v := mt.snapshot(); v.State == StateDone {
 		p, err := torrentMediaPath(v)
 		if err != nil {

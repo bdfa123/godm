@@ -1042,6 +1042,41 @@ func TestRemovingATorrentDeletesOnlyWhatItWrote(t *testing.T) {
 	}
 }
 
+// A finished torrent is played straight from disk, and Windows will not delete
+// a file a player still has open, so removing it with its files must end the
+// stream first.
+func TestRemovingAFinishedTorrentEndsItsPlayerAndDeletesIt(t *testing.T) {
+	src := t.TempDir()
+	mi := makeTorrent(t, src, "Film", 256<<10, tfile{"Film.mkv", makePayload(32 << 20)})
+	seed := newSeeder(t, src, mi, 0)
+
+	m := newBTManager(t)
+	_, api := btAPI(t, m)
+	id, _ := m.Add(jobRequest{URL: magnetOf(mi, "Film", seed.addr())})
+	waitFor(t, 60*time.Second, "the download", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+	film := filepath.Join(v.Path, "Film.mkv")
+
+	// A player that read a little and then stopped: the rest of the response
+	// sits in a write nobody reads, with the file open behind it.
+	resp, err := http.DefaultClient.Do(bearer(http.MethodGet, api.URL+"/stream/"+id+"/Film.mkv", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadFull(resp.Body, make([]byte, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+
+	if !m.Remove(id, true) {
+		t.Fatal("remove refused")
+	}
+	waitFor(t, 10*time.Second, "the film to be deleted", func() bool {
+		_, err := os.Stat(film)
+		return os.IsNotExist(err)
+	})
+}
+
 func TestRemovingATorrentForgetsItsPieceRecords(t *testing.T) {
 	// What the library's own bolt record wrote, as godm used it before, still
 	// reads the same.
