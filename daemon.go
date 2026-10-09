@@ -69,8 +69,13 @@ type TaskView struct {
 	SegTotal int     `json:"segments_total,omitempty"`
 	Duration float64 `json:"duration,omitempty"`
 	// Stage says which half of a merged video is arriving, for the tools that
-	// fetch picture and sound separately and join them at the end.
-	Stage        string    `json:"stage,omitempty"`
+	// fetch picture and sound separately and join them at the end. A torrent
+	// ("bt") uses it for "metadata" and "seeding".
+	Stage string `json:"stage,omitempty"`
+	// A torrent counts what it has sent to other peers, and names the file
+	// Play opens, its largest video, relative to the download folder.
+	Uploaded     int64     `json:"uploaded,omitempty"`
+	Media        string    `json:"media,omitempty"`
 	AddedAt      time.Time `json:"added_at"`
 	StartedAt    time.Time `json:"started_at,omitempty"`
 	EndedAt      time.Time `json:"ended_at,omitempty"`
@@ -310,6 +315,8 @@ type Manager struct {
 	streamPiece int64
 	// speed is the limit all downloads share between them.
 	speed RateLimiter
+
+	bt btEngine // torrents, in bt.go
 }
 
 func NewManager(outDir string, parallel int) *Manager {
@@ -412,7 +419,15 @@ func sameActiveDownload(t *managedTask, req jobRequest, outDir string) bool {
 }
 
 func (m *Manager) Add(req jobRequest) (string, error) {
-	if err := validateURL(req.URL); err != nil {
+	if isBTJob(req) {
+		req.Kind = "bt"
+		if err := validateTorrentURL(req.URL); err != nil {
+			return "", err
+		}
+		if req.Filename == "" {
+			req.Filename = torrentDisplayName(req.URL)
+		}
+	} else if err := validateURL(req.URL); err != nil {
 		return "", err
 	}
 	id := fmt.Sprintf("t%d-%d", time.Now().UnixMilli(), m.seq.Add(1))
@@ -430,10 +445,16 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	}
 	mt.connLimit.Store(int32(req.Connections))
 	mt.speed.SetRate(req.SpeedLimit)
+	if req.Kind == "bt" {
+		// Shown as a torrent while it waits in line; it counts peers, not
+		// connections.
+		mt.view.Kind, mt.view.Conns = "bt", 0
+	}
 
 	m.mu.Lock()
 	for _, existingID := range m.order {
-		if existing := m.tasks[existingID]; existing != nil && sameActiveDownload(existing, req, outDir) {
+		if existing := m.tasks[existingID]; existing != nil &&
+			(sameActiveDownload(existing, req, outDir) || sameTorrent(existing, req)) {
 			m.mu.Unlock()
 			return existingID, nil
 		}
@@ -492,7 +513,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 
-	if allowMatch && m.adoptAsRefresh(ctx, mt) {
+	if allowMatch && !isBTJob(req) && m.adoptAsRefresh(ctx, mt) {
 		return
 	}
 
@@ -509,6 +530,8 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 	var donePath string
 	var err error
 	switch {
+	case isBTJob(req):
+		donePath, err = m.runTorrent(ctx, mt, gen)
 	case isYTDLPJob(req):
 		donePath, err = RunYTDLP(ctx, YTDLPOptions{
 			URL:     req.URL,
@@ -816,7 +839,8 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 	mt.mu.Lock()
 	mt.removed = true
 	cancel, path, busy := mt.cancel, mt.view.Path, mt.inFlight
-	if deleteFile && busy {
+	bt := isBTJob(mt.req)
+	if deleteFile && busy && !bt {
 		mt.deleteAfter = true
 	}
 	mt.mu.Unlock()
@@ -824,7 +848,11 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 	if cancel != nil {
 		cancel()
 	}
-	if deleteFile && !busy {
+	if bt {
+		// A torrent is many files the client holds open; it lets go of them
+		// before any are deleted.
+		go m.forgetTorrent(mt, deleteFile)
+	} else if deleteFile && !busy {
 		deleteDownload(path)
 	}
 	m.dirty.Store(true)
@@ -856,6 +884,9 @@ func (m *Manager) RequestRefresh(id string) (string, error) {
 	mt := m.get(id)
 	if mt == nil {
 		return "", fmt.Errorf("no such task")
+	}
+	if mt.isTorrent() {
+		return "", fmt.Errorf("a torrent has no link that expires")
 	}
 	mt.mu.Lock()
 	switch mt.view.State {
@@ -1001,6 +1032,9 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	if mt == nil {
 		return fmt.Errorf("no such task")
 	}
+	if mt.isTorrent() {
+		return fmt.Errorf("a torrent is found by its info hash, not an address")
+	}
 	mt.mu.Lock()
 	if st := mt.view.State; st == StateRunning || st == StateQueued {
 		mt.mu.Unlock()
@@ -1130,10 +1164,12 @@ type savedTask struct {
 }
 
 type savedList struct {
-	Version int         `json:"version"`
-	Limit   int         `json:"limit"`
-	Notify  *bool       `json:"notify,omitempty"`
-	Tasks   []savedTask `json:"tasks"`
+	Version int   `json:"version"`
+	Limit   int   `json:"limit"`
+	Notify  *bool `json:"notify,omitempty"`
+	// SeedPolicy is what a finished torrent does: "stop", "ratio" or "keep".
+	SeedPolicy string      `json:"seed_policy,omitempty"`
+	Tasks      []savedTask `json:"tasks"`
 	// Settings is a pointer so a file written before it existed can be told
 	// apart from one that holds it, and load can fill in the defaults.
 	Settings *Settings `json:"settings,omitempty"`
@@ -1151,7 +1187,10 @@ func (m *Manager) save() error {
 	m.mu.Lock()
 	notify := m.notifyOn.Load()
 	settings := m.settings.clone()
-	list := savedList{Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings, SpeedLimit: m.speed.Rate()}
+	list := savedList{
+		Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings,
+		SpeedLimit: m.speed.Rate(), SeedPolicy: string(m.bt.Policy()),
+	}
 	for _, id := range m.order {
 		t := m.tasks[id]
 		t.mu.Lock()
@@ -1207,6 +1246,9 @@ func (m *Manager) load() error {
 		m.notifyOn.Store(*list.Notify)
 	}
 	m.speed.SetRate(list.SpeedLimit)
+	if p, ok := parseSeedPolicy(list.SeedPolicy); ok {
+		m.bt.setPolicy(p)
+	}
 	for _, st := range list.Tasks {
 		v := st.View
 		switch v.State {
@@ -1214,6 +1256,9 @@ func (m *Manager) load() error {
 			v.State = StatePaused
 		case StateAwaitingRefresh:
 			v.State, v.RefreshUntil = StateNeedsRefresh, time.Time{}
+		}
+		if v.Kind == "bt" {
+			v.Stage = "" // neither fetching metadata nor seeding until it runs again
 		}
 		if _, dup := m.tasks[v.ID]; dup || v.ID == "" {
 			continue
@@ -1311,6 +1356,8 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	}
 	mgr := NewManager(outDir, parallel)
 	mgr.store = filepath.Join(configDir(), "tasks.json")
+	mgr.bt.dir = filepath.Join(configDir(), "bt")
+	defer mgr.shutdownBT()
 	if err := mgr.load(); err != nil {
 		log.Printf("could not restore the task list: %v", err)
 	}
@@ -1353,6 +1400,8 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
 	mux.HandleFunc("/api/play", s.guard(post(s.handlePlay)))
 	mux.HandleFunc("/stream/", s.guard(s.handleStream))
+	mux.HandleFunc("/api/torrent", s.guard(post(s.handleTorrentFile)))
+	mux.HandleFunc("/api/seeding", s.guard(s.handleSeeding))
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	serveErr := make(chan error, 1)

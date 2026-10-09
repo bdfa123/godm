@@ -218,10 +218,12 @@ const uiHTML = `<!doctype html>
 <div class="scrim" id="addDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="addTitle">
     <h2 id="addTitle">Add links</h2>
-    <p>One URL per line. They join the queue in this order.</p>
-    <textarea id="addText" placeholder="https://example.com/file1.zip&#10;https://example.com/file2.zip" spellcheck="false"></textarea>
+    <p>One URL or magnet link per line. They join the queue in this order.</p>
+    <textarea id="addText" placeholder="https://example.com/file1.zip&#10;magnet:?xt=urn:btih:..." spellcheck="false"></textarea>
     <div class="foot">
       <span class="grow" id="addCount">No links yet</span>
+      <button class="btn" id="torrentPick" title="Add torrents from .torrent files on this computer">Open .torrent…</button>
+      <input type="file" id="torrentFile" accept=".torrent,application/x-bittorrent" multiple hidden>
       <label class="field">Connections <input type="number" id="addConns" value="8" min="1" max="32" style="width:64px"></label>
       <button class="btn" data-close="addDlg">Cancel</button>
       <button class="btn primary" id="addGo" disabled>Add</button>
@@ -336,6 +338,13 @@ var LABEL = {
   queued: "Queued", running: "Downloading", paused: "Paused", done: "Finished",
   error: "Failed", needs_refresh: "Link expired", awaiting_refresh: "Waiting for new link"
 };
+// A torrent says more than its state: it may still be learning what files it
+// has, or be finished and uploading.
+function stateLabel(t) {
+  if (t.kind === "bt" && t.state === "running" && t.stage === "metadata") return "Fetching metadata";
+  if (t.kind === "bt" && t.state === "done" && t.stage === "seeding") return "Seeding";
+  return LABEL[t.state] || t.state;
+}
 function attention(t) { return t.state === "needs_refresh" || t.state === "awaiting_refresh" || t.state === "error"; }
 function inTab(t, tab) {
   // Paused belongs with unfinished work: pausing a download must not make it
@@ -431,8 +440,10 @@ function speedSelect(t) {
 
 // taskControls are the selects at the end of a card. yt-dlp runs its own
 // transfers, so neither applies to it.
+// A torrent counts peers rather than connections, and the speed limit does
+// not reach the torrent client yet, so neither control would do anything.
 function taskControls(t) {
-  if (t.state === "done" || t.kind === "yt-dlp") return "";
+  if (t.state === "done" || t.kind === "yt-dlp" || t.kind === "bt") return "";
   return '<span style="flex:1"></span>' + speedSelect(t) + (t.resumable !== false ? connSelect(t) : "");
 }
 
@@ -453,7 +464,30 @@ function progressOf(t) {
   return t.size > 0 ? Math.min(100, t.received / t.size * 100) : 0;
 }
 
+// torrentMeta is the line under a torrent: peers instead of connections, and
+// what it has uploaded, since that is what the seeding policy goes by.
+function torrentMeta(t) {
+  var bits = [], hasSize = t.size > 0, pct = progressOf(t);
+  var peers = "<b>" + (t.active || 0) + "</b> peer" + (t.active === 1 ? "" : "s") + (t.conns ? " · " + t.conns + " seed" + (t.conns === 1 ? "" : "s") : "");
+  if (t.state === "running" && t.stage === "metadata") {
+    bits.push("Asking peers for the file list…", peers);
+  } else if (t.state === "running") {
+    bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
+    bits.push("<b>" + human(t.speed) + "/s</b>");
+    if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
+    bits.push(peers);
+  } else if (t.state === "done") {
+    bits.push("<b>" + human(t.size) + "</b>");
+    if (t.stage === "seeding") bits.push(peers);
+  } else if (t.received > 0) {
+    bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "% saved" : " saved"));
+  }
+  if (t.uploaded > 0) bits.push(human(t.uploaded) + " uploaded" + (hasSize ? " · ratio " + (t.uploaded / t.size).toFixed(2) : ""));
+  return bits.map(function (b) { return "<span>" + b + "</span>"; }).join("");
+}
+
 function metaLine(t) {
+  if (t.kind === "bt") return torrentMeta(t);
   var bits = [];
   var hasSize = t.size > 0;
   var pct = progressOf(t);
@@ -525,7 +559,11 @@ function banner(t) {
 // ordinary file whose size is known, which the player can read while the rest
 // arrives. Streams and yt-dlp downloads only become one file at the end.
 function playable(t, ext) {
+  // A torrent plays its largest video, which the daemon names once the file
+  // list is known; pieces near where the player reads are fetched first.
+  if (t.kind === "bt") ext = extOf(t.media);
   if (kindOf(ext) !== "video" && kindOf(ext) !== "audio") return false;
+  if (t.kind === "bt") return t.state === "done" || t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error";
   if (t.state === "done") return !!t.path;
   if (t.kind || !(t.size > 0) || t.resumable === false) return false;
   return t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error";
@@ -533,6 +571,7 @@ function playable(t, ext) {
 
 function card(t) {
   var name = nameOf(t), ext = extOf(name), open = !!S.open[t.id];
+  var bt = t.kind === "bt", icon = bt ? extOf(t.media) || "bt" : ext || "file";
   var hasSize = t.size > 0;
   var pct = t.state === "done" ? 100 : progressOf(t);
   var acts = [];
@@ -541,14 +580,14 @@ function card(t) {
   if (t.state === "paused") acts.push(["resume", "Resume"]);
   if (t.path) acts.push(["open", t.state === "done" ? "Show in folder" : "Open folder"]);
   if (t.state !== "done" && (t.segments || []).length) acts.push(["conns", open ? "Hide connections" : "Connections"]);
-  if (t.state === "paused" || t.state === "error") acts.push(["address", "Change address"]);
+  if ((t.state === "paused" || t.state === "error") && !bt) acts.push(["address", "Change address"]);
   acts.push(["remove", "Remove"]);
 
   return '<div class="task" data-task="' + t.id + '">' +
-    '<div class="ico ' + kindOf(ext) + '">' + esc(ext || "file") + "</div>" +
+    '<div class="ico ' + kindOf(icon) + '">' + esc(icon) + "</div>" +
     '<div class="body">' +
       '<div class="row"><span class="name" title="' + esc(name) + '">' + esc(name) + "</span>" +
-      '<span class="pill ' + t.state + '">' + (LABEL[t.state] || t.state) + "</span></div>" +
+      '<span class="pill ' + t.state + '">' + stateLabel(t) + "</span></div>" +
       (t.state === "done" ? "" : '<div class="bar"><div class="fill ' + t.state + '" style="width:' + pct.toFixed(1) + '%"></div></div>') +
       (t.state === "done" ? "" : segMap(t)) +
       '<div class="meta">' + metaLine(t) + "</div>" +
@@ -759,7 +798,7 @@ function parseLinks(text) {
   var seen = {}, out = [];
   (text || "").split(/[\s]+/).forEach(function (s) {
     s = s.trim();
-    if (/^https?:\/\/\S+$/i.test(s) && !seen[s]) { seen[s] = 1; out.push(s); }
+    if ((/^https?:\/\/\S+$/i.test(s) || /^magnet:\?\S+$/i.test(s)) && !seen[s]) { seen[s] = 1; out.push(s); }
   });
   return out;
 }
@@ -851,6 +890,36 @@ document.getElementById("setGo").addEventListener("click", function () {
       : "Settings saved.");
     poll();
   }).catch(fail);
+});
+
+// A .torrent file is sent as it is; the daemon keeps its own copy, so the
+// original can be deleted afterwards.
+document.getElementById("torrentPick").addEventListener("click", function () {
+  document.getElementById("torrentFile").click();
+});
+document.getElementById("torrentFile").addEventListener("change", function (e) {
+  var files = Array.prototype.slice.call(e.target.files || []);
+  e.target.value = "";
+  if (!files.length) return;
+  hide("addDlg");
+  var added = 0, failed = [];
+  files.reduce(function (chain, f) {
+    return chain.then(function () {
+      return fetch("/api/torrent", {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/x-bittorrent" },
+        body: f
+      }).then(function (r) {
+        if (!r.ok) return r.text().then(function (msg) { failed.push(f.name + ": " + msg.trim()); });
+        added++;
+      }).catch(function (err) { failed.push(f.name + ": " + err.message); });
+    });
+  }, Promise.resolve()).then(function () {
+    if (failed.length) toast((added ? "Added " + added + ". " : "") + failed.join("; "), "err");
+    else toast("Added " + added + " torrent" + (added === 1 ? "" : "s"));
+    S.tab = "all";
+    poll();
+  });
 });
 
 // Pasting links anywhere outside a text field opens the add dialog with them.

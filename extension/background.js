@@ -558,11 +558,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
   const cfg = await getConfig();
+  // The item shows on every link, magnet links included: a menu pattern
+  // cannot name the magnet: scheme. A magnet is not fetched over HTTP, so it
+  // carries no cookies.
+  const magnet = /^magnet:/i.test(url);
   const resp = await callHost({
     type: "download",
     url: url,
+    kind: magnet ? "bt" : "",
     referrer: info.pageUrl || (tab && tab.url) || "",
-    cookie: await cookieHeader(url),
+    cookie: magnet ? "" : await cookieHeader(url),
     userAgent: navigator.userAgent,
     connections: cfg.connections
   });

@@ -504,6 +504,7 @@ func (t *tray) showMenu() {
 	case menuQuit:
 		log.Printf("quit requested from the tray")
 		t.mgr.PauseAll()
+		t.mgr.shutdownBT()
 		t.mgr.save()
 		procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&t.nid)))
 		os.Exit(0)

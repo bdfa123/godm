@@ -192,6 +192,10 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if mt.isTorrent() {
+		s.streamTorrent(w, r, mt)
+		return
+	}
 	v, err := waitStreamable(r.Context(), mt)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -353,6 +357,10 @@ func (s *server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	mt := s.mgr.get(id)
 	if mt == nil {
 		writeJSON(w, map[string]any{"ok": false, "error": "no such task"})
+		return
+	}
+	if mt.isTorrent() {
+		s.playTorrent(w, id, mt)
 		return
 	}
 	v := mt.snapshot()
