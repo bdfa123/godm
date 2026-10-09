@@ -21,6 +21,7 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
+	"go.etcd.io/bbolt"
 	"golang.org/x/time/rate"
 )
 
@@ -887,6 +888,62 @@ func TestRemovingATorrentDeletesOnlyWhatItWrote(t *testing.T) {
 	}
 	if m.bt.loadedFor(mt) != nil {
 		t.Error("the removed torrent is still in the client")
+	}
+}
+
+func TestRemovingATorrentForgetsItsPieceRecords(t *testing.T) {
+	// What the library's own bolt record wrote, as godm used it before, still
+	// reads the same.
+	old := t.TempDir()
+	lib, err := storage.NewBoltPieceCompletion(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := metainfo.PieceKey{InfoHash: metainfo.NewHashFromHex("0123456789abcdef0123456789abcdef01234567"), Index: 7}
+	if err := lib.Set(key, true); err != nil {
+		t.Fatal(err)
+	}
+	other := key
+	other.Index = 8
+	lib.Set(other, false)
+	lib.Close()
+	pc, err := openBTCompletion(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := pc.Get(key); !c.Ok || !c.Complete {
+		t.Errorf("a finished piece the library recorded reads as %+v", c)
+	}
+	if c, _ := pc.Get(other); !c.Ok || c.Complete {
+		t.Errorf("an unfinished piece the library recorded reads as %+v", c)
+	}
+	pc.Close()
+
+	src := t.TempDir()
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: makePayload(300 << 10)})
+	seed := newSeeder(t, src, mi, 0)
+	m := newBTManager(t)
+	id, _ := m.Add(jobRequest{URL: magnetOf(mi, "film.bin", seed.addr())})
+	waitFor(t, 30*time.Second, "the download", stateIs(m, id, StateDone))
+	ih := mi.HashInfoBytes()
+	records := func() (n int) {
+		m.bt.pc.db.View(func(tx *bbolt.Tx) error {
+			if b := tx.Bucket(btCompletionBucket); b != nil {
+				if b = b.Bucket(ih[:]); b != nil {
+					n = b.Stats().KeyN
+				}
+			}
+			return nil
+		})
+		return n
+	}
+	if n := records(); n == 0 {
+		t.Fatal("the finished torrent has no piece records")
+	}
+	m.Remove(id, false)
+	waitFor(t, 10*time.Second, "the removed torrent's piece records to go", func() bool { return records() == 0 })
+	if c, _ := m.bt.pc.Get(metainfo.PieceKey{InfoHash: ih}); c.Ok {
+		t.Errorf("a removed torrent's first piece still reads as %+v", c)
 	}
 }
 

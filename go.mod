@@ -6,6 +6,7 @@ require (
 	github.com/anacrolix/generics v0.1.1-0.20251125230353-15d98d46693b
 	github.com/anacrolix/torrent v1.61.0
 	github.com/jchv/go-webview2 v0.0.0-20260205173254-56598839c808
+	go.etcd.io/bbolt v1.3.6
 	golang.org/x/time v0.14.0
 )
 
@@ -75,7 +76,6 @@ require (
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/tidwall/btree v1.8.1 // indirect
 	github.com/wlynxg/anet v0.0.3 // indirect
-	go.etcd.io/bbolt v1.3.6 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect

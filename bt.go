@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
+	"go.etcd.io/bbolt"
 
 	_ "godm/internal/torrentio" // before storage initialises; see the package
 )
@@ -235,7 +237,7 @@ type btEngine struct {
 
 	mu     sync.Mutex
 	cl     *torrent.Client
-	pc     storage.PieceCompletion
+	pc     *btCompletion
 	slog   *slog.Logger // the client's warnings, into godm's log
 	fslog  *slog.Logger // the file storage's, errors only
 	loaded map[metainfo.Hash]*btLoaded
@@ -290,7 +292,7 @@ func (e *btEngine) watchPolicy() (SeedPolicy, <-chan struct{}) {
 
 // completion opens the piece database on first use. It needs no client, so a
 // torrent can be removed and its records cleaned up without going online.
-func (e *btEngine) completion() (storage.PieceCompletion, error) {
+func (e *btEngine) completion() (*btCompletion, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
@@ -305,16 +307,105 @@ func (e *btEngine) completion() (storage.PieceCompletion, error) {
 	if err := os.MkdirAll(e.dir, 0o700); err != nil {
 		return nil, err
 	}
-	// Without cgo the library's default record is a bolt database. One for
-	// all torrents, kept beside their metainfo, rather than one dropped into
-	// every download folder.
-	pc, err := storage.NewBoltPieceCompletion(e.dir)
+	pc, err := openBTCompletion(e.dir)
 	if err != nil {
 		return nil, fmt.Errorf("opening the torrent piece database: %w", err)
 	}
 	e.pc = pc
 	return pc, nil
 }
+
+// btCompletion records which pieces of every torrent are finished: one bolt
+// database for all of them, kept beside their metainfo, rather than one
+// dropped into every download folder. It is laid out exactly as the library's
+// own bolt record, which godm used before, so what that recorded still
+// counts. What the library's lacks is a way to forget a torrent: it can only
+// mark each piece unfinished, which keeps a record of every piece of every
+// torrent ever removed.
+type btCompletion struct{ db *bbolt.DB }
+
+var (
+	btCompletionBucket = []byte("completion")
+	_                  = storage.PieceCompletion((*btCompletion)(nil))
+)
+
+func openBTCompletion(dir string) (*btCompletion, error) {
+	db, err := bbolt.Open(filepath.Join(dir, ".torrent.bolt.db"), 0o600, &bbolt.Options{Timeout: time.Second})
+	if err != nil {
+		return nil, err
+	}
+	// As the library has it: a record lost to a crash only means a piece is
+	// checked again, and syncing on every piece would cost far more.
+	db.NoSync = true
+	return &btCompletion{db}, nil
+}
+
+func pieceRecordKey(i int) []byte {
+	var k [4]byte
+	binary.BigEndian.PutUint32(k[:], uint32(i))
+	return k[:]
+}
+
+func (c *btCompletion) Get(pk metainfo.PieceKey) (cn storage.Completion, err error) {
+	err = c.db.View(func(tx *bbolt.Tx) error {
+		ih := tx.Bucket(btCompletionBucket)
+		if ih != nil {
+			ih = ih.Bucket(pk.InfoHash[:])
+		}
+		if ih == nil {
+			return nil
+		}
+		switch string(ih.Get(pieceRecordKey(pk.Index))) {
+		case "c":
+			cn.Ok, cn.Complete = true, true
+		case "i":
+			cn.Ok = true
+		}
+		return nil
+	})
+	return cn, err
+}
+
+func (c *btCompletion) Set(pk metainfo.PieceKey, complete bool) error {
+	if cn, err := c.Get(pk); err == nil && cn.Ok && cn.Complete == complete {
+		return nil
+	}
+	v := []byte("i")
+	if complete {
+		v = []byte("c")
+	}
+	return c.db.Update(func(tx *bbolt.Tx) error {
+		all, err := tx.CreateBucketIfNotExists(btCompletionBucket)
+		if err != nil {
+			return err
+		}
+		ih, err := all.CreateBucketIfNotExists(pk.InfoHash[:])
+		if err != nil {
+			return err
+		}
+		return ih.Put(pieceRecordKey(pk.Index), v)
+	})
+}
+
+// forget deletes every record of one torrent.
+func (c *btCompletion) forget(ih metainfo.Hash) error {
+	return c.db.Update(func(tx *bbolt.Tx) error {
+		all := tx.Bucket(btCompletionBucket)
+		if all == nil {
+			return nil
+		}
+		if err := all.DeleteBucket(ih[:]); err != nil && !errors.Is(err, bbolt.ErrBucketNotFound) {
+			return err
+		}
+		return nil
+	})
+}
+
+// Persistent tells the file storage that a finished piece is on record for
+// good, as the library's bolt record does.
+func (c *btCompletion) Persistent() bool { return true }
+
+func (c *btCompletion) Close() error { return c.db.Close() }
 
 // start returns the client, starting it on first use.
 func (e *btEngine) start() (*torrent.Client, storage.PieceCompletion, error) {
@@ -564,16 +655,13 @@ func (e *btEngine) loadMetainfo(ih metainfo.Hash) (*metainfo.MetaInfo, error) {
 
 // clearCompletion forgets which pieces of a removed torrent were finished, so a
 // later download of the same torrent starts from what is really on disk.
-func (e *btEngine) clearCompletion(ih metainfo.Hash, info *metainfo.Info) {
-	if info == nil {
-		return
-	}
+func (e *btEngine) clearCompletion(ih metainfo.Hash) {
 	pc, err := e.completion()
 	if err != nil {
 		return
 	}
-	for i := 0; i < info.NumPieces(); i++ {
-		pc.Set(metainfo.PieceKey{InfoHash: ih, Index: i}, false)
+	if err := pc.forget(ih); err != nil {
+		log.Printf("forgetting the finished pieces of torrent %s: %v", ih.HexString(), err)
 	}
 }
 
@@ -1143,7 +1231,7 @@ func (m *Manager) forgetTorrent(mt *managedTask, deleteFiles bool) {
 				}
 			}
 		}
-		m.bt.clearCompletion(ih, info)
+		m.bt.clearCompletion(ih)
 		if m.bt.dir != "" {
 			os.Remove(m.bt.metainfoPath(ih))
 		}
