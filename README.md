@@ -16,7 +16,11 @@ Linux and macOS.
   downloads HLS itself and can drive yt-dlp for the sites that need it.
 - **Play while it downloads**: open a file in mpv or VLC before it has
   finished, and seek anywhere — the connections follow the player.
-- **Lives in the tray**, with a manager window, a queue and notifications.
+- **Torrents and magnet links**, with play-while-downloading too, and no
+  uploading once a torrent is done unless you ask for it.
+- **Lives in the tray**, with a manager window, a queue, notifications, speed
+  limits, sorting into folders by type, and an English or Simplified Chinese
+  interface.
 
 ```
 Chrome/Edge extension  ──native messaging──>  godm.exe (thin host)
@@ -29,8 +33,9 @@ Chrome/Edge extension  ──native messaging──>  godm.exe (thin host)
                                           └── /stream/ for a media player
 ```
 
-The only Go dependency is [go-webview2](https://github.com/jchv/go-webview2)
-for the manager window, which is pure Go, so no cgo is needed.
+The Go dependencies are [go-webview2](https://github.com/jchv/go-webview2) for
+the manager window and [anacrolix/torrent](https://github.com/anacrolix/torrent)
+for BitTorrent. Everything is pure Go and builds with `CGO_ENABLED=0`.
 
 ## Download
 
@@ -105,6 +110,11 @@ hands over the URL along with:
 If the handoff fails for any reason, the extension hands the download back to the
 browser and shows a notification. It never silently drops a file.
 
+By default a small dialog asks first, the way IDM does: change the file name,
+the folder or the connection count, then **Start**; **Cancel** or closing it
+downloads nothing. "Don't ask again" turns it off, and the options page turns
+it back on. Links picked in bulk skip the dialog.
+
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go.
 
@@ -142,7 +152,49 @@ file as it arrives:
 In a test against a host that allows eight connections, each slower than the
 film's bitrate, jumping to a part not yet downloaded resumed playback in about
 1.5 s with no stalls afterwards. Streams (HLS) and yt-dlp downloads can only be
-played once they finish.
+played once they finish. Torrents can be played while they download too: the
+largest video in the torrent is served, the pieces just ahead of the player
+come first, and only pieces whose hash has been checked reach the player.
+
+## Torrents and magnet links
+
+Paste magnet links into **Add links**, pick `.torrent` files with
+**Open .torrent…**, or right-click a magnet link in the browser and choose
+**Download with godm**. A magnet shows "Fetching metadata" until peers send the
+file list; if nobody answers within five minutes it stops and frees its place
+in the queue, and Resume tries again.
+
+- **Uploading**: by default a torrent stops uploading the moment it finishes.
+  Settings can make it seed to a ratio of 1.0 or keep seeding. While a torrent
+  downloads it uploads to its peers, as BitTorrent requires, and your IP address
+  is visible to them.
+- **Network**: the torrent client starts with the first torrent, listens on TCP
+  port 16881 and uses UDP for DHT. It never opens a port on your router (no
+  UPnP or NAT-PMP). The first torrent makes Windows Firewall ask whether godm
+  may use the network; refusing still lets torrents download, from fewer peers.
+- File names inside a torrent are cleaned so none can land outside the download
+  folder, and names that would collide on Windows get numbered.
+
+## Settings
+
+The **Settings** dialog and the top bar hold the choices that apply to every
+download:
+
+- **Speed limit**, for all downloads together and, on each card, for one
+  download. Torrents keep to the same limit on their own, so with torrents and
+  other downloads running at once the total can reach about twice it; yt-dlp
+  downloads are not limited, and the per-download limit is for plain files.
+- **Keep this PC awake** while anything downloads (on by default). The screen
+  may still turn off.
+- **When all downloads finish**: sleep or shut down, once. Shutting down gives a
+  60-second warning that `shutdown /a` cancels. It is never remembered across a
+  restart.
+- **Sort into folders by type** (off by default): Video, Music, Archives,
+  Documents, Programs and Images, under the download folder, each name editable.
+  A folder chosen in the download dialog always wins.
+- **Language**: follow Windows, English, or 简体中文. The extension follows the
+  browser's language.
+- **After a torrent finishes**: stop uploading, seed to ratio 1.0, or keep seeding.
 
 ## Commands
 
@@ -178,7 +230,14 @@ played once they finish.
 - **Connection limits**: some hosts allow only so many connections per link and
   answer the next one with `503`. A connection that keeps being refused while
   others work just leaves, and the download carries on with as many as the host
-  accepts instead of failing.
+  accepts instead of failing. One more connection is tried after 30 seconds, and
+  then ever less often up to every 5 minutes, in case the refusal was a passing
+  one.
+- **Stalled connections**: a connection that gets no bytes for 30 seconds
+  without the server closing it is dropped and reopened from where it stopped,
+  so a download never sits at 99% forever.
+- **Proxy**: `HTTPS_PROXY`/`HTTP_PROXY` if set, otherwise the proxy in Windows
+  settings, including its bypass list. Loopback is never proxied.
 - **Expired links**: a `401/403/404/410`, or a web page where the file should be,
   keeps the progress and waits for a fresh link to the same file. Click the
   download again in the browser and the waiting task adopts it.
@@ -202,7 +261,8 @@ played once they finish.
   and is not wired up.
 - DASH (`.mpd`) is detected but not downloaded: separate audio and video
   streams need merging, which most likely means ffmpeg.
-- No global speed limit, scheduling, or queue priorities.
+- No scheduling or queue priorities, and no per-file selection inside a torrent.
+- Proxy auto-config (PAC) scripts are not read; a proxy set by address is.
 - No code signing, so SmartScreen will warn on a machine that has not seen the
   binary before.
 - The browser has already started its own transfer by the time the extension
@@ -212,8 +272,8 @@ played once they finish.
 ## Tests
 
 ```bash
-go test ./...
-node --test extension/sniff.test.js
+CGO_ENABLED=0 go test ./...
+node --test "extension/*.test.js"
 ```
 
 The Go suite runs a local HTTP server that serves real `206` responses, hangs up
