@@ -1365,9 +1365,11 @@ func (m *Manager) waitTorrentMedia(ctx context.Context, mt *managedTask) (*torre
 
 // streamTorrent serves a torrent's video to a player. A finished one is read
 // from disk. One still arriving is read through the torrent itself: the pieces
-// just ahead of the reader move to the front of the queue, and in responsive
-// mode each chunk is handed over as soon as it lands rather than once its
-// whole piece has been checked. Ranges work as for any file.
+// just ahead of the reader move to the front of the queue, and each is handed
+// over once it has passed its hash check. The reader's responsive mode would
+// hand over chunks as they land, a little sooner, but those come from
+// strangers and may be anything at all until their piece is checked. Ranges
+// work as for any file.
 func (s *server) streamTorrent(w http.ResponseWriter, r *http.Request, mt *managedTask) {
 	if v := mt.snapshot(); v.State == StateDone {
 		p, err := torrentMediaPath(v)
@@ -1397,7 +1399,6 @@ func (s *server) streamTorrent(w http.ResponseWriter, r *http.Request, mt *manag
 	rd := file.NewReader()
 	defer rd.Close()
 	rd.SetContext(r.Context())
-	rd.SetResponsive()
 	rd.SetReadahead(torrentReadahead)
 	name := path.Base(file.DisplayPath())
 	h := w.Header()

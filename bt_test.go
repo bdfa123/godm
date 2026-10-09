@@ -852,3 +852,48 @@ func TestTorrentStreamServesARangeBeforeTheDownloadFinishes(t *testing.T) {
 		t.Errorf("finished torrent opened %q, want %q", opened[1], want)
 	}
 }
+
+func TestTorrentStreamOnlyServesCheckedPieces(t *testing.T) {
+	src := t.TempDir()
+	film := makePayload(1 << 20)
+	mi := makeTorrent(t, src, "film.mkv", 256<<10, tfile{data: film})
+	seed := newSeeder(t, src, mi, 256<<10)
+	// The seeder checked the real film, and its file storage reads the disk
+	// afresh each time, so from here on it sends bytes that fail the piece
+	// hash while believing it has the torrent: a bad peer, in short.
+	bad := make([]byte, len(film))
+	for i := range film {
+		bad[i] = film[i] ^ 0x5a
+	}
+	if err := os.WriteFile(filepath.Join(src, "film.mkv"), bad, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newBTManager(t)
+	_, api := btAPI(t, m)
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "film.mkv", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the file list", func() bool {
+		v, _ := findTask(m, id)
+		return v.Media != ""
+	})
+	const n = 64 << 10
+	req := bearer(http.MethodGet, api.URL+"/stream/"+id+"/film.mkv", nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", n-1))
+	// The first piece never passes its check, so the right answer is no
+	// answer: the player waits, as it would for a slow peer.
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err == nil {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if len(body) > 0 && bytes.Equal(body, bad[:len(body)]) {
+			t.Fatalf("the stream served %d bytes of a piece that failed its hash check", len(body))
+		}
+	}
+	if tor := m.bt.loadedFor(taskOf(m, id)); tor == nil || tor.Stats().PiecesComplete != 0 {
+		t.Fatal("the bad first piece was not what the stream waited on")
+	}
+	m.Pause(id)
+}
