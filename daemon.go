@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -360,18 +361,19 @@ func (m *Manager) announceFinish(v TaskView, st TaskState) {
 	case StateDone:
 		text := name
 		if v.Size > 0 {
-			text += "\n" + humanBytes(v.Size)
+			size := humanBytes(v.Size)
 			if !v.StartedAt.IsZero() && !v.EndedAt.IsZero() {
 				if secs := v.EndedAt.Sub(v.StartedAt).Seconds(); secs > 0 {
-					text += fmt.Sprintf(" in %s", time.Duration(secs*float64(time.Second)).Round(time.Second))
+					size = m.tr("notify.sizeIn", "size", size, "time", span(m.Lang(), int64(math.Round(secs))))
 				}
 			}
+			text += "\n" + size
 		}
-		m.announce("Download complete", text, v.Path)
+		m.announce(m.tr("notify.complete"), text, v.Path)
 	case StateNeedsRefresh:
-		m.announce("Download link expired", name+"\nOpen godm to fetch a fresh link and continue.", "app")
+		m.announce(m.tr("notify.expired"), m.tr("notify.expiredAt", "name", name), "app")
 	case StateError:
-		m.announce("Download failed", name+"\n"+v.Error, "app")
+		m.announce(m.tr("notify.failed"), name+"\n"+v.Error, "app")
 	}
 }
 
@@ -1240,6 +1242,7 @@ func (m *Manager) load() error {
 	if list.Settings != nil {
 		m.settings = *list.Settings
 		m.settings.Folders = folderNames(list.Settings.Folders)
+		m.settings.Language = cleanLang(list.Settings.Language)
 		m.syncAwakeLocked()
 	}
 	if list.Notify != nil {
@@ -1542,6 +1545,9 @@ func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit(),
 		"after_all": s.mgr.AfterAll(), "speed_limit": s.mgr.SpeedLimit(),
+		// Carried here so that a page left open in another window follows a
+		// change of language made in this one.
+		"language": s.mgr.LanguageSetting(),
 	})
 }
 
@@ -1670,8 +1676,11 @@ func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	// The token is injected here so the page can call the API without asking
-	// the user to paste anything.
-	fmt.Fprint(w, strings.Replace(uiHTML, "__TOKEN__", s.token, 1))
+	// the user to paste anything. So is the language setting, which lets the
+	// first paint be in the right language; the page works out for itself what
+	// auto means for the browser it is open in.
+	page := strings.Replace(uiHTML, "__TOKEN__", s.token, 1)
+	fmt.Fprint(w, strings.Replace(page, "__LANG__", s.mgr.LanguageSetting(), 1))
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

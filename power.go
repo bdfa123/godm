@@ -18,8 +18,9 @@ type powerOps struct {
 	// sleep puts the computer to sleep and returns once it has woken again.
 	sleep func() error
 	// shutdown schedules a shutdown after the delay, which is the user's chance
-	// to cancel it, and returns at once.
-	shutdown func(delay time.Duration) error
+	// to cancel it, and returns at once. The reason is what Windows shows while
+	// it counts down.
+	shutdown func(delay time.Duration, reason string) error
 }
 
 // awakeKeeper owns the request to keep the system awake. Windows ties that

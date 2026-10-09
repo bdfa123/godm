@@ -108,17 +108,16 @@ func (m *Manager) runAfter(act afterAction, ops powerOps) {
 		log.Printf("all downloads finished: putting the computer to sleep")
 		if err := ops.sleep(); err != nil {
 			log.Printf("sleep: %v", err)
-			m.warn("Could not put the computer to sleep", err.Error())
+			m.warn(m.tr("power.sleepFail"), err.Error())
 		}
 	case afterShutdown:
 		log.Printf("all downloads finished: shutting down in %s", shutdownDelay)
-		if err := ops.shutdown(shutdownDelay); err != nil {
+		if err := ops.shutdown(shutdownDelay, m.tr("power.shutReason")); err != nil {
 			log.Printf("shutdown: %v", err)
-			m.warn("Could not shut the computer down", err.Error())
+			m.warn(m.tr("power.shutFail"), err.Error())
 			return
 		}
-		m.warn(fmt.Sprintf("Shutting down in %d seconds", int(shutdownDelay/time.Second)),
-			"All downloads finished. To cancel, press Win+R, type shutdown /a and press Enter.")
+		m.warn(m.tr("power.shutTitle", "n", int(shutdownDelay/time.Second)), m.tr("power.shutText"))
 	}
 }
 

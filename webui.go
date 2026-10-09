@@ -197,18 +197,18 @@ const uiHTML = `<!doctype html>
   <div class="brand"><span class="dot" id="dot"></span>godm</div>
   <div class="stats" id="stats"></div>
   <div class="ctl">
-    <label class="field" title="How many files download at the same time; the rest wait in line">
-      Downloads at once
+    <label class="field" data-i18n-title="top.limit.tip">
+      <span data-i18n="top.limit"></span>
       <select id="limit"></select>
     </label>
-    <label class="field" title="The most all downloads together may use. Each download can be limited on its own as well.">
-      Speed limit
+    <label class="field" data-i18n-title="top.speed.tip">
+      <span data-i18n="top.speed"></span>
       <select id="speed"></select>
     </label>
-    <button class="btn" id="pauseAll">Pause all</button>
-    <button class="btn" id="resumeAll">Resume all</button>
-    <button class="btn primary" id="addBtn">+ Add links</button>
-    <button class="btn" id="setBtn">Settings</button>
+    <button class="btn" id="pauseAll" data-i18n="top.pauseAll"></button>
+    <button class="btn" id="resumeAll" data-i18n="top.resumeAll"></button>
+    <button class="btn primary" id="addBtn" data-i18n="top.add"></button>
+    <button class="btn" id="setBtn" data-i18n="top.settings"></button>
   </div>
 </div>
 
@@ -217,63 +217,67 @@ const uiHTML = `<!doctype html>
 
 <div class="scrim" id="addDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="addTitle">
-    <h2 id="addTitle">Add links</h2>
-    <p>One URL or magnet link per line. They join the queue in this order.</p>
+    <h2 id="addTitle" data-i18n="add.title"></h2>
+    <p data-i18n="add.help"></p>
     <textarea id="addText" placeholder="https://example.com/file1.zip&#10;magnet:?xt=urn:btih:..." spellcheck="false"></textarea>
     <div class="foot">
-      <span class="grow" id="addCount">No links yet</span>
-      <button class="btn" id="torrentPick" title="Add torrents from .torrent files on this computer">Open .torrent…</button>
+      <span class="grow" id="addCount"></span>
+      <button class="btn" id="torrentPick" data-i18n="add.torrent" data-i18n-title="add.torrent.tip"></button>
       <input type="file" id="torrentFile" accept=".torrent,application/x-bittorrent" multiple hidden>
-      <label class="field">Connections <input type="number" id="addConns" value="8" min="1" max="32" style="width:64px"></label>
-      <button class="btn" data-close="addDlg">Cancel</button>
-      <button class="btn primary" id="addGo" disabled>Add</button>
+      <label class="field"><span data-i18n="add.conns"></span> <input type="number" id="addConns" value="8" min="1" max="32" style="width:64px"></label>
+      <button class="btn" data-close="addDlg" data-i18n="common.cancel"></button>
+      <button class="btn primary" id="addGo" disabled></button>
     </div>
   </div>
 </div>
 
 <div class="scrim" id="rmDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="rmTitle">
-    <h2 id="rmTitle">Remove download</h2>
+    <h2 id="rmTitle" data-i18n="rm.title"></h2>
     <p id="rmName"></p>
-    <label class="check"><input type="checkbox" id="rmDelete"> Also delete the file from disk</label>
+    <label class="check"><input type="checkbox" id="rmDelete"> <span data-i18n="rm.delete"></span></label>
     <div class="foot">
-      <button class="btn" data-close="rmDlg">Cancel</button>
-      <button class="btn primary" id="rmGo">Remove</button>
+      <button class="btn" data-close="rmDlg" data-i18n="common.cancel"></button>
+      <button class="btn primary" id="rmGo" data-i18n="rm.go"></button>
     </div>
   </div>
 </div>
 
 <div class="scrim" id="addrDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="addrTitle">
-    <h2 id="addrTitle">Change address</h2>
-    <p>Paste a fresh link to the same file. godm checks the size matches before continuing, so a wrong link cannot corrupt what is already downloaded.</p>
+    <h2 id="addrTitle" data-i18n="addr.title"></h2>
+    <p data-i18n="addr.help"></p>
     <input type="url" id="addrUrl" placeholder="https://" spellcheck="false">
     <div class="foot">
-      <button class="btn" data-close="addrDlg">Cancel</button>
-      <button class="btn primary" id="addrGo">Continue with this link</button>
+      <button class="btn" data-close="addrDlg" data-i18n="common.cancel"></button>
+      <button class="btn primary" id="addrGo" data-i18n="addr.go"></button>
     </div>
   </div>
 </div>
 
 <div class="scrim" id="setDlg" hidden>
   <div class="dialog" role="dialog" aria-labelledby="setTitle">
-    <h2 id="setTitle">Settings</h2>
+    <h2 id="setTitle" data-i18n="set.title"></h2>
+    <div class="set">
+      <label class="field"><span data-i18n="set.lang"></span> <select id="setLang"></select></label>
+      <p data-i18n="set.lang.help"></p>
+    </div>
     <div class="set" id="awakeRow">
-      <label class="check"><input type="checkbox" id="setAwake"> Keep this PC awake while downloading</label>
-      <p>Stops Windows going to sleep on its own while a download is running. The screen can still turn off.</p>
+      <label class="check"><input type="checkbox" id="setAwake"> <span data-i18n="set.awake"></span></label>
+      <p data-i18n="set.awake.help"></p>
     </div>
     <div class="set" id="afterRow">
-      <label class="field">When all downloads finish <select id="setAfter"></select></label>
-      <p>Happens once, then goes back to Do nothing, and is forgotten if godm restarts. Shut down waits 60 seconds first: press Win+R, type shutdown /a and press Enter to cancel.</p>
+      <label class="field"><span data-i18n="set.after"></span> <select id="setAfter"></select></label>
+      <p data-i18n="set.after.help"></p>
     </div>
     <div class="set">
-      <label class="check"><input type="checkbox" id="setSort"> Sort new downloads into folders by type</label>
-      <p>Inside <b id="setBase"></b>. A download that comes with a folder of its own, like one you chose in the browser, goes where you said. Types godm does not recognise stay in the main folder, and downloads already in the list stay where they are. Leave a name empty to keep that type in the main folder.</p>
+      <label class="check"><input type="checkbox" id="setSort"> <span data-i18n="set.sort"></span></label>
+      <p id="setSortHelp"></p>
       <div class="folders" id="setFolders"></div>
     </div>
     <div class="foot">
-      <button class="btn" data-close="setDlg">Cancel</button>
-      <button class="btn primary" id="setGo">Save</button>
+      <button class="btn" data-close="setDlg" data-i18n="common.cancel"></button>
+      <button class="btn primary" id="setGo" data-i18n="common.save"></button>
     </div>
   </div>
 </div>
@@ -282,7 +286,383 @@ const uiHTML = `<!doctype html>
 
 <script>
 var TOKEN = "__TOKEN__";
-var S = { tasks: [], limit: 3, speed: 0, tab: "all", open: {}, prev: {}, target: null, online: true };
+// The Language setting as godm has it: auto, en or zh. The page works out what
+// auto means for this browser; the tray and the notifications do the same for
+// Windows.
+var LANG_SETTING = "__LANG__";
+var LANG = "en";
+var S = { tasks: [], limit: 3, speed: 0, tab: "all", open: {}, prev: {}, target: null, online: true, langAt: 0 };
+
+// ---------- words ----------
+// Everything the page says is looked up here by key. English is what the page
+// is written in and the fallback for a key another language lacks. To add a
+// string: one line in I18N.en, one in I18N.zh, then tr(key) in script or a
+// data-i18n attribute on an element (data-i18n-title and data-i18n-ph do the
+// title and the placeholder). {name} is filled in by the caller. A count that
+// changes the wording has a .one and an .other key and is asked for with
+// trn(key, n). A value is HTML where it is put into markup, so a name that goes
+// into one is passed through esc() first; one used by data-i18n or in a toast
+// is plain text. i18n_test.go checks that the two tables have the same keys and
+// that every key the page uses is there.
+var I18N = {};
+I18N.en = {
+  "top.limit": "Downloads at once",
+  "top.limit.tip": "How many files download at the same time; the rest wait in line",
+  "top.speed": "Speed limit",
+  "top.speed.tip": "The most all downloads together may use. Each download can be limited on its own as well.",
+  "top.pauseAll": "Pause all",
+  "top.resumeAll": "Resume all",
+  "top.add": "+ Add links",
+  "top.settings": "Settings",
+  "common.cancel": "Cancel",
+  "common.save": "Save",
+
+  "stats.running": "<b>{n}</b> downloading · <b>{speed}</b>",
+  "stats.waiting": "{n} waiting",
+  "stats.idle": "Idle",
+  "stats.sleep": "will sleep when finished",
+  "stats.shutdown": "will shut down when finished",
+  "net.offline": "Not connected to the godm service",
+
+  "tab.all": "All",
+  "tab.active": "Unfinished",
+  "tab.done": "Finished",
+  "tab.attn": "Needs attention",
+  "empty.view.title": "Nothing here",
+  "empty.view.text": "No downloads in this view.",
+  "empty.first.title": "No downloads yet",
+  "empty.first.text": "Downloads you start in Chrome appear here automatically.<br>You can also press Ctrl+V anywhere in this window to paste links, or use Add links.",
+
+  "state.queued": "Queued",
+  "state.running": "Downloading",
+  "state.paused": "Paused",
+  "state.done": "Finished",
+  "state.error": "Failed",
+  "state.needs_refresh": "Link expired",
+  "state.awaiting_refresh": "Waiting for new link",
+  "state.metadata": "Fetching metadata",
+  "state.seeding": "Seeding",
+  "ico.file": "file",
+
+  "meta.segments": "<b>{done}</b> / {total} segments · {pct}%",
+  "meta.aboutSize": "<b>{received}</b> of about {size}",
+  "meta.sizeOf": "<b>{received}</b> / {size} · {pct}%",
+  "meta.left": "{time} left",
+  "meta.active": "<b>{active}</b> of {total} connections active",
+  "meta.single": "single connection · server cannot resume",
+  "meta.videoTrack": "video track",
+  "meta.audioTrack": "audio track",
+  "meta.inLine": "#{n} in line",
+  "meta.starting": "starting",
+  "meta.kept": "{size} already downloaded",
+  "meta.finishedIn": "finished in {time} · avg {speed}",
+  "meta.saved": "<b>{received}</b> / {size} · {pct}% saved",
+  "meta.savedNoSize": "<b>{received}</b> saved",
+  "bt.peers.one": "<b>{n}</b> peer",
+  "bt.peers.other": "<b>{n}</b> peers",
+  "bt.seeds.one": "{n} seed",
+  "bt.seeds.other": "{n} seeds",
+  "bt.askingPeers": "Asking peers for the file list…",
+  "bt.uploaded": "{size} uploaded",
+  "bt.uploadedRatio": "{size} uploaded · ratio {ratio}",
+
+  "banner.expired.pct": "<b>The download link has expired.</b> {pct} is saved and will be kept.",
+  "banner.expired.noPct": "<b>The download link has expired.</b> Your progress is saved and will be kept.",
+  "banner.expired.refresh": "Refresh opens {host}. Click the same download link there and godm continues from where it stopped.",
+  "banner.expired.paste": "Paste a new link to the same file with Change address.",
+  "banner.awaiting": "<b>Waiting for the new link…</b> Click the download link again in your browser.",
+  "banner.awaiting.hint": "godm will match it by file size and continue this download instead of starting a new one.",
+  "banner.awaiting.hintTime": "godm will match it by file size and continue this download instead of starting a new one. Stops waiting in {time}.",
+  "banner.failed": "<b>Download failed.</b>",
+  "banner.unknown": "Unknown error",
+
+  "act.play": "Play",
+  "act.playNow": "Play now",
+  "act.pause": "Pause",
+  "act.resume": "Resume",
+  "act.showFolder": "Show in folder",
+  "act.openFolder": "Open folder",
+  "act.conns": "Connections",
+  "act.connsHide": "Hide connections",
+  "act.address": "Change address",
+  "act.remove": "Remove",
+  "act.refresh": "Refresh link",
+  "act.stopWaiting": "Stop waiting",
+  "act.retry": "Retry",
+
+  "task.conns": "Connections",
+  "task.conns.tip": "Connections for this download. Changing it takes effect immediately.",
+  "task.speed": "Speed",
+  "task.speed.tip": "Speed limit for this download, on top of the overall one. Changing it takes effect immediately.",
+  "speed.unlimited": "Unlimited",
+
+  "conn.none": "No connection details yet.",
+  "conn.map.tip": "Each block is one connection and the part of the file it downloads",
+  "conn.th.range": "Range",
+  "conn.th.done": "Done",
+  "conn.th.speed": "Speed",
+  "conn.th.state": "State",
+  "conn.whole": "whole stream",
+  "conn.finished": "{size} already downloaded in finished ranges",
+  "seg.waiting": "waiting",
+  "seg.connecting": "connecting",
+  "seg.active": "active",
+  "seg.retrying": "retrying",
+  "seg.done": "done",
+  "seg.failed": "failed",
+
+  "toast.player": "Opening the player — the download follows where you watch.",
+  "toast.refresh.opened": "Opened {host} — click the same download link there.",
+  "toast.refresh.waiting": "Waiting — click the download link again in your browser.",
+  "toast.conns.one": "Using up to {n} connection for this download.",
+  "toast.conns.other": "Using up to {n} connections for this download.",
+  "toast.speed.task": "This download is limited to {speed}.",
+  "toast.speed.taskNone": "This download has no limit of its own.",
+  "toast.speed.all": "All downloads together are limited to {speed}.",
+  "toast.speed.allNone": "Downloads are no longer speed limited.",
+  "toast.address.bad": "That does not look like an http(s) link.",
+  "toast.address.check": "Checking the new link…",
+  "toast.added.one": "Added {n} download",
+  "toast.added.other": "Added {n} downloads",
+  "toast.torrent.one": "Added {n} torrent",
+  "toast.torrent.other": "Added {n} torrents",
+  "toast.torrent.some": "Added {n}.",
+  "toast.rejected": "({n} rejected)",
+  "toast.saved": "Settings saved.",
+  "toast.after.sleep": "godm will put this PC to sleep when all downloads finish.",
+  "toast.after.shutdown": "godm will shut this PC down when all downloads finish.",
+
+  "add.title": "Add links",
+  "add.help": "One URL or magnet link per line. They join the queue in this order.",
+  "add.count.none": "No links yet",
+  "add.count.one": "{n} link",
+  "add.count.other": "{n} links",
+  "add.torrent": "Open .torrent…",
+  "add.torrent.tip": "Add torrents from .torrent files on this computer",
+  "add.conns": "Connections",
+  "add.go": "Add",
+  "add.goMany": "Add {n} downloads",
+  "rm.title": "Remove download",
+  "rm.delete": "Also delete the file from disk",
+  "rm.go": "Remove",
+  "addr.title": "Change address",
+  "addr.help": "Paste a fresh link to the same file. godm checks the size matches before continuing, so a wrong link cannot corrupt what is already downloaded.",
+  "addr.go": "Continue with this link",
+
+  "set.title": "Settings",
+  "set.lang": "Language",
+  "set.lang.auto": "Auto (follow the system)",
+  "set.lang.help": "Applies to this window, the tray menu and the notifications.",
+  "set.awake": "Keep this PC awake while downloading",
+  "set.awake.help": "Stops Windows going to sleep on its own while a download is running. The screen can still turn off.",
+  "set.after": "When all downloads finish",
+  "set.after.help": "Happens once, then goes back to Do nothing, and is forgotten if godm restarts. Shut down waits 60 seconds first: press Win+R, type shutdown /a and press Enter to cancel.",
+  "after.nothing": "Do nothing",
+  "after.sleep": "Sleep",
+  "after.shutdown": "Shut down",
+  "set.sort": "Sort new downloads into folders by type",
+  "set.sort.help": "Inside {dir}. A download that comes with a folder of its own, like one you chose in the browser, goes where you said. Types godm does not recognise stay in the main folder, and downloads already in the list stay where they are. Leave a name empty to keep that type in the main folder.",
+  "set.folder.ph": "main folder",
+  "kind.video": "Video",
+  "kind.audio": "Music",
+  "kind.archive": "Archives",
+  "kind.doc": "Documents",
+  "kind.app": "Programs",
+  "kind.image": "Images",
+
+  "time.s": "{s}s",
+  "time.ms": "{m}m {s}s",
+  "time.hm": "{h}h {m}m"
+};
+I18N.zh = {
+  "top.limit": "同时下载数",
+  "top.limit.tip": "同时下载的任务数量，其余任务排队等待",
+  "top.speed": "限速",
+  "top.speed.tip": "所有任务合计最多可使用的速度。每个任务也可以单独限速。",
+  "top.pauseAll": "全部暂停",
+  "top.resumeAll": "全部继续",
+  "top.add": "+ 添加链接",
+  "top.settings": "设置",
+  "common.cancel": "取消",
+  "common.save": "保存",
+
+  "stats.running": "<b>{n}</b> 个任务下载中 · <b>{speed}</b>",
+  "stats.waiting": "{n} 个任务等待中",
+  "stats.idle": "空闲",
+  "stats.sleep": "完成后将进入睡眠",
+  "stats.shutdown": "完成后将关机",
+  "net.offline": "未连接到 godm 服务",
+
+  "tab.all": "全部",
+  "tab.active": "未完成",
+  "tab.done": "已完成",
+  "tab.attn": "需要处理",
+  "empty.view.title": "暂无内容",
+  "empty.view.text": "此分类下没有任务。",
+  "empty.first.title": "还没有下载任务",
+  "empty.first.text": "在 Chrome 中开始的下载会自动显示在这里。<br>您也可以在此窗口任意位置按 Ctrl+V 粘贴链接，或使用“添加链接”。",
+
+  "state.queued": "排队中",
+  "state.running": "下载中",
+  "state.paused": "已暂停",
+  "state.done": "已完成",
+  "state.error": "失败",
+  "state.needs_refresh": "链接已过期",
+  "state.awaiting_refresh": "等待新链接",
+  "state.metadata": "正在获取元数据",
+  "state.seeding": "做种中",
+  "ico.file": "文件",
+
+  "meta.segments": "<b>{done}</b> / {total} 分片 · {pct}%",
+  "meta.aboutSize": "<b>{received}</b> / 约 {size}",
+  "meta.sizeOf": "<b>{received}</b> / {size} · {pct}%",
+  "meta.left": "剩余 {time}",
+  "meta.active": "<b>{active}</b> / {total} 个连接活动中",
+  "meta.single": "单连接 · 服务器不支持断点续传",
+  "meta.videoTrack": "视频轨道",
+  "meta.audioTrack": "音频轨道",
+  "meta.inLine": "排队第 {n} 位",
+  "meta.starting": "正在启动",
+  "meta.kept": "已下载 {size}",
+  "meta.finishedIn": "耗时 {time} · 平均 {speed}",
+  "meta.saved": "<b>{received}</b> / {size} · 已保存 {pct}%",
+  "meta.savedNoSize": "已保存 <b>{received}</b>",
+  "bt.peers.one": "<b>{n}</b> 个节点",
+  "bt.peers.other": "<b>{n}</b> 个节点",
+  "bt.seeds.one": "{n} 个做种者",
+  "bt.seeds.other": "{n} 个做种者",
+  "bt.askingPeers": "正在向节点请求文件列表…",
+  "bt.uploaded": "已上传 {size}",
+  "bt.uploadedRatio": "已上传 {size} · 分享率 {ratio}",
+
+  "banner.expired.pct": "<b>下载链接已过期。</b>已保存 {pct}，将予以保留。",
+  "banner.expired.noPct": "<b>下载链接已过期。</b>下载进度已保存，将予以保留。",
+  "banner.expired.refresh": "刷新链接会打开 {host}。请在那里再点一次同一个下载链接，godm 会从中断处继续。",
+  "banner.expired.paste": "使用“更改地址”粘贴同一文件的新链接。",
+  "banner.awaiting": "<b>正在等待新链接…</b>请在浏览器中再次点击下载链接。",
+  "banner.awaiting.hint": "godm 将根据文件大小匹配并继续此任务，而不是开始新任务。",
+  "banner.awaiting.hintTime": "godm 将根据文件大小匹配并继续此任务，而不是开始新任务。将在 {time} 后停止等待。",
+  "banner.failed": "<b>下载失败。</b>",
+  "banner.unknown": "未知错误",
+
+  "act.play": "播放",
+  "act.playNow": "立即播放",
+  "act.pause": "暂停",
+  "act.resume": "继续",
+  "act.showFolder": "在文件夹中显示",
+  "act.openFolder": "打开文件夹",
+  "act.conns": "查看连接",
+  "act.connsHide": "隐藏连接",
+  "act.address": "更改地址",
+  "act.remove": "移除",
+  "act.refresh": "刷新链接",
+  "act.stopWaiting": "停止等待",
+  "act.retry": "重试",
+
+  "task.conns": "连接数",
+  "task.conns.tip": "此任务的连接数。修改后立即生效。",
+  "task.speed": "限速",
+  "task.speed.tip": "此任务的限速，与总限速同时生效。修改后立即生效。",
+  "speed.unlimited": "不限速",
+
+  "conn.none": "暂无连接详情。",
+  "conn.map.tip": "每个分块对应一个连接及其下载的文件部分",
+  "conn.th.range": "范围",
+  "conn.th.done": "已完成",
+  "conn.th.speed": "速度",
+  "conn.th.state": "状态",
+  "conn.whole": "整个数据流",
+  "conn.finished": "已完成的范围共下载 {size}",
+  "seg.waiting": "等待中",
+  "seg.connecting": "连接中",
+  "seg.active": "传输中",
+  "seg.retrying": "重试中",
+  "seg.done": "已完成",
+  "seg.failed": "失败",
+
+  "toast.player": "正在打开播放器——下载将跟随您的观看进度。",
+  "toast.refresh.opened": "已打开 {host}——请在那里点击相同的下载链接。",
+  "toast.refresh.waiting": "等待中——请在浏览器中再次点击下载链接。",
+  "toast.conns.one": "此任务最多使用 {n} 个连接。",
+  "toast.conns.other": "此任务最多使用 {n} 个连接。",
+  "toast.speed.task": "此任务限速为 {speed}。",
+  "toast.speed.taskNone": "此任务没有单独限速。",
+  "toast.speed.all": "所有任务合计限速 {speed}。",
+  "toast.speed.allNone": "已取消限速。",
+  "toast.address.bad": "这不是有效的 http(s) 链接。",
+  "toast.address.check": "正在检查新链接…",
+  "toast.added.one": "已添加 {n} 个任务",
+  "toast.added.other": "已添加 {n} 个任务",
+  "toast.torrent.one": "已添加 {n} 个种子",
+  "toast.torrent.other": "已添加 {n} 个种子",
+  "toast.torrent.some": "已添加 {n} 个。",
+  "toast.rejected": "（{n} 个被拒绝）",
+  "toast.saved": "设置已保存。",
+  "toast.after.sleep": "所有下载完成后，godm 会让这台电脑进入睡眠。",
+  "toast.after.shutdown": "所有下载完成后，godm 会让这台电脑关机。",
+
+  "add.title": "添加链接",
+  "add.help": "每行一个链接或磁力链接，将按此顺序加入下载队列。",
+  "add.count.none": "暂无链接",
+  "add.count.one": "{n} 个链接",
+  "add.count.other": "{n} 个链接",
+  "add.torrent": "打开 .torrent 文件…",
+  "add.torrent.tip": "从本机 .torrent 文件添加种子",
+  "add.conns": "连接数",
+  "add.go": "添加",
+  "add.goMany": "添加 {n} 个任务",
+  "rm.title": "移除任务",
+  "rm.delete": "同时从磁盘删除文件",
+  "rm.go": "移除",
+  "addr.title": "更改地址",
+  "addr.help": "粘贴同一文件的新链接。godm 会在继续前检查大小是否匹配，因此错误的链接不会损坏已下载的内容。",
+  "addr.go": "使用此链接继续",
+
+  "set.title": "设置",
+  "set.lang": "语言 / Language",
+  "set.lang.auto": "自动（跟随系统）",
+  "set.lang.help": "适用于此窗口、托盘菜单和通知。",
+  "set.awake": "下载时保持电脑唤醒",
+  "set.awake.help": "下载进行时，防止 Windows 自行进入睡眠。屏幕仍可以关闭。",
+  "set.after": "所有下载完成后",
+  "set.after.help": "仅执行一次，之后会恢复为“不执行任何操作”，godm 重启后也会恢复。选择“关机”时会先等待 60 秒：按 Win+R，输入 shutdown /a 并按 Enter 可取消。",
+  "after.nothing": "不执行任何操作",
+  "after.sleep": "睡眠",
+  "after.shutdown": "关机",
+  "set.sort": "按类型将新下载分到不同文件夹",
+  "set.sort.help": "文件夹建在 {dir} 中。自带保存位置的下载（例如在浏览器中选好了文件夹的）仍保存到您指定的位置。godm 无法识别的类型留在默认文件夹，列表中已有的任务不会移动。某个类型的名称留空，则该类型仍放在默认文件夹。",
+  "set.folder.ph": "默认文件夹",
+  "kind.video": "视频",
+  "kind.audio": "音乐",
+  "kind.archive": "压缩包",
+  "kind.doc": "文档",
+  "kind.app": "程序",
+  "kind.image": "图片",
+
+  "time.s": "{s}秒",
+  "time.ms": "{m}分{s}秒",
+  "time.hm": "{h}小时{m}分"
+};
+
+// resolveLang turns a setting into the language to show.
+function resolveLang(setting) {
+  if (setting === "en" || setting === "zh") return setting;
+  var l = (navigator.languages && navigator.languages[0]) || navigator.language || "";
+  return /^zh/i.test(l) ? "zh" : "en";
+}
+function tr(key, vars) {
+  var s = (I18N[LANG] || {})[key];
+  if (s === undefined) s = I18N.en[key];
+  if (s === undefined) return key;
+  if (!vars) return s;
+  return s.replace(/\{(\w+)\}/g, function (m, k) { return vars[k] === undefined ? m : vars[k]; });
+}
+// trn picks the wording for a count; the count is {n} in the text.
+function trn(key, n, vars) {
+  vars = vars || {};
+  vars.n = n;
+  return tr(key + (n === 1 ? ".one" : ".other"), vars);
+}
 
 function api(path, opts) {
   opts = opts || {};
@@ -306,9 +686,9 @@ function human(n) {
 function dur(s) {
   if (!isFinite(s) || s < 0) return "";
   s = Math.round(s);
-  if (s < 60) return s + "s";
-  if (s < 3600) return Math.floor(s / 60) + "m " + (s % 60) + "s";
-  return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  if (s < 60) return tr("time.s", { s: s });
+  if (s < 3600) return tr("time.ms", { m: Math.floor(s / 60), s: s % 60 });
+  return tr("time.hm", { h: Math.floor(s / 3600), m: Math.floor((s % 3600) / 60) });
 }
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -334,16 +714,22 @@ function nameOf(t) {
 }
 function hostOf(u) { try { return new URL(u).host; } catch (e) { return ""; } }
 
+// The keys of the words for each state of a download and of a connection.
 var LABEL = {
-  queued: "Queued", running: "Downloading", paused: "Paused", done: "Finished",
-  error: "Failed", needs_refresh: "Link expired", awaiting_refresh: "Waiting for new link"
+  queued: "state.queued", running: "state.running", paused: "state.paused", done: "state.done",
+  error: "state.error", needs_refresh: "state.needs_refresh", awaiting_refresh: "state.awaiting_refresh"
 };
+var SEG_LABEL = {
+  waiting: "seg.waiting", connecting: "seg.connecting", active: "seg.active",
+  retrying: "seg.retrying", done: "seg.done", failed: "seg.failed"
+};
+function word(map, state) { return map[state] ? tr(map[state]) : state; }
 // A torrent says more than its state: it may still be learning what files it
 // has, or be finished and uploading.
 function stateLabel(t) {
-  if (t.kind === "bt" && t.state === "running" && t.stage === "metadata") return "Fetching metadata";
-  if (t.kind === "bt" && t.state === "done" && t.stage === "seeding") return "Seeding";
-  return LABEL[t.state] || t.state;
+  if (t.kind === "bt" && t.state === "running" && t.stage === "metadata") return tr("state.metadata");
+  if (t.kind === "bt" && t.state === "done" && t.stage === "seeding") return tr("state.seeding");
+  return word(LABEL, t.state);
 }
 function attention(t) { return t.state === "needs_refresh" || t.state === "awaiting_refresh" || t.state === "error"; }
 function inTab(t, tab) {
@@ -374,7 +760,7 @@ function segSpeeds(t) {
 function segMap(t) {
   var segs = t.segments || [];
   if (t.size <= 0 || segs.length < 2) return "";
-  var html = '<div class="segmap" title="Each block is one connection and the part of the file it downloads">';
+  var html = '<div class="segmap" title="' + esc(tr("conn.map.tip")) + '">';
   segs.forEach(function (s) {
     var len = s.end - s.start + 1;
     var left = s.start / t.size * 100, width = len / t.size * 100;
@@ -387,7 +773,7 @@ function segMap(t) {
 
 function connTable(t) {
   var segs = t.segments || [];
-  if (!segs.length) return '<div class="conns"><span class="url">No connection details yet.</span></div>';
+  if (!segs.length) return '<div class="conns"><span class="url">' + tr("conn.none") + "</span></div>";
   var sp = segSpeeds(t), rows = "", finished = 0, finishedBytes = 0, row = 0;
   segs.forEach(function (s, i) {
     // Ranges get split as connections free up, so finished ones are folded into
@@ -395,19 +781,20 @@ function connTable(t) {
     if (s.state === "done") { finished++; finishedBytes += s.done; return; }
     var len = s.end >= 0 ? s.end - s.start + 1 : 0;
     var pct = len > 0 ? Math.min(100, s.done / len * 100) : 0;
-    var range = s.end >= 0 ? human(s.start) + " – " + human(s.end + 1) : "whole stream";
+    var range = s.end >= 0 ? human(s.start) + " – " + human(s.end + 1) : tr("conn.whole");
     rows += "<tr><td>" + (++row) + "</td>" +
       "<td>" + range + "</td>" +
       '<td><div class="mini"><i style="width:' + pct.toFixed(1) + '%"></i></div></td>' +
       "<td>" + (len > 0 ? pct.toFixed(0) + "%" : human(s.done)) + "</td>" +
       "<td>" + (sp[i] ? human(sp[i]) + "/s" : "") + "</td>" +
-      '<td class="st ' + s.state + '">' + s.state + "</td>" +
+      '<td class="st ' + s.state + '">' + esc(word(SEG_LABEL, s.state)) + "</td>" +
       '<td class="note">' + esc(s.note || "") + "</td></tr>";
   });
   var summary = finished
-    ? '<div class="url" style="margin-bottom:4px">' + human(finishedBytes) + " already downloaded in finished ranges</div>"
+    ? '<div class="url" style="margin-bottom:4px">' + tr("conn.finished", { size: human(finishedBytes) }) + "</div>"
     : "";
-  return '<div class="conns">' + summary + '<table><thead><tr><th>#</th><th>Range</th><th></th><th>Done</th><th>Speed</th><th>State</th><th></th></tr></thead><tbody>' +
+  return '<div class="conns">' + summary + "<table><thead><tr><th>#</th><th>" + tr("conn.th.range") + "</th><th></th><th>" +
+    tr("conn.th.done") + "</th><th>" + tr("conn.th.speed") + "</th><th>" + tr("conn.th.state") + "</th><th></th></tr></thead><tbody>" +
     rows + "</tbody></table></div>";
 }
 
@@ -416,7 +803,7 @@ function connSelect(t) {
   var opts = CONN_CHOICES.slice();
   if (opts.indexOf(t.conns) < 0 && t.conns > 0) opts.push(t.conns);
   opts.sort(function (a, b) { return a - b; });
-  return '<label class="field connsel" title="Connections for this download. Changing it takes effect immediately.">Connections ' +
+  return '<label class="field connsel" title="' + esc(tr("task.conns.tip")) + '">' + esc(tr("task.conns")) + " " +
     '<select data-conns="' + t.id + '">' + opts.map(function (n) {
       return '<option value="' + n + '"' + (n === t.conns ? " selected" : "") + ">" + n + "</option>";
     }).join("") + "</select></label>";
@@ -424,7 +811,7 @@ function connSelect(t) {
 
 // Speed limits are in bytes per second; 0 means none.
 var SPEED_CHOICES = [0, 512 << 10, 1 << 20, 2 << 20, 5 << 20, 10 << 20, 20 << 20, 50 << 20];
-function speedLabel(n) { return n > 0 ? human(n).replace(".0 ", " ") + "/s" : "Unlimited"; }
+function speedLabel(n) { return n > 0 ? human(n).replace(".0 ", " ") + "/s" : tr("speed.unlimited"); }
 function speedOptions(cur) {
   var opts = SPEED_CHOICES.slice();
   if (opts.indexOf(cur) < 0 && cur > 0) opts.push(cur);
@@ -434,7 +821,7 @@ function speedOptions(cur) {
   }).join("");
 }
 function speedSelect(t) {
-  return '<label class="field speedsel" title="Speed limit for this download, on top of the overall one. Changing it takes effect immediately.">Speed ' +
+  return '<label class="field speedsel" title="' + esc(tr("task.speed.tip")) + '">' + esc(tr("task.speed")) + " " +
     '<select data-speed="' + t.id + '">' + speedOptions(t.speed_limit || 0) + "</select></label>";
 }
 
@@ -468,21 +855,29 @@ function progressOf(t) {
 // what it has uploaded, since that is what the seeding policy goes by.
 function torrentMeta(t) {
   var bits = [], hasSize = t.size > 0, pct = progressOf(t);
-  var peers = "<b>" + (t.active || 0) + "</b> peer" + (t.active === 1 ? "" : "s") + (t.conns ? " · " + t.conns + " seed" + (t.conns === 1 ? "" : "s") : "");
+  var peers = trn("bt.peers", t.active || 0) + (t.conns ? " · " + trn("bt.seeds", t.conns) : "");
   if (t.state === "running" && t.stage === "metadata") {
-    bits.push("Asking peers for the file list…", peers);
+    bits.push(tr("bt.askingPeers"), peers);
   } else if (t.state === "running") {
-    bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
+    bits.push(hasSize
+      ? tr("meta.sizeOf", { received: human(t.received), size: human(t.size), pct: pct.toFixed(1) })
+      : "<b>" + human(t.received) + "</b>");
     bits.push("<b>" + human(t.speed) + "/s</b>");
-    if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
+    if (hasSize && t.speed > 0) bits.push(tr("meta.left", { time: dur((t.size - t.received) / t.speed) }));
     bits.push(peers);
   } else if (t.state === "done") {
     bits.push("<b>" + human(t.size) + "</b>");
     if (t.stage === "seeding") bits.push(peers);
   } else if (t.received > 0) {
-    bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "% saved" : " saved"));
+    bits.push(hasSize
+      ? tr("meta.saved", { received: human(t.received), size: human(t.size), pct: pct.toFixed(1) })
+      : tr("meta.savedNoSize", { received: human(t.received) }));
   }
-  if (t.uploaded > 0) bits.push(human(t.uploaded) + " uploaded" + (hasSize ? " · ratio " + (t.uploaded / t.size).toFixed(2) : ""));
+  if (t.uploaded > 0) {
+    bits.push(hasSize
+      ? tr("bt.uploadedRatio", { size: human(t.uploaded), ratio: (t.uploaded / t.size).toFixed(2) })
+      : tr("bt.uploaded", { size: human(t.uploaded) }));
+  }
   return bits.map(function (b) { return "<span>" + b + "</span>"; }).join("");
 }
 
@@ -494,63 +889,66 @@ function metaLine(t) {
   switch (t.state) {
     case "running":
       if (t.kind === "hls") {
-        bits.push("<b>" + t.segments_done + "</b> / " + t.segments_total + " segments · " + pct.toFixed(1) + "%");
-        bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " of about " + human(t.size) : ""));
+        bits.push(tr("meta.segments", { done: t.segments_done, total: t.segments_total, pct: pct.toFixed(1) }));
+        bits.push(hasSize ? tr("meta.aboutSize", { received: human(t.received), size: human(t.size) }) : "<b>" + human(t.received) + "</b>");
       } else {
-        bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "%" : ""));
+        bits.push(hasSize
+          ? tr("meta.sizeOf", { received: human(t.received), size: human(t.size), pct: pct.toFixed(1) })
+          : "<b>" + human(t.received) + "</b>");
       }
       bits.push("<b>" + human(t.speed) + "/s</b>");
-      if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
+      if (hasSize && t.speed > 0) bits.push(tr("meta.left", { time: dur((t.size - t.received) / t.speed) }));
       // The resume note is only about plain files: yt-dlp fetches on its own
       // terms, and a stream always resumes by segment.
-      if (t.resumable) bits.push("<b>" + t.active + "</b> of " + t.conns + " connections active");
-      else if (!t.kind && t.size !== -1) bits.push("single connection · server cannot resume");
+      if (t.resumable) bits.push(tr("meta.active", { active: t.active, total: t.conns }));
+      else if (!t.kind && t.size !== -1) bits.push(tr("meta.single"));
       if (t.quality) bits.push(esc(t.quality));
       // A merged video arrives as two streams, so say which one is running or
       // the bar looks like it started over for no reason.
-      if (t.stage === "video") bits.push("video track");
-      else if (t.stage === "audio") bits.push("audio track");
+      if (t.stage === "video") bits.push(tr("meta.videoTrack"));
+      else if (t.stage === "audio") bits.push(tr("meta.audioTrack"));
       break;
     case "queued":
       var pos = queuePosition(t);
-      bits.push(pos ? "#" + pos + " in line" : "starting");
-      if (t.received > 0) bits.push(human(t.received) + " already downloaded");
+      bits.push(pos ? tr("meta.inLine", { n: pos }) : tr("meta.starting"));
+      if (t.received > 0) bits.push(tr("meta.kept", { size: human(t.received) }));
       break;
     case "done":
       bits.push("<b>" + human(t.size) + "</b>");
       if (t.started_at && t.ended_at) {
         var secs = (new Date(t.ended_at) - new Date(t.started_at)) / 1000;
-        if (secs > 0) bits.push("finished in " + dur(secs) + " · avg " + human(t.size / secs) + "/s");
+        if (secs > 0) bits.push(tr("meta.finishedIn", { time: dur(secs), speed: human(t.size / secs) + "/s" }));
       }
       break;
     default:
-      if (t.received > 0) bits.push("<b>" + human(t.received) + "</b>" + (hasSize ? " / " + human(t.size) + " · " + pct.toFixed(1) + "% saved" : " saved"));
+      if (t.received > 0) {
+        bits.push(hasSize
+          ? tr("meta.saved", { received: human(t.received), size: human(t.size), pct: pct.toFixed(1) })
+          : tr("meta.savedNoSize", { received: human(t.received) }));
+      }
   }
   return bits.map(function (b) { return "<span>" + b + "</span>"; }).join("");
 }
 
 function banner(t) {
-  var pct = t.size > 0 ? Math.round(t.received / t.size * 100) + "%" : "your progress";
   if (t.state === "needs_refresh") {
     var from = t.referrer ? hostOf(t.referrer) : "";
-    return '<div class="banner warn"><div class="msg"><b>The download link has expired.</b> ' + esc(pct) + " is saved and will be kept." +
-      '<span class="hint">' + (from
-        ? "Refresh opens " + esc(from) + ". Click the same download link there and godm continues from where it stopped."
-        : "Paste a new link to the same file with Change address.") +
+    var saved = t.size > 0 ? tr("banner.expired.pct", { pct: Math.round(t.received / t.size * 100) + "%" }) : tr("banner.expired.noPct");
+    return '<div class="banner warn"><div class="msg">' + saved +
+      '<span class="hint">' + (from ? tr("banner.expired.refresh", { host: esc(from) }) : tr("banner.expired.paste")) +
       (t.error ? " (" + esc(t.error.replace(/^download link expired:\s*/i, "")) + ")" : "") + "</span></div>" +
-      (t.referrer ? '<button class="btn warn small" data-act="refresh" data-id="' + t.id + '">Refresh link</button>' : "") +
-      '<button class="btn small" data-act="address" data-id="' + t.id + '">Change address</button></div>';
+      (t.referrer ? '<button class="btn warn small" data-act="refresh" data-id="' + t.id + '">' + tr("act.refresh") + "</button>" : "") +
+      '<button class="btn small" data-act="address" data-id="' + t.id + '">' + tr("act.address") + "</button></div>";
   }
   if (t.state === "awaiting_refresh") {
     var left = t.refresh_until ? (new Date(t.refresh_until) - Date.now()) / 1000 : 0;
-    return '<div class="banner warn"><div class="msg"><b>Waiting for the new link…</b> Click the download link again in your browser.' +
-      '<span class="hint">godm will match it by file size and continue this download instead of starting a new one.' +
-      (left > 0 ? " Stops waiting in " + dur(left) + "." : "") + "</span></div>" +
-      '<button class="btn small" data-act="pause" data-id="' + t.id + '">Stop waiting</button></div>';
+    return '<div class="banner warn"><div class="msg">' + tr("banner.awaiting") +
+      '<span class="hint">' + (left > 0 ? tr("banner.awaiting.hintTime", { time: dur(left) }) : tr("banner.awaiting.hint")) + "</span></div>" +
+      '<button class="btn small" data-act="pause" data-id="' + t.id + '">' + tr("act.stopWaiting") + "</button></div>";
   }
   if (t.state === "error") {
-    return '<div class="banner err"><div class="msg"><b>Download failed.</b> <span class="hint">' + esc(t.error || "Unknown error") + "</span></div>" +
-      '<button class="btn small" data-act="resume" data-id="' + t.id + '">Retry</button></div>';
+    return '<div class="banner err"><div class="msg">' + tr("banner.failed") + ' <span class="hint">' + esc(t.error || tr("banner.unknown")) + "</span></div>" +
+      '<button class="btn small" data-act="resume" data-id="' + t.id + '">' + tr("act.retry") + "</button></div>";
   }
   return "";
 }
@@ -571,23 +969,23 @@ function playable(t, ext) {
 
 function card(t) {
   var name = nameOf(t), ext = extOf(name), open = !!S.open[t.id];
-  var bt = t.kind === "bt", icon = bt ? extOf(t.media) || "bt" : ext || "file";
+  var bt = t.kind === "bt", icon = bt ? extOf(t.media) || "bt" : ext || tr("ico.file");
   var hasSize = t.size > 0;
   var pct = t.state === "done" ? 100 : progressOf(t);
   var acts = [];
-  if (playable(t, ext)) acts.push(["play", t.state === "done" ? "Play" : "Play now"]);
-  if (t.state === "running" || t.state === "queued") acts.push(["pause", "Pause"]);
-  if (t.state === "paused") acts.push(["resume", "Resume"]);
-  if (t.path) acts.push(["open", t.state === "done" ? "Show in folder" : "Open folder"]);
-  if (t.state !== "done" && (t.segments || []).length) acts.push(["conns", open ? "Hide connections" : "Connections"]);
-  if ((t.state === "paused" || t.state === "error") && !bt) acts.push(["address", "Change address"]);
-  acts.push(["remove", "Remove"]);
+  if (playable(t, ext)) acts.push(["play", tr(t.state === "done" ? "act.play" : "act.playNow")]);
+  if (t.state === "running" || t.state === "queued") acts.push(["pause", tr("act.pause")]);
+  if (t.state === "paused") acts.push(["resume", tr("act.resume")]);
+  if (t.path) acts.push(["open", tr(t.state === "done" ? "act.showFolder" : "act.openFolder")]);
+  if (t.state !== "done" && (t.segments || []).length) acts.push(["conns", tr(open ? "act.connsHide" : "act.conns")]);
+  if ((t.state === "paused" || t.state === "error") && !bt) acts.push(["address", tr("act.address")]);
+  acts.push(["remove", tr("act.remove")]);
 
   return '<div class="task" data-task="' + t.id + '">' +
     '<div class="ico ' + kindOf(icon) + '">' + esc(icon) + "</div>" +
     '<div class="body">' +
       '<div class="row"><span class="name" title="' + esc(name) + '">' + esc(name) + "</span>" +
-      '<span class="pill ' + t.state + '">' + stateLabel(t) + "</span></div>" +
+      '<span class="pill ' + t.state + '">' + esc(stateLabel(t)) + "</span></div>" +
       (t.state === "done" ? "" : '<div class="bar"><div class="fill ' + t.state + '" style="width:' + pct.toFixed(1) + '%"></div></div>') +
       (t.state === "done" ? "" : segMap(t)) +
       '<div class="meta">' + metaLine(t) + "</div>" +
@@ -609,11 +1007,11 @@ function render() {
     if (t.state === "queued") queued++;
   });
   var line = running
-    ? "<b>" + running + "</b> downloading · <b>" + human(speed) + "/s</b>" + (queued ? " · " + queued + " waiting" : "")
-    : tasks.length ? (queued ? queued + " waiting" : "Idle") : "";
+    ? tr("stats.running", { n: running, speed: human(speed) + "/s" }) + (queued ? " · " + tr("stats.waiting", { n: queued }) : "")
+    : tasks.length ? (queued ? tr("stats.waiting", { n: queued }) : tr("stats.idle")) : "";
   // A one-shot action armed and forgotten is the one that would surprise.
-  var armed = { sleep: "will sleep when finished", shutdown: "will shut down when finished" }[S.afterAll];
-  document.getElementById("stats").innerHTML = line + (armed ? (line ? " · " : "") + "<b>" + armed + "</b>" : "");
+  var armed = { sleep: "stats.sleep", shutdown: "stats.shutdown" }[S.afterAll];
+  document.getElementById("stats").innerHTML = line + (armed ? (line ? " · " : "") + "<b>" + tr(armed) + "</b>" : "");
 
   var c = { all: tasks.length, active: 0, done: 0, attn: 0 };
   tasks.forEach(function (t) {
@@ -621,10 +1019,10 @@ function render() {
     if (inTab(t, "done")) c.done++;
     if (inTab(t, "attn")) c.attn++;
   });
-  var tabs = [["all", "All"], ["active", "Unfinished"], ["done", "Finished"], ["attn", "Needs attention"]];
+  var tabs = [["all", "tab.all"], ["active", "tab.active"], ["done", "tab.done"], ["attn", "tab.attn"]];
   document.getElementById("tabs").innerHTML = tabs.map(function (x) {
     return '<button class="tab' + (S.tab === x[0] ? " on" : "") + (x[0] === "attn" && c.attn ? " attn" : "") +
-      '" data-tab="' + x[0] + '">' + x[1] + '<span class="n">' + c[x[0]] + "</span></button>";
+      '" data-tab="' + x[0] + '">' + esc(tr(x[1])) + '<span class="n">' + c[x[0]] + "</span></button>";
   }).join("");
 
   var shown = tasks.filter(function (t) { return inTab(t, S.tab); });
@@ -634,18 +1032,21 @@ function render() {
   if (a && a.tagName === "SELECT" && list.contains(a)) return;
   if (!shown.length) {
     list.innerHTML = tasks.length
-      ? '<div class="empty"><b>Nothing here</b>No downloads in this view.</div>'
-      : '<div class="empty"><b>No downloads yet</b>Downloads you start in Chrome appear here automatically.<br>' +
-        "You can also press Ctrl+V anywhere in this window to paste links, or use Add links.</div>";
+      ? '<div class="empty"><b>' + tr("empty.view.title") + "</b>" + tr("empty.view.text") + "</div>"
+      : '<div class="empty"><b>' + tr("empty.first.title") + "</b>" + tr("empty.first.text") + "</div>";
   } else {
     list.innerHTML = shown.map(card).join("");
   }
 }
 
 function poll() {
+  var asked = performance.now();
   return api("/api/tasks").then(function (d) {
     S.online = true;
     document.getElementById("dot").classList.remove("off");
+    // Changed in another window since this page was loaded. An answer to a
+    // question asked before this window's own change would undo it.
+    if (d.language && d.language !== LANG_SETTING && asked > S.langAt) setLang(d.language);
     S.tasks = d.tasks || [];
     S.afterAll = d.after_all;
     if (d.limit && d.limit !== S.limit) { S.limit = d.limit; document.getElementById("limit").value = d.limit; }
@@ -658,7 +1059,7 @@ function poll() {
   }).catch(function () {
     S.online = false;
     document.getElementById("dot").classList.add("off");
-    document.getElementById("stats").textContent = "Not connected to the godm service";
+    document.getElementById("stats").textContent = tr("net.offline");
   });
 }
 
@@ -694,7 +1095,7 @@ document.getElementById("list").addEventListener("click", function (e) {
   if (act === "play") {
     post("/api/play?id=" + q(id)).then(function (r) {
       if (!r.ok) return toast(r.error, "err");
-      if (t && t.state !== "done") toast("Opening the player — the download follows where you watch.");
+      if (t && t.state !== "done") toast(tr("toast.player"));
       poll();
     }).catch(fail);
   }
@@ -705,7 +1106,7 @@ document.getElementById("list").addEventListener("click", function (e) {
   else if (act === "refresh") {
     post("/api/refresh?id=" + q(id)).then(function (r) {
       if (!r.ok) return toast(r.error, "err");
-      toast(r.referrer ? "Opened " + hostOf(r.referrer) + " — click the same download link there." : "Waiting — click the download link again in your browser.");
+      toast(r.referrer ? tr("toast.refresh.opened", { host: hostOf(r.referrer) }) : tr("toast.refresh.waiting"));
       poll();
     }).catch(fail);
   } else if (act === "address") {
@@ -730,7 +1131,7 @@ document.getElementById("list").addEventListener("change", function (e) {
   sel.blur();
   post("/api/connections?id=" + q(id) + "&n=" + n).then(function (r) {
     if (!r.ok) return toast(r.error, "err");
-    toast("Using up to " + r.connections + " connection" + (r.connections === 1 ? "" : "s") + " for this download.");
+    toast(trn("toast.conns", r.connections));
     poll();
   }).catch(fail);
 });
@@ -742,7 +1143,7 @@ document.getElementById("list").addEventListener("change", function (e) {
   sel.blur();
   post("/api/speed?id=" + q(id) + "&n=" + n).then(function (r) {
     if (!r.ok) return toast(r.error, "err");
-    toast(r.speed_limit > 0 ? "This download is limited to " + speedLabel(r.speed_limit) + "." : "This download has no limit of its own.");
+    toast(r.speed_limit > 0 ? tr("toast.speed.task", { speed: speedLabel(r.speed_limit) }) : tr("toast.speed.taskNone"));
     poll();
   }).catch(fail);
 });
@@ -760,11 +1161,11 @@ document.getElementById("rmGo").addEventListener("click", function () {
 
 document.getElementById("addrGo").addEventListener("click", function () {
   var url = document.getElementById("addrUrl").value.trim();
-  if (!/^https?:\/\//i.test(url)) return toast("That does not look like an http(s) link.", "err");
+  if (!/^https?:\/\//i.test(url)) return toast(tr("toast.address.bad"), "err");
   hide("addrDlg");
   post("/api/address?id=" + q(S.target), { url: url }).then(function (r) {
     if (!r.ok) return toast(r.error, "err");
-    toast("Checking the new link…");
+    toast(tr("toast.address.check"));
     poll();
   }).catch(fail);
 });
@@ -785,7 +1186,7 @@ document.getElementById("addrGo").addEventListener("click", function () {
     post("/api/speed?n=" + sel.value).then(function (r) {
       S.speed = r.speed_limit;
       sel.blur();
-      toast(r.speed_limit > 0 ? "All downloads together are limited to " + speedLabel(r.speed_limit) + "." : "Downloads are no longer speed limited.");
+      toast(r.speed_limit > 0 ? tr("toast.speed.all", { speed: speedLabel(r.speed_limit) }) : tr("toast.speed.allNone"));
       poll();
     }).catch(fail);
   });
@@ -804,10 +1205,10 @@ function parseLinks(text) {
 }
 function updateAddCount() {
   var n = parseLinks(document.getElementById("addText").value).length;
-  document.getElementById("addCount").textContent = n ? n + " link" + (n === 1 ? "" : "s") : "No links yet";
+  document.getElementById("addCount").textContent = n ? trn("add.count", n) : tr("add.count.none");
   var go = document.getElementById("addGo");
   go.disabled = !n;
-  go.textContent = n > 1 ? "Add " + n + " downloads" : "Add";
+  go.textContent = n > 1 ? tr("add.goMany", { n: n }) : tr("add.go");
 }
 function openAdd(prefill) {
   var ta = document.getElementById("addText");
@@ -828,7 +1229,7 @@ document.getElementById("addGo").addEventListener("click", function () {
   hide("addDlg");
   post("/api/batch", { items: links.map(function (u) { return { url: u, connections: conns }; }) }).then(function (r) {
     var n = (r.ids || []).length;
-    toast("Added " + n + " download" + (n === 1 ? "" : "s") + ((r.errors || []).length ? " (" + r.errors.length + " rejected)" : ""));
+    toast(trn("toast.added", n) + ((r.errors || []).length ? " " + tr("toast.rejected", { n: r.errors.length }) : ""));
     document.getElementById("addText").value = "";
     S.tab = "all";
     poll();
@@ -839,28 +1240,63 @@ document.getElementById("addGo").addEventListener("click", function () {
 // Only what the user changed is sent. A setting that changed on its own while
 // the dialog was open (a one-shot action that has already fired) must not be
 // put back by pressing Save.
-var AFTER_LABEL = { nothing: "Do nothing", sleep: "Sleep", shutdown: "Shut down" };
-var AFTER_DOES = { sleep: "put this PC to sleep", shutdown: "shut this PC down" };
-// The kinds match what the daemon sorts by; the names are only what to call them.
-var FOLDER_KINDS = [["video", "Video"], ["audio", "Music"], ["archive", "Archives"], ["doc", "Documents"], ["app", "Programs"], ["image", "Images"]];
+var AFTER_LABEL = { nothing: "after.nothing", sleep: "after.sleep", shutdown: "after.shutdown" };
+var AFTER_DOES = { sleep: "toast.after.sleep", shutdown: "toast.after.shutdown" };// The kinds match what the daemon sorts by; the names are only what to call them.
+var FOLDER_KINDS = [["video", "kind.video"], ["audio", "kind.audio"], ["archive", "kind.archive"], ["doc", "kind.doc"], ["app", "kind.app"], ["image", "kind.image"]];
+// A language is named in its own language wherever it is listed, so that it can
+// be found when the rest of the page is in one that cannot be read.
+var LANG_CHOICES = [["auto", ""], ["en", "English"], ["zh", "简体中文"]];
 function folderInputs() { return document.querySelectorAll("#setFolders input"); }
 function dimFolders() { document.getElementById("setFolders").classList.toggle("off", !document.getElementById("setSort").checked); }
 document.getElementById("setFolders").innerHTML = FOLDER_KINDS.map(function (k) {
-  return '<label><span>' + k[1] + '</span><input type="text" data-folder="' + k[0] + '" maxlength="100" placeholder="main folder" spellcheck="false"></label>';
+  return '<label><span data-i18n="' + k[1] + '"></span><input type="text" data-folder="' + k[0] + '" maxlength="100" data-i18n-ph="set.folder.ph" spellcheck="false"></label>';
 }).join("");
 document.getElementById("setSort").addEventListener("change", dimFolders);
+
+// fillSettingsText writes the words in the dialog that script rather than a
+// data-i18n attribute provides. It runs when the dialog opens and again when
+// the language changes, so one left open follows.
+function fillSettingsText() {
+  var d = S.settings || {};
+  document.getElementById("setSortHelp").innerHTML = tr("set.sort.help", { dir: "<b>" + esc(d.out_dir || "") + "</b>" });
+  var lang = document.getElementById("setLang"), chosen = lang.value || LANG_SETTING;
+  lang.innerHTML = LANG_CHOICES.map(function (c) {
+    return '<option value="' + c[0] + '">' + esc(c[1] || tr("set.lang.auto")) + "</option>";
+  }).join("");
+  lang.value = chosen;
+  var after = document.getElementById("setAfter"), picked = after.value || d.after_all;
+  after.innerHTML = (d.after_all_options || []).map(function (o) {
+    return '<option value="' + o + '">' + esc(AFTER_LABEL[o] ? tr(AFTER_LABEL[o]) : o) + "</option>";
+  }).join("");
+  after.value = picked;
+}
+
+// setLang shows the page in a language, now. It is also how the page follows a
+// change made in another window.
+function setLang(setting) {
+  LANG_SETTING = setting;
+  LANG = resolveLang(setting);
+  S.langAt = performance.now();
+  document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+  document.querySelectorAll("[data-i18n]").forEach(function (el) { el.textContent = tr(el.getAttribute("data-i18n")); });
+  document.querySelectorAll("[data-i18n-title]").forEach(function (el) { el.title = tr(el.getAttribute("data-i18n-title")); });
+  document.querySelectorAll("[data-i18n-ph]").forEach(function (el) { el.placeholder = tr(el.getAttribute("data-i18n-ph")); });
+  document.getElementById("speed").innerHTML = speedOptions(S.speed);
+  updateAddCount();
+  fillSettingsText();
+  render();
+}
 
 function openSettings() {
   api("/api/settings").then(function (d) {
     S.settings = d;
     document.getElementById("setAwake").checked = !!d.keep_awake;
     document.getElementById("awakeRow").hidden = !d.can_keep_awake;
-    var opts = d.after_all_options || [], sel = document.getElementById("setAfter");
-    sel.innerHTML = opts.map(function (o) { return '<option value="' + o + '">' + (AFTER_LABEL[o] || o) + "</option>"; }).join("");
-    sel.value = d.after_all;
-    document.getElementById("afterRow").hidden = opts.length < 2;
+    fillSettingsText();
+    document.getElementById("setLang").value = d.language || "auto";
+    document.getElementById("setAfter").value = d.after_all;
+    document.getElementById("afterRow").hidden = (d.after_all_options || []).length < 2;
     document.getElementById("setSort").checked = !!d.sort_by_type;
-    document.getElementById("setBase").textContent = d.out_dir || "";
     folderInputs().forEach(function (i) { i.value = (d.folders || {})[i.getAttribute("data-folder")] || ""; });
     dimFolders();
     show("setDlg");
@@ -869,6 +1305,8 @@ function openSettings() {
 document.getElementById("setBtn").addEventListener("click", openSettings);
 document.getElementById("setGo").addEventListener("click", function () {
   var was = S.settings, upd = {};
+  var lang = document.getElementById("setLang").value;
+  if (lang && lang !== (was.language || "auto")) upd.language = lang;
   var awake = document.getElementById("setAwake").checked;
   if (awake !== !!was.keep_awake) upd.keep_awake = awake;
   var after = document.getElementById("setAfter").value;
@@ -885,9 +1323,9 @@ document.getElementById("setGo").addEventListener("click", function () {
   // The dialog stays open if the daemon refuses, so a typo does not cost the rest.
   post("/api/settings", upd).then(function (r) {
     hide("setDlg");
-    toast(upd.after_all && AFTER_DOES[r.after_all]
-      ? "godm will " + AFTER_DOES[r.after_all] + " when all downloads finish."
-      : "Settings saved.");
+    // Before the toast, so that it is already in the new language.
+    if (r.language && r.language !== LANG_SETTING) setLang(r.language);
+    toast(upd.after_all && AFTER_DOES[r.after_all] ? tr(AFTER_DOES[r.after_all]) : tr("toast.saved"));
     poll();
   }).catch(fail);
 });
@@ -915,8 +1353,8 @@ document.getElementById("torrentFile").addEventListener("change", function (e) {
       }).catch(function (err) { failed.push(f.name + ": " + err.message); });
     });
   }, Promise.resolve()).then(function () {
-    if (failed.length) toast((added ? "Added " + added + ". " : "") + failed.join("; "), "err");
-    else toast("Added " + added + " torrent" + (added === 1 ? "" : "s"));
+    if (failed.length) toast((added ? tr("toast.torrent.some", { n: added }) + " " : "") + failed.join("; "), "err");
+    else toast(trn("toast.torrent", added));
     S.tab = "all";
     poll();
   });
@@ -930,6 +1368,7 @@ document.addEventListener("paste", function (e) {
   if (parseLinks(text).length) { e.preventDefault(); openAdd(text); }
 });
 
+setLang(LANG_SETTING);
 poll();
 setInterval(poll, 700);
 </script>

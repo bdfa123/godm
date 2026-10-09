@@ -17,10 +17,13 @@ type Settings struct {
 	// Folders names the subfolder for each kind in folderKinds. An empty name
 	// keeps that kind in the default folder itself.
 	Folders map[string]string `json:"folders"`
+	// Language is what the manager page, the tray menu and the notifications are
+	// written in: langAuto follows the operating system, else langEN or langZH.
+	Language string `json:"language"`
 }
 
 func defaultSettings() Settings {
-	return Settings{KeepAwake: true, Folders: defaultFolders()}
+	return Settings{KeepAwake: true, Folders: defaultFolders(), Language: langAuto}
 }
 
 // clone copies the folder map, so that a snapshot taken under the lock can be
@@ -44,6 +47,8 @@ type settingsUpdate struct {
 	SortByType *bool   `json:"sort_by_type"`
 	// Folders holds only the kinds being renamed.
 	Folders map[string]string `json:"folders"`
+	// Language is auto, en or zh.
+	Language *string `json:"language"`
 }
 
 func (m *Manager) KeepAwake() bool {
@@ -72,6 +77,9 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 		}
 		folders[key] = clean
 	}
+	if u.Language != nil && !validLang(*u.Language) {
+		return fmt.Errorf("unknown language %q: use %s, %s or %s", *u.Language, langAuto, langEN, langZH)
+	}
 
 	m.mu.Lock()
 	if u.AfterAll != nil {
@@ -88,6 +96,9 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	}
 	for key, name := range folders {
 		m.settings.Folders[key] = name
+	}
+	if u.Language != nil {
+		m.settings.Language = *u.Language
 	}
 	if u.AfterAll != nil {
 		// Choosing the same thing again changes nothing. Choosing something else
@@ -116,6 +127,9 @@ func (m *Manager) settingsView() map[string]any {
 		"sort_by_type":      s.SortByType,
 		"folders":           s.Folders,
 		"out_dir":           m.outDir,
+		// What was chosen, and what that comes to on this computer right now.
+		"language":        cleanLang(s.Language),
+		"language_active": resolveLang(s.Language),
 	}
 }
 

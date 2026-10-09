@@ -249,19 +249,19 @@ func sleepNow() error {
 
 // shutdownArgs is the command line for a shutdown that waits first. The
 // comment is what Windows shows while it counts down.
-func shutdownArgs(delay time.Duration) []string {
-	return []string{"/s", "/t", strconv.Itoa(int(delay / time.Second)), "/c", "godm: all downloads finished"}
+func shutdownArgs(delay time.Duration, reason string) []string {
+	return []string{"/s", "/t", strconv.Itoa(int(delay / time.Second)), "/c", reason}
 }
 
 // shutdownIn lets shutdown.exe do the counting, so that the countdown is
 // Windows' own and "shutdown /a" from any prompt cancels it, even if godm is
 // gone by then.
-func shutdownIn(delay time.Duration) error {
+func shutdownIn(delay time.Duration, reason string) error {
 	exe := "shutdown.exe"
 	if root := os.Getenv("SystemRoot"); root != "" {
 		exe = filepath.Join(root, "System32", "shutdown.exe")
 	}
-	cmd := exec.Command(exe, shutdownArgs(delay)...)
+	cmd := exec.Command(exe, shutdownArgs(delay, reason)...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("shutdown.exe: %v", err)

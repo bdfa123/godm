@@ -21,6 +21,7 @@ type fakePC struct {
 	actions []string
 	fail    error
 	onAct   func() // runs inside the call, as the real thing would be
+	reason  string // what the last shutdown said it was for
 }
 
 func (f *fakePC) ops() powerOps {
@@ -30,7 +31,10 @@ func (f *fakePC) ops() powerOps {
 			f.record("sleep")
 			return f.err()
 		},
-		shutdown: func(d time.Duration) error {
+		shutdown: func(d time.Duration, reason string) error {
+			f.mu.Lock()
+			f.reason = reason
+			f.mu.Unlock()
 			f.record("shutdown in " + d.String())
 			return f.err()
 		},
@@ -351,7 +355,7 @@ func TestChoosingNothingDisarms(t *testing.T) {
 
 func TestAfterAllRefusesWhatItCannotDo(t *testing.T) {
 	m := NewManager(t.TempDir(), 2)
-	m.SetPower(powerOps{shutdown: func(time.Duration) error { return nil }}) // no sleeping here
+	m.SetPower(powerOps{shutdown: func(time.Duration, string) error { return nil }}) // no sleeping here
 	t.Cleanup(func() { m.SetPower(powerOps{}) })
 
 	for _, bad := range []string{"hibernate", "", "SHUTDOWN", "sleep"} {

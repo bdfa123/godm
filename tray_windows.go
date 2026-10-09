@@ -117,15 +117,16 @@ const (
 	menuQuit
 )
 
-// afterItems are the choices under "When all downloads finish".
+// afterItems are the choices under "When all downloads finish". The label is
+// the key of the words to show, not the words.
 var afterItems = []struct {
 	cmd    uintptr
 	action string
 	label  string
 }{
-	{menuAfterNothing, "nothing", "Do nothing"},
-	{menuAfterSleep, "sleep", "Sleep"},
-	{menuAfterShutdown, "shutdown", "Shut down"},
+	{menuAfterNothing, "nothing", "after.nothing"},
+	{menuAfterSleep, "sleep", "after.sleep"},
+	{menuAfterShutdown, "shutdown", "after.shutdown"},
 }
 
 type notifyIconData struct {
@@ -383,9 +384,17 @@ func (t *tray) onIcon(event uint32) {
 }
 
 func (t *tray) updateTooltip() {
+	copyUTF16(t.nid.SzTip[:], trayTip(t.mgr))
+	t.nid.UFlags = nifMessage | nifIcon | nifTip
+	procShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&t.nid)))
+}
+
+// trayTip is what the tooltip says: what is going on, in the language godm is
+// speaking.
+func trayTip(m *Manager) string {
 	running, queued := 0, 0
 	var speed int64
-	for _, v := range t.mgr.List() {
+	for _, v := range m.List() {
 		switch v.State {
 		case StateRunning:
 			running++
@@ -394,26 +403,24 @@ func (t *tray) updateTooltip() {
 			queued++
 		}
 	}
-	tip := "godm — idle"
+	tip := m.tr("tray.tip.idle")
 	if running > 0 {
-		tip = fmt.Sprintf("godm — %d downloading · %s/s", running, humanBytes(speed))
+		tip = m.tr("tray.tip.running", "n", running, "speed", humanBytes(speed))
 		if queued > 0 {
-			tip += fmt.Sprintf(" · %d waiting", queued)
+			tip += m.tr("tray.tip.more", "n", queued)
 		}
 	} else if queued > 0 {
-		tip = fmt.Sprintf("godm — %d waiting", queued)
+		tip = m.tr("tray.tip.queued", "n", queued)
 	}
 	// Armed by the user an hour ago and forgotten is exactly when the computer
 	// turning itself off would be a surprise.
-	switch t.mgr.AfterAll() {
+	switch m.AfterAll() {
 	case "sleep":
-		tip += " · sleeps when done"
+		tip += m.tr("tray.tip.sleep")
 	case "shutdown":
-		tip += " · shuts down when done"
+		tip += m.tr("tray.tip.shut")
 	}
-	copyUTF16(t.nid.SzTip[:], tip)
-	t.nid.UFlags = nifMessage | nifIcon | nifTip
-	procShellNotifyIcon.Call(nimModify, uintptr(unsafe.Pointer(&t.nid)))
+	return tip
 }
 
 // notify queues a balloon; the message loop shows it.
@@ -466,19 +473,21 @@ func (t *tray) showMenu() {
 	if t.mgr.Notifications() {
 		notifyFlag |= mfChecked
 	}
-	procAppendMenu.Call(menu, mfString|mfDefault, menuOpen, uintptr(unsafe.Pointer(utf16("Open godm"))))
+	// Built afresh on every click, so a change of language shows at once.
+	text := func(key string) *uint16 { return utf16(t.mgr.tr(key)) }
+	procAppendMenu.Call(menu, mfString|mfDefault, menuOpen, uintptr(unsafe.Pointer(text("tray.open"))))
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
-	procAppendMenu.Call(menu, mfString, menuPauseAll, uintptr(unsafe.Pointer(utf16("Pause all"))))
-	procAppendMenu.Call(menu, mfString, menuResumeAll, uintptr(unsafe.Pointer(utf16("Resume all"))))
-	procAppendMenu.Call(menu, mfString, menuFolder, uintptr(unsafe.Pointer(utf16("Open downloads folder"))))
+	procAppendMenu.Call(menu, mfString, menuPauseAll, uintptr(unsafe.Pointer(text("tray.pauseAll"))))
+	procAppendMenu.Call(menu, mfString, menuResumeAll, uintptr(unsafe.Pointer(text("tray.resumeAll"))))
+	procAppendMenu.Call(menu, mfString, menuFolder, uintptr(unsafe.Pointer(text("tray.folder"))))
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
-	procAppendMenu.Call(menu, notifyFlag, menuNotify, uintptr(unsafe.Pointer(utf16("Notify when downloads finish"))))
+	procAppendMenu.Call(menu, notifyFlag, menuNotify, uintptr(unsafe.Pointer(text("tray.notify"))))
 	// The submenu goes away with its parent when the parent is destroyed.
 	if sub := afterMenu(t.mgr); sub != 0 {
-		procAppendMenu.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(utf16("When all downloads finish"))))
+		procAppendMenu.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(text("tray.after"))))
 	}
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
-	procAppendMenu.Call(menu, mfString, menuQuit, uintptr(unsafe.Pointer(utf16("Quit godm"))))
+	procAppendMenu.Call(menu, mfString, menuQuit, uintptr(unsafe.Pointer(text("tray.quit"))))
 
 	var pt struct{ X, Y int32 }
 	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
@@ -531,7 +540,7 @@ func afterMenu(m *Manager) uintptr {
 		if it.action == armed {
 			flags |= mfChecked
 		}
-		procAppendMenu.Call(sub, flags, it.cmd, uintptr(unsafe.Pointer(utf16(it.label))))
+		procAppendMenu.Call(sub, flags, it.cmd, uintptr(unsafe.Pointer(utf16(m.tr(it.label)))))
 	}
 	return sub
 }
@@ -601,7 +610,7 @@ func (t *tray) serveBrowse() {
 	default:
 		return
 	}
-	req.reply <- pickFolder(t.hwnd, req.current)
+	req.reply <- pickFolder(t.hwnd, req.current, t.mgr.tr("tray.browse"))
 }
 
 var browseCallback = syscall.NewCallback(func(hwnd, msg, lparam, data uintptr) uintptr {
@@ -611,12 +620,12 @@ var browseCallback = syscall.NewCallback(func(hwnd, msg, lparam, data uintptr) u
 	return 0
 })
 
-func pickFolder(owner uintptr, current string) string {
+func pickFolder(owner uintptr, current, title string) string {
 	var display [260]uint16
 	bi := browseInfo{
 		Owner:       owner,
 		DisplayName: &display[0],
-		Title:       utf16("Save downloads to"),
+		Title:       utf16(title),
 		Flags:       bifReturnOnlyFSDirs | bifNewDialogStyle | bifEditBox,
 		Callback:    browseCallback,
 	}

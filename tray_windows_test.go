@@ -67,6 +67,56 @@ func TestTrayMenuLeavesOutWhatCannotBeDone(t *testing.T) {
 	}
 }
 
+// The menu is built each time it is opened, so a change of language shows the
+// next time, with no restart.
+func TestTrayMenuFollowsTheLanguage(t *testing.T) {
+	m, _, _ := managerWithFakePC(t, 2)
+	arm(t, m, "shutdown")
+	setLanguage(t, m, langZH)
+
+	menu := afterMenu(m)
+	defer procDestroyMenu.Call(menu)
+	want := []menuEntry{
+		{menuAfterNothing, msg(langZH, "after.nothing"), false},
+		{menuAfterSleep, msg(langZH, "after.sleep"), false},
+		{menuAfterShutdown, msg(langZH, "after.shutdown"), true},
+	}
+	got := readMenu(menu)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("menu = %+v\nwant   %+v", got, want)
+	}
+	for _, e := range got {
+		if !hasHan(e.label) {
+			t.Errorf("%q is not in Chinese", e.label)
+		}
+	}
+
+	setLanguage(t, m, langEN)
+	if got := readMenu(afterMenu(m)); got[0].label != "Do nothing" {
+		t.Errorf("after switching back the first entry is %q", got[0].label)
+	}
+}
+
+func TestTrayTooltipIsInTheChosenLanguage(t *testing.T) {
+	m := NewManager(t.TempDir(), 2)
+	if got := trayTip(m); got != "godm — idle" {
+		t.Errorf("tooltip = %q", got)
+	}
+	setLanguage(t, m, langZH)
+	idle := trayTip(m)
+	if idle != msg(langZH, "tray.tip.idle") || !hasHan(idle) {
+		t.Errorf("tooltip = %q, want the Chinese idle text", idle)
+	}
+	busy := taskIn(m, "a", StateRunning)
+	busy.mu.Lock()
+	busy.view.Speed = 2 << 20
+	busy.mu.Unlock()
+	taskIn(m, "b", StateQueued)
+	if got, want := trayTip(m), msg(langZH, "tray.tip.running", "n", 1, "speed", "2.0 MiB")+msg(langZH, "tray.tip.more", "n", 1); got != want {
+		t.Errorf("tooltip = %q, want %q", got, want)
+	}
+}
+
 func TestPickingFromTheTrayMenuArmsTheAction(t *testing.T) {
 	m, _, _ := managerWithFakePC(t, 2)
 	tr := &tray{mgr: m}
@@ -84,7 +134,7 @@ func TestPickingFromTheTrayMenuArmsTheAction(t *testing.T) {
 // minute with a reason on screen, and "shutdown /a" cancels it.
 func TestShutdownCommandLine(t *testing.T) {
 	want := []string{"/s", "/t", "60", "/c", "godm: all downloads finished"}
-	if got := shutdownArgs(shutdownDelay); !reflect.DeepEqual(got, want) {
+	if got := shutdownArgs(shutdownDelay, "godm: all downloads finished"); !reflect.DeepEqual(got, want) {
 		t.Errorf("shutdown.exe %q, want %q", got, want)
 	}
 }
