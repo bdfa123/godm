@@ -286,6 +286,12 @@ type Manager struct {
 	// announce is what tells the user a download finished or needs them. The
 	// tray provides it; tests replace it.
 	announce func(title, text, open string)
+
+	settings Settings // guarded by mu
+	// power reaches the computer's own power state. It stays empty until
+	// RunDaemon installs the real calls.
+	power powerOps
+	awake *awakeKeeper
 	// streamPiece is the engine's piece size while a player reads; zero keeps
 	// the engine default. Tests shrink it to fit their small files.
 	streamPiece int64
@@ -302,6 +308,7 @@ func NewManager(outDir string, parallel int) *Manager {
 		outDir:   outDir,
 		openURL:  openInBrowser,
 		announce: trayNotify,
+		settings: defaultSettings(),
 	}
 	m.notifyOn.Store(true)
 	return m
@@ -594,6 +601,7 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 			mt.mu.Unlock()
 			if ok {
 				m.running++
+				m.syncAwakeLocked()
 			}
 			m.broadcastLocked()
 			m.mu.Unlock()
@@ -638,6 +646,7 @@ func (m *Manager) nextInLineLocked() *managedTask {
 func (m *Manager) release() {
 	m.mu.Lock()
 	m.running--
+	m.syncAwakeLocked()
 	m.broadcastLocked()
 	m.mu.Unlock()
 }
@@ -1077,6 +1086,9 @@ type savedList struct {
 	Limit   int         `json:"limit"`
 	Notify  *bool       `json:"notify,omitempty"`
 	Tasks   []savedTask `json:"tasks"`
+	// Settings is a pointer so a file written before it existed can be told
+	// apart from one that holds it, and load can fill in the defaults.
+	Settings *Settings `json:"settings,omitempty"`
 }
 
 // save writes the list atomically. It includes request headers, cookies among
@@ -1088,7 +1100,8 @@ func (m *Manager) save() error {
 	}
 	m.mu.Lock()
 	notify := m.notifyOn.Load()
-	list := savedList{Version: 1, Limit: m.limit, Notify: &notify}
+	settings := m.settings
+	list := savedList{Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings}
 	for _, id := range m.order {
 		t := m.tasks[id]
 		t.mu.Lock()
@@ -1123,7 +1136,10 @@ func (m *Manager) load() error {
 	if err != nil {
 		return err
 	}
-	var list savedList
+	// Decoding over the defaults leaves any setting the file does not mention
+	// as it would be on a first run.
+	loaded := defaultSettings()
+	list := savedList{Settings: &loaded}
 	if err := json.Unmarshal(b, &list); err != nil {
 		return fmt.Errorf("parse %s: %w", m.store, err)
 	}
@@ -1131,6 +1147,10 @@ func (m *Manager) load() error {
 	defer m.mu.Unlock()
 	if list.Limit > 0 {
 		m.limit = clampLimit(list.Limit)
+	}
+	if list.Settings != nil {
+		m.settings = *list.Settings
+		m.syncAwakeLocked()
 	}
 	if list.Notify != nil {
 		m.notifyOn.Store(*list.Notify)
@@ -1239,6 +1259,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	if err := mgr.load(); err != nil {
 		log.Printf("could not restore the task list: %v", err)
 	}
+	mgr.SetPower(osPower())
 	go mgr.saveLoop()
 	s := &server{mgr: mgr, token: token, port: actual}
 
@@ -1271,6 +1292,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/connections", s.guard(post(s.handleConnections)))
 	mux.HandleFunc("/api/inspect", s.guard(post(s.handleInspect)))
 	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
+	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
 	mux.HandleFunc("/api/browse", s.guard(post(s.handleBrowse)))
 	mux.HandleFunc("/api/open", s.guard(post(s.handleOpen)))
 	mux.HandleFunc("/api/play", s.guard(post(s.handlePlay)))

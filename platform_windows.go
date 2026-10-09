@@ -206,3 +206,29 @@ func alert(title, body string) {
 }
 
 func setMachineScope(v bool) { machineScope = v }
+
+var procSetThreadExecutionState = kernel32.NewProc("SetThreadExecutionState")
+
+const (
+	esContinuous     = 0x80000000 // keep the setting until changed, not for one idle period
+	esSystemRequired = 0x00000001
+)
+
+// setAwake keeps Windows from sleeping on its own while on is true. The state
+// belongs to the calling thread. It asks for the system only: without
+// ES_DISPLAY_REQUIRED the screen may still turn off.
+func setAwake(on bool) error {
+	flags := uintptr(esContinuous)
+	if on {
+		flags |= esSystemRequired
+	}
+	if r, _, err := procSetThreadExecutionState.Call(flags); r == 0 {
+		return fmt.Errorf("SetThreadExecutionState: %v", err)
+	}
+	return nil
+}
+
+// osPower is the real connection to the computer's power state.
+func osPower() powerOps {
+	return powerOps{keepAwake: setAwake}
+}

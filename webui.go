@@ -172,6 +172,7 @@ const uiHTML = `<!doctype html>
   .dialog .foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 14px; flex-wrap: wrap; }
   .dialog .foot .grow { flex: 1; color: var(--muted); font-size: 12.5px; }
   .check { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .dialog .hint { margin: 0 0 14px 26px; font-size: 12.5px; }
 
   .toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30;
@@ -194,6 +195,7 @@ const uiHTML = `<!doctype html>
     <button class="btn" id="pauseAll">Pause all</button>
     <button class="btn" id="resumeAll">Resume all</button>
     <button class="btn primary" id="addBtn">+ Add links</button>
+    <button class="btn" id="setBtn">Settings</button>
   </div>
 </div>
 
@@ -234,6 +236,20 @@ const uiHTML = `<!doctype html>
     <div class="foot">
       <button class="btn" data-close="addrDlg">Cancel</button>
       <button class="btn primary" id="addrGo">Continue with this link</button>
+    </div>
+  </div>
+</div>
+
+<div class="scrim" id="setDlg" hidden>
+  <div class="dialog" role="dialog" aria-labelledby="setTitle">
+    <h2 id="setTitle">Settings</h2>
+    <div id="awakeRow">
+      <label class="check"><input type="checkbox" id="setAwake"> Keep this PC awake while downloading</label>
+      <p class="hint">Stops Windows going to sleep on its own while a download is running. The screen can still turn off.</p>
+    </div>
+    <div class="foot">
+      <button class="btn" data-close="setDlg">Cancel</button>
+      <button class="btn primary" id="setGo">Save</button>
     </div>
   </div>
 </div>
@@ -698,6 +714,28 @@ document.getElementById("addGo").addEventListener("click", function () {
     S.tab = "all";
     poll();
   }).catch(fail);
+});
+
+// ---------- settings ----------
+// Only what the user changed is sent. A setting that changed on its own while
+// the dialog was open (a one-shot action that has already fired) must not be
+// put back by pressing Save.
+function openSettings() {
+  api("/api/settings").then(function (d) {
+    S.settings = d;
+    document.getElementById("setAwake").checked = !!d.keep_awake;
+    document.getElementById("awakeRow").hidden = !d.can_keep_awake;
+    show("setDlg");
+  }).catch(fail);
+}
+document.getElementById("setBtn").addEventListener("click", openSettings);
+document.getElementById("setGo").addEventListener("click", function () {
+  var was = S.settings, upd = {};
+  var awake = document.getElementById("setAwake").checked;
+  if (awake !== !!was.keep_awake) upd.keep_awake = awake;
+  hide("setDlg");
+  if (!Object.keys(upd).length) return;
+  post("/api/settings", upd).then(function () { toast("Settings saved."); }).catch(fail);
 });
 
 // Pasting links anywhere outside a text field opens the add dialog with them.

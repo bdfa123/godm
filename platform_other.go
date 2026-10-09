@@ -117,3 +117,7 @@ func hideConsole()                {}
 func alert(title, body string)    { fmt.Fprintf(os.Stderr, "%s: %s\n", title, body) }
 
 func setMachineScope(bool) {}
+
+// osPower has nothing to offer here: nothing keeps the machine awake, and the
+// settings dialog hides what cannot work.
+func osPower() powerOps { return powerOps{} }
