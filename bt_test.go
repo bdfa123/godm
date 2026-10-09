@@ -755,6 +755,53 @@ func TestSeedingPolicyAfterTheDownloadCompletes(t *testing.T) {
 	}
 }
 
+func TestASeedingTorrentShowsWhoIsConnectedNow(t *testing.T) {
+	src := t.TempDir()
+	payload := makePayload(2 << 20)
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: payload})
+	seed := newSeeder(t, src, mi, 0)
+
+	m := newBTManager(t)
+	m.bt.configure = func(cfg *torrent.ClientConfig) {
+		btLoopback(cfg)
+		// Two complete peers usually part at once. Here the seed stays,
+		// as one does whose connection is still busy when the last piece
+		// lands, so it is still counted when the download finishes.
+		cfg.DropMutuallyCompletePeers = false
+		// Slow enough that the newcomer below stays connected a while.
+		cfg.UploadRateLimiter = rate.NewLimiter(256<<10, 32<<10)
+	}
+	m.SetSeedPolicy(SeedKeep)
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "film.bin", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the download", stateIs(m, id, StateDone))
+	if v, _ := findTask(m, id); v.Stage != "seeding" {
+		t.Fatalf("stage %q after the download, want seeding", v.Stage)
+	}
+	waitFor(t, 5*time.Second, "the seed to be counted", func() bool {
+		v, _ := findTask(m, id)
+		return v.Active == 1 && v.Conns == 1
+	})
+	seed.cl.Close()
+	waitFor(t, 5*time.Second, "the seed that left to be counted out", func() bool {
+		v, _ := findTask(m, id)
+		return v.Active == 0 && v.Conns == 0
+	})
+	newcomer := newPeer(t, t.TempDir(), mi, 0)
+	newcomer.t.AddClientPeer(m.bt.client())
+	waitFor(t, 5*time.Second, "the newcomer to be counted", func() bool {
+		v, _ := findTask(m, id)
+		return v.Active == 1 && v.Conns == 0
+	})
+	m.SetSeedPolicy(SeedStop)
+	waitFor(t, 5*time.Second, "seeding to stop", func() bool {
+		v, _ := findTask(m, id)
+		return v.Stage == "" && v.Active == 0 && v.Conns == 0
+	})
+}
+
 // serveTorrentFile puts a .torrent on a local web server, as a site would.
 func serveTorrentFile(t *testing.T, mi *metainfo.MetaInfo) string {
 	var buf bytes.Buffer

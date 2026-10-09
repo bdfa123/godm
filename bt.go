@@ -1361,8 +1361,11 @@ func (t *managedTask) torrentProgress(gen int, s torrentStatus) {
 }
 
 // torrentStage shows what a torrent does outside a download: seeding once it
-// has finished, or nothing once it has let go.
-func (t *managedTask) torrentStage(gen int, stage string, uploaded int64, peers int) {
+// has finished, or nothing once it has let go. torrentProgress, which counts
+// peers and seeds while downloading, stops with the download, so a finished
+// torrent's counts come from here, or the card would go on showing whoever
+// was connected when the last piece landed.
+func (t *managedTask) torrentStage(gen int, stage string, uploaded int64, peers, seeds int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.gen != gen {
@@ -1370,7 +1373,7 @@ func (t *managedTask) torrentStage(gen int, stage string, uploaded int64, peers 
 	}
 	t.view.Stage, t.view.Uploaded = stage, uploaded
 	if t.view.State == StateDone {
-		t.view.Active = peers
+		t.view.Active, t.view.Conns = peers, seeds
 	}
 }
 
@@ -1397,7 +1400,7 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 	defer func() {
 		if !finished {
 			m.bt.drop(mt)
-			mt.torrentStage(gen, "", mt.snapshot().Uploaded, 0)
+			mt.torrentStage(gen, "", mt.snapshot().Uploaded, 0, 0)
 		}
 	}()
 
@@ -1496,7 +1499,7 @@ func (m *Manager) afterTorrentCompletes(mt *managedTask, gen int, tor *torrent.T
 		return
 	}
 	s := tor.Stats()
-	mt.torrentStage(gen, "seeding", base+s.BytesWrittenData.Int64(), 0)
+	mt.torrentStage(gen, "seeding", base+s.BytesWrittenData.Int64(), s.ActivePeers, s.ConnectedSeeders)
 	go m.seedTorrent(mt, gen, tor, base)
 }
 
@@ -1515,18 +1518,18 @@ func (m *Manager) seedTorrent(mt *managedTask, gen int, tor *torrent.Torrent, ba
 		policy, changed := m.bt.watchPolicy()
 		if !wantSeed(policy, up, tor.Length()) {
 			m.bt.drop(mt)
-			mt.torrentStage(gen, "", up, 0)
+			mt.torrentStage(gen, "", up, 0, 0)
 			m.dirty.Store(true)
 			return
 		}
-		mt.torrentStage(gen, "seeding", up, s.ActivePeers)
+		mt.torrentStage(gen, "seeding", up, s.ActivePeers, s.ConnectedSeeders)
 		if up != last {
 			last = up
 			m.dirty.Store(true)
 		}
 		select {
 		case <-tor.Closed():
-			mt.torrentStage(gen, "", up, 0)
+			mt.torrentStage(gen, "", up, 0, 0)
 			m.dirty.Store(true)
 			return
 		case <-changed:
