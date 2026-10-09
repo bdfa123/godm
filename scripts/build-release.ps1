@@ -10,6 +10,14 @@
   with godm.exe, extension/, README.md, LICENSE and THIRD_PARTY_NOTICES.txt at
   the top level.
 
+  The extension in the zip is stamped with the release's version: v1.2.3 makes
+  its manifest.json say 1.2.3, so Chrome's extension page shows which release
+  it came from. A tag with a suffix, such as v1.2.3-rc.1, gives 1.2.3 for the
+  number Chrome compares (it only accepts up to four integers) and the whole
+  tag as the version_name it displays. Only the copy in the zip is changed, not
+  the one in the repository, and a version that is not vMAJOR.MINOR.PATCH (a
+  plain `git describe` hash, say) leaves it as it is.
+
   THIRD_PARTY_NOTICES.txt is written by scripts/notices from the modules the
   exe really links and their license files in the module cache. It stops the
   release when it meets a license it does not know, because the licenses of
@@ -31,7 +39,9 @@
   which is git-ignored.
 
 .PARAMETER Arch
-  GOARCH values to build for. Defaults to amd64 and arm64.
+  GOARCH values to build for. Defaults to amd64 and arm64. Given as -Arch
+  amd64,arm64 it works under powershell -File as well, which hands the list
+  over as one string.
 
 .PARAMETER RequireWinres
   Fail when go-winres cannot be found instead of building without the icon and
@@ -51,6 +61,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Run as powershell -File script.ps1 -Arch amd64,arm64, PowerShell does not
+# make a list of the comma: the parameter arrives as the one string
+# "amd64,arm64", and that would be taken for a GOARCH. Split it, whichever way
+# the script was started.
+$Arch = @($Arch | ForEach-Object { "$_" -split '[,;\s]+' } | Where-Object { $_ } | Select-Object -Unique)
+if ($Arch.Count -eq 0) { throw '-Arch needs at least one architecture, such as amd64 or arm64.' }
+foreach ($a in $Arch) {
+    # It ends up in an environment variable and in file names.
+    if ($a -notmatch '^[0-9a-z]+$') { throw "Architecture '$a' is not a GOARCH name such as amd64 or arm64." }
+}
 
 # Keep in step with GO_WINRES_VERSION in .github/workflows/release.yml.
 $WinresVersion = 'v0.3.3'
@@ -87,6 +108,51 @@ $productVersion = '0.0.0.0'
 if ($Version -match '^v?(\d+)\.(\d+)\.(\d+)') {
     $fileVersion = '{0}.{1}.{2}.0' -f $Matches[1], $Matches[2], $Matches[3]
     $productVersion = $Version -replace '^v', ''
+}
+
+# What the extension's manifest should say for this release, or $null to leave
+# it alone. Chrome takes "version" as one to four integers from 0 to 65535 and
+# nothing else, and shows "version_name" instead when there is one. So v1.2.3 is
+# 1.2.3, and a suffix (v1.2.3-rc.1, or the v1.2.3-4-gabc1234 that git describe
+# makes) is dropped from the number and kept in the name. Leading zeros are not
+# allowed in the number, so it is rebuilt from the integers.
+function Get-ExtensionVersion {
+    param([string]$Version)
+    if ($Version -notmatch '^v?(\d+)\.(\d+)\.(\d+)(.*)$') { return $null }
+    $parts = foreach ($digits in $Matches[1], $Matches[2], $Matches[3]) {
+        $n = 0
+        if (-not [int]::TryParse($digits, [ref]$n) -or $n -gt 65535) {
+            throw "Version '$Version' has a number ($digits) that Chrome does not accept in an extension version; each must be 0 to 65535."
+        }
+        $n
+    }
+    $number = $parts -join '.'
+    $name = $null
+    if ($Matches[4]) { $name = $Version -replace '^v', '' }
+    return [pscustomobject]@{ Number = $number; Name = $name }
+}
+
+$extStamp = Get-ExtensionVersion $Version
+
+# Writes the version into a copy of manifest.json, as text, so that the rest of
+# the file keeps its layout and line endings.
+function Set-ExtensionVersion {
+    param([string]$ManifestPath, $Stamp)
+    $text = [System.IO.File]::ReadAllText($ManifestPath)
+    if ($text -match '"version_name"') {
+        throw "$ManifestPath already has a version_name; teach scripts/build-release.ps1 how to stamp it."
+    }
+    $line = [regex]'(?m)^([ \t]*)"version"[ \t]*:[ \t]*"[^"]*"'
+    if (-not $line.IsMatch($text)) { throw "$ManifestPath has no `"version`" line to stamp." }
+    $replacement = '${1}"version": "' + $Stamp.Number + '"'
+    if ($Stamp.Name) {
+        $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $replacement += ',' + $newline + '${1}"version_name": "' + $Stamp.Name + '"'
+    }
+    $text = $line.Replace($text, $replacement, 1)
+    [System.IO.File]::WriteAllText($ManifestPath, $text, (New-Object System.Text.UTF8Encoding($false)))
+    $written = (Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json).version
+    if ($written -ne $Stamp.Number) { throw "$ManifestPath says version '$written' after stamping, expected '$($Stamp.Number)'." }
 }
 
 function Find-Winres {
@@ -229,14 +295,24 @@ try {
         Get-ChildItem -LiteralPath (Join-Path $stage 'extension') -Recurse -File |
             Where-Object { $_.Name -like '*.test.js' -or $_.Extension -eq '.py' } |
             Remove-Item -Force
+        # The copy in the stage, never the one in the repository.
+        if ($extStamp) {
+            Set-ExtensionVersion -ManifestPath (Join-Path $stage 'extension\manifest.json') -Stamp $extStamp
+        }
 
         $zip = Join-Path $OutDir ("godm-{0}-windows-{1}.zip" -f $Version, $a)
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
         New-ZipFromDirectory -Directory $stage -ZipPath $zip
 
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        $packedManifest = $null
         try {
             $names = @($archive.Entries | ForEach-Object { $_.FullName })
+            $entry = $archive.GetEntry('extension/manifest.json')
+            if ($entry) {
+                $reader = New-Object System.IO.StreamReader($entry.Open(), [System.Text.Encoding]::UTF8)
+                try { $packedManifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            }
         }
         finally {
             $archive.Dispose()
@@ -245,7 +321,10 @@ try {
             if ($names -notcontains $needed) { throw "$zip is missing $needed" }
         }
         if ($names | Where-Object { $_ -match '\\' }) { throw "$zip has backslashes in entry names" }
-        Write-Host ("   {0}: {1} entries" -f (Split-Path -Leaf $zip), $names.Count)
+        if ($extStamp -and $packedManifest.version -ne $extStamp.Number) {
+            throw "$zip has an extension that says version '$($packedManifest.version)', expected '$($extStamp.Number)'"
+        }
+        Write-Host ("   {0}: {1} entries, extension version {2}" -f (Split-Path -Leaf $zip), $names.Count, $packedManifest.version)
         $zips += $zip
     }
 
