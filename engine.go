@@ -532,6 +532,11 @@ type task struct {
 	segs    []*Segment // sorted by Start, covering the whole file
 	workers atomic.Int32
 	changed chan struct{} // nudges the supervisor when a worker exits
+
+	// serverCap is how many connections the server turned out to accept: it
+	// kept refusing one more while that many were working. Zero means no
+	// refusal has been seen.
+	serverCap atomic.Int32
 }
 
 // limit is how many connections may run right now.
@@ -543,7 +548,31 @@ func (t *task) limit() int {
 	if t.opts.ConnLimit != nil {
 		n = t.opts.ConnLimit()
 	}
+	if c := int(t.serverCap.Load()); c > 0 && n > c {
+		n = c
+	}
 	return clampConnections(n)
+}
+
+// capConnections lowers the server's cap to n; it never raises it.
+func (t *task) capConnections(n int32) {
+	for {
+		c := t.serverCap.Load()
+		if c > 0 && c <= n {
+			return
+		}
+		if t.serverCap.CompareAndSwap(c, n) {
+			return
+		}
+	}
+}
+
+// refused reports a connection the server kept turning away as busy, which
+// is what a host does when it allows fewer connections than were opened.
+func refused(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) &&
+		(se.code == http.StatusServiceUnavailable || se.code == http.StatusTooManyRequests)
 }
 
 // snapshot copies the segments for display, merging finished neighbours so a
@@ -595,6 +624,14 @@ func (t *task) run(ctx context.Context) error {
 			default:
 			}
 			if err == nil {
+				return
+			}
+			if refused(err) && t.workers.Load() > 0 {
+				// The server kept turning this connection away while the others
+				// carry on, so it takes no more than they already hold. Go on
+				// with those rather than call the whole download off; the range
+				// this one gave up goes to whichever of them frees up first.
+				t.capConnections(t.workers.Load())
 				return
 			}
 			errMu.Lock()

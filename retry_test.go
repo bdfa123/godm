@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -296,5 +297,62 @@ func TestSingleStreamTrimsLongerLeftoverFile(t *testing.T) {
 	got, _ := os.ReadFile(res.Path)
 	if len(got) != 500 {
 		t.Fatalf("stale tail survived: file is %d bytes, want 500", len(got))
+	}
+}
+
+// refusingServer turns away every request beyond max at once with a 503, as
+// PikPak does past eight connections.
+type refusingServer struct {
+	slowServer
+	max      int32
+	inFlight atomic.Int32
+}
+
+func (h *refusingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	n := h.inFlight.Add(1)
+	defer h.inFlight.Add(-1)
+	if n > h.max {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	h.slowServer.ServeHTTP(w, r)
+}
+
+func TestRefusedConnectionsDoNotFailTheDownload(t *testing.T) {
+	payload := makePayload(8 << 20)
+	h := &refusingServer{slowServer: slowServer{payload: payload, chunk: 16 << 10, delay: 20 * time.Millisecond}, max: 3}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var last Progress
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/big.bin", OutDir: t.TempDir(),
+		Connections: 8, MinSplit: 64 << 10, MaxRetries: 2,
+		OnProgress: func(p Progress) {
+			mu.Lock()
+			last = p
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("a server that accepts three connections failed the download: %v", err)
+	}
+	checkFile(t, res.Path, payload)
+	mu.Lock()
+	defer mu.Unlock()
+	if last.Limit > 3 {
+		t.Errorf("still asking for %d connections from a server that takes 3", last.Limit)
+	}
+}
+
+func checkFile(t *testing.T, path string, want []byte) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum(got) != sum(want) {
+		t.Fatalf("%s: content differs from the source", path)
 	}
 }
