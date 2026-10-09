@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>godm — pick links</title>
+<title data-i18n="picker_title"></title>
 <style>
   :root {
     color-scheme: light dark;
@@ -54,31 +54,32 @@
 </head>
 <body>
 <header>
-  <h1 id="title">Links on this page</h1>
+  <h1 id="title" data-i18n="picker_heading"></h1>
   <div class="sub" id="page"></div>
 </header>
 <div class="bar">
-  <input type="search" id="search" placeholder="Filter by name, text or address" autocomplete="off">
-  <span>Select:</span>
-  <button class="link" id="selFiles" title="Links whose type is in your godm file type list">files</button>
-  <button class="link" id="selAll">all shown</button>
-  <button class="link" id="selNone">none</button>
+  <input type="search" id="search" data-i18n-ph="picker_filter_ph" autocomplete="off">
+  <span data-i18n="picker_select"></span>
+  <button class="link" id="selFiles" data-i18n="picker_sel_files" data-i18n-title="picker_sel_files_tip"></button>
+  <button class="link" id="selAll" data-i18n="picker_sel_all"></button>
+  <button class="link" id="selNone" data-i18n="picker_sel_none"></button>
 </div>
 <div class="chips" id="chips"></div>
 <div class="scroll">
   <table>
-    <thead><tr><th style="width:28px"><input type="checkbox" id="toggleShown" title="Select every shown link"></th><th>File</th><th style="width:60px">Type</th></tr></thead>
+    <thead><tr><th style="width:28px"><input type="checkbox" id="toggleShown" data-i18n-title="picker_toggle_tip"></th><th data-i18n="picker_th_file"></th><th style="width:60px" data-i18n="picker_th_type"></th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
-  <div class="empty" id="empty" hidden>No links match.</div>
+  <div class="empty" id="empty" data-i18n="picker_empty" hidden></div>
 </div>
 <footer>
   <span class="grow" id="count"></span>
   <span class="status" id="status"></span>
-  <label>Connections <input type="number" id="conns" min="1" max="32" style="width:60px"></label>
-  <button class="btn" id="cancel">Cancel</button>
-  <button class="btn primary" id="go" disabled>Download</button>
+  <label><span data-i18n="picker_conns"></span> <input type="number" id="conns" min="1" max="32" style="width:60px"></label>
+  <button class="btn" id="cancel" data-i18n="picker_cancel"></button>
+  <button class="btn primary" id="go" data-i18n="picker_download" disabled></button>
 </footer>
+<script src="i18n.js"></script>
 <script src="picker.js"></script>
 </body>
 </html>

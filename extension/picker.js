@@ -9,6 +9,10 @@ const DEFAULTS = {
 
 const state = { page: "", links: [], selected: new Set(), types: new Set(), query: "", fileTypes: new Set() };
 
+// What a link with no file type is filed under. It is only an identity: the chip
+// that shows it is labelled in the person's language.
+const NO_TYPE = "(none)";
+
 function baseOf(url) {
   try {
     return decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
@@ -42,7 +46,7 @@ function esc(s) {
 function shown() {
   const q = state.query;
   return state.links.filter((l) => {
-    if (state.types.size && !state.types.has(l.ext || "(none)")) return false;
+    if (state.types.size && !state.types.has(l.ext || NO_TYPE)) return false;
     if (!q) return true;
     return l.name.toLowerCase().includes(q) || l.text.toLowerCase().includes(q) || l.url.toLowerCase().includes(q);
   });
@@ -51,7 +55,7 @@ function shown() {
 function renderChips() {
   const counts = new Map();
   for (const l of state.links) {
-    const k = l.ext || "(none)";
+    const k = l.ext || NO_TYPE;
     counts.set(k, (counts.get(k) || 0) + 1);
   }
   // File types first, then the rest by frequency, so "zip 12" beats "html 80".
@@ -61,7 +65,7 @@ function renderChips() {
   });
   document.getElementById("chips").innerHTML = keys.map((k) =>
     '<button class="chip' + (state.types.has(k) ? " on" : "") + '" data-type="' + esc(k) + '">' +
-    "<b>" + esc(k) + "</b><span>" + counts.get(k) + "</span></button>").join("");
+    "<b>" + esc(k === NO_TYPE ? tr("picker_none") : k) + "</b><span>" + counts.get(k) + "</span></button>").join("");
 }
 
 function render() {
@@ -73,7 +77,7 @@ function render() {
       '<td><div class="name">' + esc(l.name) + "</div>" +
       (l.text && l.text !== l.name ? '<div class="text">' + esc(l.text) + "</div>" : "") +
       '<div class="url">' + esc(l.url) + "</div></td>" +
-      '<td class="ext">' + esc(l.ext || (l.kind === "media" ? "media" : "")) + "</td></tr>";
+      '<td class="ext">' + esc(l.ext || (l.kind === "media" ? tr("picker_media") : "")) + "</td></tr>";
   }).join("");
   document.getElementById("empty").hidden = list.length > 0;
 
@@ -83,11 +87,12 @@ function render() {
   toggle.indeterminate = shownSelected > 0 && shownSelected < list.length;
 
   const n = state.selected.size;
-  document.getElementById("count").textContent =
-    n + " of " + state.links.length + " links selected" + (list.length !== state.links.length ? " · " + list.length + " shown" : "");
+  document.getElementById("count").textContent = list.length !== state.links.length
+    ? tr("picker_count_shown", [n, state.links.length, list.length])
+    : tr("picker_count", [n, state.links.length]);
   const go = document.getElementById("go");
   go.disabled = n === 0;
-  go.textContent = n > 1 ? "Download " + n + " files" : "Download";
+  go.textContent = n > 1 ? tr("picker_download_many", n) : tr("picker_download");
 }
 
 function setStatus(msg, kind) {
@@ -97,9 +102,9 @@ function setStatus(msg, kind) {
 }
 
 document.getElementById("rows").addEventListener("click", (e) => {
-  const tr = e.target.closest("tr[data-url]");
-  if (!tr) return;
-  const url = tr.getAttribute("data-url");
+  const row = e.target.closest("tr[data-url]");
+  if (!row) return;
+  const url = row.getAttribute("data-url");
   if (state.selected.has(url)) state.selected.delete(url);
   else state.selected.add(url);
   render();
@@ -147,15 +152,15 @@ document.getElementById("go").addEventListener("click", async () => {
   if (!items.length) return;
   const go = document.getElementById("go");
   go.disabled = true;
-  setStatus("Sending " + items.length + " links to godm…");
+  setStatus(tr("picker_sending", items.length));
   const connections = parseInt(document.getElementById("conns").value, 10) || DEFAULTS.connections;
   const resp = await chrome.runtime.sendMessage({ type: "godm-batch", items, referrer: state.page, connections });
   if (resp && resp.ok) {
     const n = (resp.ids || []).length;
-    setStatus("Added " + n + " download" + (n === 1 ? "" : "s") + " to godm.", "ok");
+    setStatus(tr(n === 1 ? "picker_added_one" : "picker_added_other", n), "ok");
     setTimeout(() => window.close(), 1200);
   } else {
-    setStatus((resp && resp.error) || "godm did not respond.", "err");
+    setStatus((resp && resp.error) || tr("err_no_response"), "err");
     go.disabled = false;
   }
 });
@@ -169,8 +174,8 @@ document.getElementById("go").addEventListener("click", async () => {
   const data = key ? (await chrome.storage.session.get(key))[key] : null;
   if (key) chrome.storage.session.remove(key);
   if (!data) {
-    document.getElementById("title").textContent = "This link list has expired";
-    document.getElementById("page").textContent = "Pick the links again from the page.";
+    document.getElementById("title").textContent = tr("picker_expired");
+    document.getElementById("page").textContent = tr("picker_expired_sub");
     document.getElementById("empty").hidden = false;
     return;
   }
@@ -185,9 +190,9 @@ document.getElementById("go").addEventListener("click", async () => {
   // Start with what godm would have taken over anyway: real files, not pages.
   state.selected = new Set(state.links.filter((l) => state.fileTypes.has(l.ext)).map((l) => l.url));
 
-  document.getElementById("title").textContent = data.title || "Links on this page";
+  document.getElementById("title").textContent = data.title || tr("picker_heading");
   document.getElementById("page").textContent = data.page;
-  document.title = "godm — " + (data.title || "pick links");
+  document.title = data.title ? "godm — " + data.title : tr("picker_title");
   renderChips();
   render();
 })();

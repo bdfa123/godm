@@ -3,6 +3,8 @@
 // Run with: node --test extension/handoff.test.js
 const test = require("node:test");
 const assert = require("node:assert");
+// handoff.js speaks through chrome.i18n; the tests read the English messages.
+require("./fakechrome.test.js").install("en");
 const {
   DIALOG_MAX_CONNECTIONS,
   buildJob,

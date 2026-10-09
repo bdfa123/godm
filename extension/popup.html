@@ -39,15 +39,14 @@
 <body>
 <header>
   <h1>godm</h1>
-  <label><input type="checkbox" id="enabled"> takeover</label>
-  <a class="link" id="open">manager</a>
-  <a class="link" id="opts">settings</a>
+  <label><input type="checkbox" id="enabled"> <span data-i18n="popup_takeover"></span></label>
+  <a class="link" id="open" data-i18n="popup_manager"></a>
+  <a class="link" id="opts" data-i18n="popup_settings"></a>
 </header>
 <div id="media"></div>
-<button id="grab" style="width:100%;margin-bottom:10px;padding:6px;border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer">
-  Download links on this page…
-</button>
-<div id="body"><div class="msg">Loading…</div></div>
+<button id="grab" data-i18n="popup_grab" style="width:100%;margin-bottom:10px;padding:6px;border-radius:6px;border:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer"></button>
+<div id="body"><div class="msg" data-i18n="popup_loading"></div></div>
+<script src="i18n.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

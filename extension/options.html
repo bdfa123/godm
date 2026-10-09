@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>godm settings</title>
+<title data-i18n="options_title"></title>
 <style>
   :root { color-scheme: light dark; --line:#e2e5ea; --muted:#6b7480; --accent:#2f6df6; --ok:#1f9d55; --err:#d64545; }
   @media (prefers-color-scheme: dark) {
@@ -34,50 +34,51 @@
 </style>
 </head>
 <body>
-<h1>godm takeover</h1>
-<div class="sub">Downloads matching your rules are cancelled in the browser and handed to the godm daemon.</div>
+<h1 data-i18n="ext_name"></h1>
+<div class="sub" data-i18n="options_sub"></div>
 
 <div class="setup">
-  <div>Extension ID: <code id="extid"></code></div>
-  <div>Register the native host once, then restart the browser:</div>
+  <div><span data-i18n="options_ext_id"></span> <code id="extid"></code></div>
+  <div data-i18n="options_register"></div>
   <div><code id="cmd"></code></div>
-  <div style="margin-top:6px">Connection: <span id="probe">checking…</span></div>
-  <div>Startup self-test: <span id="lastping">…</span></div>
+  <div style="margin-top:6px"><span data-i18n="options_connection"></span> <span id="probe" data-i18n="options_checking"></span></div>
+  <div><span data-i18n="options_selftest"></span> <span id="lastping">…</span></div>
 </div>
 
 <fieldset>
-  <legend>Interception</legend>
-  <label class="inline"><input type="checkbox" id="enabled"> Take over browser downloads</label>
-  <label class="inline"><input type="checkbox" id="takeAll"> Take over everything, ignoring the file type list</label>
-  <label class="inline"><input type="checkbox" id="confirmDownload"> Ask before starting each download</label>
-  <div class="hint">Shows a window to change the file name, save folder and connections, or to cancel. Cancelling downloads nothing. Links picked from a page are added without asking.</div>
+  <legend data-i18n="options_interception"></legend>
+  <label class="inline"><input type="checkbox" id="enabled"> <span data-i18n="options_enabled"></span></label>
+  <label class="inline"><input type="checkbox" id="takeAll"> <span data-i18n="options_take_all"></span></label>
+  <label class="inline"><input type="checkbox" id="confirmDownload"> <span data-i18n="options_confirm"></span></label>
+  <div class="hint" data-i18n="options_confirm_hint"></div>
   <label>
-    <span class="t">File types</span>
-    <span class="h">Comma separated extensions. Ignored when "take over everything" is on.</span>
+    <span class="t" data-i18n="options_types"></span>
+    <span class="h" data-i18n="options_types_hint"></span>
     <textarea id="extensions"></textarea>
   </label>
   <label>
-    <span class="t">Never intercept these hosts</span>
-    <span class="h">One per line or comma separated. Subdomains are matched too.</span>
+    <span class="t" data-i18n="options_blocklist"></span>
+    <span class="h" data-i18n="options_blocklist_hint"></span>
     <textarea id="blocklist" placeholder="mail.google.com&#10;internal.company.net"></textarea>
   </label>
   <label>
-    <span class="t">Minimum size (bytes)</span>
-    <span class="h">Only applied when the browser already knows the size before the download starts.</span>
+    <span class="t" data-i18n="options_min_size"></span>
+    <span class="h" data-i18n="options_min_size_hint"></span>
     <input type="number" id="minSize" min="0" step="1024">
   </label>
 </fieldset>
 
 <fieldset>
-  <legend>Transfer</legend>
+  <legend data-i18n="options_transfer"></legend>
   <label>
-    <span class="t">Connections per download</span>
-    <span class="h">Segments are only used when the server answers with 206 Partial Content.</span>
+    <span class="t" data-i18n="options_conns"></span>
+    <span class="h" data-i18n="options_conns_hint"></span>
     <input type="number" id="connections" min="1" max="32">
   </label>
 </fieldset>
 
-<button id="save">Save</button><span id="status"></span>
+<button id="save" data-i18n="options_save"></button><span id="status"></span>
+<script src="i18n.js"></script>
 <script src="options.js"></script>
 </body>
 </html>

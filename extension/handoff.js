@@ -6,6 +6,10 @@
 // service worker runs the same checks again before anything is sent to godm:
 // the page is only a form, the worker decides what goes out.
 
+// tr comes from i18n.js, which the page and the worker load before this file.
+// Node has no script tags, so under the tests it is fetched here.
+if (typeof tr === "undefined") var { tr } = require("./i18n.js");
+
 // The same ceiling as MaxConnections in engine.go. The daemon clamps anyway;
 // this is so the dialog says so instead of quietly using a different number.
 const DIALOG_MAX_CONNECTIONS = 32;
@@ -50,7 +54,7 @@ function groupDigits(n) {
 }
 
 function formatSize(bytes) {
-  if (!(bytes > 0)) return "Unknown";
+  if (!(bytes > 0)) return tr("size_unknown");
   if (bytes < 1024) return bytes + " B";
   const units = ["KB", "MB", "GB", "TB"];
   let v = bytes;
@@ -60,7 +64,7 @@ function formatSize(bytes) {
     i++;
   }
   const digits = v >= 100 ? 0 : v >= 10 ? 1 : 2;
-  return v.toFixed(digits) + " " + units[i] + " (" + groupDigits(bytes) + " bytes)";
+  return tr("size_exact", [v.toFixed(digits) + " " + units[i], groupDigits(bytes)]);
 }
 
 // Each validator returns "" when the value is fine, else a sentence for the
@@ -68,9 +72,9 @@ function formatSize(bytes) {
 
 function validateName(raw) {
   const name = String(raw == null ? "" : raw).trim();
-  if (!name) return "Enter a file name.";
-  if (BAD_NAME_CHARS.test(name)) return 'A file name cannot contain \\ / : * ? " < > |';
-  if (name.endsWith(".")) return "A file name cannot end with a dot.";
+  if (!name) return tr("val_name_empty");
+  if (BAD_NAME_CHARS.test(name)) return tr("val_name_chars");
+  if (name.endsWith(".")) return tr("val_name_dot");
   return "";
 }
 
@@ -80,25 +84,25 @@ function validateName(raw) {
 function validateDir(raw) {
   const dir = String(raw == null ? "" : raw).trim();
   if (!dir) return "";
-  if (/[\u0000-\u001f]/.test(dir)) return "The folder path has characters that cannot be used.";
+  if (/[\u0000-\u001f]/.test(dir)) return tr("val_dir_control");
   const drive = /^[A-Za-z]:[\\/]/.test(dir);
   const unc = /^\\\\[^\\/?]+[\\/][^\\/]+/.test(dir);
   if (drive || unc) {
     // The drive colon is the one colon a path may have.
     if (/[*?"<>|:]/.test(dir.replace(/^[A-Za-z]:/, ""))) {
-      return 'A folder name cannot contain : * ? " < > |';
+      return tr("val_dir_chars");
     }
     return "";
   }
   if (dir.startsWith("/")) return "";
-  return "Enter the full folder path, such as C:\\Downloads.";
+  return tr("val_dir_full");
 }
 
 // parseConnections reads the field as typed. parseInt would accept "8abc" and
 // "2.9"; a number box can hold both.
 function parseConnections(raw) {
   const s = String(raw == null ? "" : raw).trim();
-  const bad = "Connections must be a whole number from 1 to " + DIALOG_MAX_CONNECTIONS + ".";
+  const bad = tr("val_conns", DIALOG_MAX_CONNECTIONS);
   if (!/^\d+$/.test(s)) return { error: bad };
   const n = parseInt(s, 10);
   if (n < 1 || n > DIALOG_MAX_CONNECTIONS) return { error: bad };

@@ -2,7 +2,8 @@
 
 // The rules for spotting video, and for checking what the download dialog
 // sends back, live in their own files so they can be tested without a browser.
-importScripts("sniff.js", "handoff.js");
+// i18n.js comes first because handoff.js speaks through it.
+importScripts("sniff.js", "i18n.js", "handoff.js");
 
 const HOST_NAME = "com.godm.host";
 
@@ -52,7 +53,7 @@ function callHost(message, timeoutMs) {
         if (chrome.runtime.lastError) {
           done({ ok: false, error: chrome.runtime.lastError.message });
         } else if (!resp) {
-          done({ ok: false, error: "native host returned nothing" });
+          done({ ok: false, error: tr("err_host_nothing") });
         } else {
           done(resp);
         }
@@ -62,7 +63,7 @@ function callHost(message, timeoutMs) {
     }
     // The host is a thin client to the daemon and answers immediately; if it
     // does not, something is wrong and we want to fail over, not hang.
-    setTimeout(() => done({ ok: false, error: "native host timed out" }), timeoutMs || 15000);
+    setTimeout(() => done({ ok: false, error: tr("err_host_timeout") }), timeoutMs || 15000);
   });
 }
 
@@ -90,7 +91,7 @@ async function setHostState(ok, error) {
   // answer came through this function.
   paintBadge();
   chrome.action.setTitle({
-    title: ok ? "godm" : "godm - native host unreachable, downloads left to the browser"
+    title: ok ? "godm" : tr("action_title_down")
   });
   return st;
 }
@@ -277,9 +278,8 @@ async function handleDownload(item) {
     await setHostState(false, health.error);
     await notifyThrottled(
       "host-down",
-      "godm is not connected",
-      (health.error || "native host unreachable") +
-        "\nDownloads are being left to Chrome until this is fixed."
+      tr("notify_host_down_title"),
+      tr("notify_host_down_body", health.error || tr("err_host_unreachable"))
     );
     console.error("godm: host unreachable, not intercepting -", health.error);
     return; // the browser download continues untouched
@@ -364,19 +364,15 @@ async function handOff(held, job) {
   console.error("godm: handoff failed -", resp.error);
   await notifyThrottled(
     "handoff-failed",
-    "godm could not take over",
-    (resp.error || "unknown error") + "\nHanded the download back to Chrome."
+    tr("notify_handoff_title"),
+    tr("notify_handoff_body", resp.error || tr("err_unknown"))
   );
   try {
     await chrome.downloads.download({ url: url });
   } catch (e) {
-    await notifyThrottled(
-      "lost",
-      "Download lost",
-      "godm failed and Chrome refused the retry.\n" + url
-    );
+    await notifyThrottled("lost", tr("notify_lost_title"), tr("notify_lost_body", url));
   }
-  return { ok: false, handedBack: true, error: resp.error || "unknown error" };
+  return { ok: false, handedBack: true, error: resp.error || tr("err_unknown") };
 }
 
 // ---------- download confirmation dialog ----------
@@ -478,14 +474,14 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
 async function confirmStart(msg) {
   const key = msg && msg.key;
   if (typeof key !== "string" || !key.startsWith("confirm:")) {
-    return { ok: false, error: "Unknown download request." };
+    return { ok: false, error: tr("err_unknown_request") };
   }
-  if (startingNow.has(key)) return { ok: false, error: "Already starting." };
+  if (startingNow.has(key)) return { ok: false, error: tr("err_already_starting") };
   startingNow.add(key);
   try {
     const held = (await chrome.storage.session.get(key))[key];
     if (!held) {
-      return { ok: false, expired: true, error: "This download request has expired. Start it again from the page." };
+      return { ok: false, expired: true, error: tr("err_request_expired") };
     }
     const built = buildJob(held, msg);
     if (built.error) return { ok: false, error: built.error };
@@ -516,28 +512,38 @@ async function browseFolder(current) {
 
 // ---------- right-click entry point ----------
 
-chrome.runtime.onInstalled.addListener(() => {
+// The titles are stored with the menu, in the browser's language at the time.
+// Making them again at every start keeps them right after the browser's
+// language is changed, which no install or update would announce.
+function buildMenus() {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "godm-link",
-      title: "Download with godm",
+      title: tr("menu_link"),
       contexts: ["link", "video", "audio", "image"]
     });
     chrome.contextMenus.create({
       id: "godm-page-links",
-      title: "Download links on this page with godm…",
+      title: tr("menu_page_links"),
       contexts: ["page"]
     });
     chrome.contextMenus.create({
       id: "godm-selection-links",
-      title: "Download selected links with godm…",
+      title: tr("menu_selection_links"),
       contexts: ["selection"]
     });
   });
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  buildMenus();
   selfTest();
 });
 
-chrome.runtime.onStartup.addListener(selfTest);
+chrome.runtime.onStartup.addListener(() => {
+  buildMenus();
+  selfTest();
+});
 
 // selfTest pings the host as soon as the worker wakes, so a broken
 // registration shows up on the options page rather than the first time a real
@@ -580,8 +586,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     chrome.notifications.create({
       type: "basic",
       iconUrl: "icons/128.png",
-      title: "godm error",
-      message: resp.error || "unknown error"
+      title: tr("notify_error_title"),
+      message: resp.error || tr("err_unknown")
     });
   }
 });
@@ -626,7 +632,7 @@ function collectLinksInPage(selectionOnly) {
 }
 
 async function pickLinksFromTab(tab, selectionOnly) {
-  if (!tab || tab.id === undefined) return { ok: false, error: "no active tab" };
+  if (!tab || tab.id === undefined) return { ok: false, error: tr("err_no_active_tab") };
   let result;
   try {
     const [res] = await chrome.scripting.executeScript({
@@ -637,12 +643,12 @@ async function pickLinksFromTab(tab, selectionOnly) {
     result = res && res.result;
   } catch (e) {
     // chrome:// pages, the Web Store and PDFs refuse script injection.
-    const msg = "This page does not allow reading its links.";
+    const msg = tr("notify_page_blocked");
     chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
     return { ok: false, error: msg };
   }
   if (!result || !result.links.length) {
-    const msg = selectionOnly ? "No links in the selection." : "No links found on this page.";
+    const msg = tr(selectionOnly ? "notify_no_selection" : "notify_no_links");
     chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
     return { ok: false, error: msg };
   }
@@ -668,7 +674,7 @@ async function submitPicked(msg) {
     if (!/^https?:\/\//i.test(it.url || "")) continue;
     items.push({ url: it.url, filename: it.filename || "", cookie: await cookieHeader(it.url) });
   }
-  if (!items.length) return { ok: false, error: "nothing selected" };
+  if (!items.length) return { ok: false, error: tr("err_nothing_selected") };
   const resp = await callHost({
     type: "batch",
     items: items,

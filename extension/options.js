@@ -33,7 +33,7 @@ document.getElementById("save").addEventListener("click", () => {
   }
   chrome.storage.sync.set(out, () => {
     const s = document.getElementById("status");
-    s.textContent = "Saved";
+    s.textContent = tr("options_saved");
     setTimeout(() => (s.textContent = ""), 1600);
   });
 });
@@ -44,10 +44,10 @@ document.getElementById("cmd").textContent = "godm install --ext-id " + chrome.r
 chrome.runtime.sendMessage({ type: "ping" }, (resp) => {
   const el = document.getElementById("probe");
   if (resp && resp.ok) {
-    el.textContent = "native host and daemon are reachable";
+    el.textContent = tr("options_probe_ok");
     el.className = "good";
   } else {
-    el.textContent = (resp && resp.error) || "no response from the native host";
+    el.textContent = (resp && resp.error) || tr("options_probe_none");
     el.className = "bad";
   }
 });
@@ -58,13 +58,13 @@ chrome.storage.local.get({ lastPing: null }, (s) => {
   const el = document.getElementById("lastping");
   if (!el) return;
   if (!s.lastPing) {
-    el.textContent = "not run yet - reload the extension to trigger it";
+    el.textContent = tr("options_ping_never");
     return;
   }
   const when = new Date(s.lastPing.at).toLocaleString();
   el.textContent = s.lastPing.ok
-    ? "reachable, checked " + when
-    : s.lastPing.error + " (checked " + when + ")";
+    ? tr("options_ping_ok", when)
+    : tr("options_ping_bad", [s.lastPing.error, when]);
   el.className = s.lastPing.ok ? "good" : "bad";
 });
 

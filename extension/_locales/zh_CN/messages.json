@@ -1,0 +1,548 @@
+{
+  "ext_name": {
+    "message": "godm 下载接管"
+  },
+  "ext_description": {
+    "message": "把浏览器的下载交给 godm 下载管理器，支持多连接分段下载和断点续传。"
+  },
+  "menu_link": {
+    "message": "使用 godm 下载"
+  },
+  "menu_page_links": {
+    "message": "使用 godm 下载此页面的链接…"
+  },
+  "menu_selection_links": {
+    "message": "使用 godm 下载选中的链接…"
+  },
+  "action_title_down": {
+    "message": "godm - 无法连接原生主机，下载交由浏览器处理"
+  },
+  "err_unknown": {
+    "message": "未知错误"
+  },
+  "err_host_unreachable": {
+    "message": "无法连接原生主机"
+  },
+  "err_host_nothing": {
+    "message": "原生主机未返回任何内容"
+  },
+  "err_host_timeout": {
+    "message": "原生主机超时"
+  },
+  "err_no_response": {
+    "message": "godm 未响应。"
+  },
+  "err_no_answer": {
+    "message": "无响应"
+  },
+  "err_unknown_request": {
+    "message": "未知的下载请求。"
+  },
+  "err_already_starting": {
+    "message": "已在启动中。"
+  },
+  "err_request_expired": {
+    "message": "此下载请求已过期，请回到网页重新发起下载。"
+  },
+  "err_nothing_selected": {
+    "message": "未选择任何内容"
+  },
+  "err_no_active_tab": {
+    "message": "没有活动标签页"
+  },
+  "notify_host_down_title": {
+    "message": "godm 未连接"
+  },
+  "notify_host_down_body": {
+    "message": "$ERROR$\n在修复此问题之前，下载将交由 Chrome 处理。",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_handoff_title": {
+    "message": "godm 无法接管"
+  },
+  "notify_handoff_body": {
+    "message": "$ERROR$\n已将下载交还给 Chrome。",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_lost_title": {
+    "message": "下载丢失"
+  },
+  "notify_lost_body": {
+    "message": "godm 接管失败，Chrome 也拒绝了重试。\n$URL$",
+    "placeholders": {
+      "url": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_error_title": {
+    "message": "godm 错误"
+  },
+  "notify_page_blocked": {
+    "message": "此页面不允许读取其中的链接。"
+  },
+  "notify_no_selection": {
+    "message": "所选内容中没有链接。"
+  },
+  "notify_no_links": {
+    "message": "此页面上没有找到链接。"
+  },
+  "size_unknown": {
+    "message": "未知"
+  },
+  "size_exact": {
+    "message": "$SIZE$（$BYTES$ 字节）",
+    "placeholders": {
+      "size": {
+        "content": "$1"
+      },
+      "bytes": {
+        "content": "$2"
+      }
+    }
+  },
+  "val_name_empty": {
+    "message": "请输入文件名。"
+  },
+  "val_name_chars": {
+    "message": "文件名不能包含 \\ / : * ? \" < > |"
+  },
+  "val_name_dot": {
+    "message": "文件名不能以点结尾。"
+  },
+  "val_dir_control": {
+    "message": "文件夹路径包含无法使用的字符。"
+  },
+  "val_dir_chars": {
+    "message": "文件夹名不能包含 : * ? \" < > |"
+  },
+  "val_dir_full": {
+    "message": "请输入完整的文件夹路径，例如 C:\\Downloads。"
+  },
+  "val_conns": {
+    "message": "连接数必须是 1 到 $MAX$ 之间的整数。",
+    "placeholders": {
+      "max": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_takeover": {
+    "message": "接管"
+  },
+  "popup_manager": {
+    "message": "管理器"
+  },
+  "popup_settings": {
+    "message": "设置"
+  },
+  "popup_grab": {
+    "message": "下载此页面的链接…"
+  },
+  "popup_loading": {
+    "message": "加载中…"
+  },
+  "popup_empty": {
+    "message": "还没有下载任务。"
+  },
+  "popup_state_queued": {
+    "message": "排队中"
+  },
+  "popup_state_paused": {
+    "message": "已暂停"
+  },
+  "popup_state_done": {
+    "message": "已完成"
+  },
+  "popup_state_error": {
+    "message": "失败"
+  },
+  "popup_state_needs_refresh": {
+    "message": "链接已过期"
+  },
+  "popup_state_awaiting_refresh": {
+    "message": "等待新链接"
+  },
+  "popup_conns": {
+    "message": "$N$ 个连接",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_unreachable": {
+    "message": "无法连接 godm。"
+  },
+  "popup_no_response": {
+    "message": "无响应"
+  },
+  "popup_run_install": {
+    "message": "运行 <b>godm install --ext-id $ID$</b> 并重启浏览器。",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_dash": {
+    "message": "DASH — 暂不支持"
+  },
+  "popup_reading_playlist": {
+    "message": "正在读取播放列表…"
+  },
+  "popup_segments": {
+    "message": "$N$ 个分片",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_stream": {
+    "message": "流媒体"
+  },
+  "popup_playlist_error": {
+    "message": "无法读取播放列表"
+  },
+  "popup_ytdlp_missing": {
+    "message": "未安装 yt-dlp — winget install yt-dlp.yt-dlp"
+  },
+  "popup_ytdlp_ask": {
+    "message": "让 yt-dlp 分析此页面里有什么"
+  },
+  "popup_read_qualities": {
+    "message": "读取清晰度"
+  },
+  "popup_ready": {
+    "message": "就绪"
+  },
+  "popup_unavailable": {
+    "message": "不可用"
+  },
+  "popup_download": {
+    "message": "下载"
+  },
+  "popup_this_page": {
+    "message": "此页面"
+  },
+  "popup_video_on_page": {
+    "message": "此页面的视频（$N$）",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_btn_reading": {
+    "message": "读取中…"
+  },
+  "popup_btn_sending": {
+    "message": "发送中…"
+  },
+  "popup_btn_queued": {
+    "message": "已加入队列"
+  },
+  "popup_btn_failed": {
+    "message": "失败"
+  },
+  "options_title": {
+    "message": "godm 设置"
+  },
+  "options_sub": {
+    "message": "符合规则的下载会在浏览器中被取消，并交给 godm 后台服务处理。"
+  },
+  "options_ext_id": {
+    "message": "扩展 ID："
+  },
+  "options_register": {
+    "message": "注册一次原生主机，然后重启浏览器："
+  },
+  "options_connection": {
+    "message": "连接："
+  },
+  "options_checking": {
+    "message": "检查中…"
+  },
+  "options_selftest": {
+    "message": "启动自检："
+  },
+  "options_probe_ok": {
+    "message": "原生主机和后台服务可连接"
+  },
+  "options_probe_none": {
+    "message": "原生主机无响应"
+  },
+  "options_ping_never": {
+    "message": "尚未运行 - 重新加载扩展即可触发"
+  },
+  "options_ping_ok": {
+    "message": "可连接，检查于 $WHEN$",
+    "placeholders": {
+      "when": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_ping_bad": {
+    "message": "$ERROR$（检查于 $WHEN$）",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      },
+      "when": {
+        "content": "$2"
+      }
+    }
+  },
+  "options_interception": {
+    "message": "拦截"
+  },
+  "options_enabled": {
+    "message": "接管浏览器下载"
+  },
+  "options_take_all": {
+    "message": "接管所有下载，忽略文件类型列表"
+  },
+  "options_confirm": {
+    "message": "每次下载前先询问"
+  },
+  "options_confirm_hint": {
+    "message": "会弹出窗口，可修改文件名、保存文件夹和连接数，也可以取消；取消后不会下载。从页面中选取的链接会直接添加，不再询问。"
+  },
+  "options_types": {
+    "message": "文件类型"
+  },
+  "options_types_hint": {
+    "message": "逗号分隔的扩展名。开启“接管所有下载”时忽略。"
+  },
+  "options_blocklist": {
+    "message": "永不拦截这些主机"
+  },
+  "options_blocklist_hint": {
+    "message": "每行一个或逗号分隔。子域名也会匹配。"
+  },
+  "options_min_size": {
+    "message": "最小文件大小（字节）"
+  },
+  "options_min_size_hint": {
+    "message": "仅当浏览器在下载开始前已知大小时生效。"
+  },
+  "options_transfer": {
+    "message": "传输"
+  },
+  "options_conns": {
+    "message": "每个任务的连接数"
+  },
+  "options_conns_hint": {
+    "message": "仅当服务器返回 206 Partial Content 时才会分段下载。"
+  },
+  "options_save": {
+    "message": "保存"
+  },
+  "options_saved": {
+    "message": "已保存"
+  },
+  "picker_title": {
+    "message": "godm — 选择链接"
+  },
+  "picker_heading": {
+    "message": "此页面的链接"
+  },
+  "picker_filter_ph": {
+    "message": "按名称、文本或地址筛选"
+  },
+  "picker_select": {
+    "message": "选择："
+  },
+  "picker_sel_files": {
+    "message": "文件链接"
+  },
+  "picker_sel_files_tip": {
+    "message": "类型在 godm 文件类型列表中的链接"
+  },
+  "picker_sel_all": {
+    "message": "当前全部"
+  },
+  "picker_sel_none": {
+    "message": "不选"
+  },
+  "picker_toggle_tip": {
+    "message": "选择所有显示的链接"
+  },
+  "picker_th_file": {
+    "message": "文件"
+  },
+  "picker_th_type": {
+    "message": "类型"
+  },
+  "picker_none": {
+    "message": "（无）"
+  },
+  "picker_media": {
+    "message": "媒体"
+  },
+  "picker_empty": {
+    "message": "没有匹配的链接。"
+  },
+  "picker_conns": {
+    "message": "连接数"
+  },
+  "picker_cancel": {
+    "message": "取消"
+  },
+  "picker_download": {
+    "message": "下载"
+  },
+  "picker_download_many": {
+    "message": "下载 $N$ 个文件",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_count": {
+    "message": "已选择 $N$ / $TOTAL$ 个链接",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "picker_count_shown": {
+    "message": "已选择 $N$ / $TOTAL$ 个链接 · 显示 $SHOWN$ 个",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      },
+      "shown": {
+        "content": "$3"
+      }
+    }
+  },
+  "picker_sending": {
+    "message": "正在发送 $N$ 个链接到 godm…",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_added_one": {
+    "message": "已添加 $N$ 个任务到 godm。",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_added_other": {
+    "message": "已添加 $N$ 个任务到 godm。",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_expired": {
+    "message": "此链接列表已过期"
+  },
+  "picker_expired_sub": {
+    "message": "请从页面重新选择链接。"
+  },
+  "confirm_title": {
+    "message": "使用 godm 下载"
+  },
+  "confirm_name": {
+    "message": "文件名"
+  },
+  "confirm_size": {
+    "message": "大小"
+  },
+  "confirm_save_to": {
+    "message": "保存到"
+  },
+  "confirm_dir_ph": {
+    "message": "godm 的默认下载文件夹"
+  },
+  "confirm_browse": {
+    "message": "浏览…"
+  },
+  "confirm_conns": {
+    "message": "连接数"
+  },
+  "confirm_dont_ask": {
+    "message": "不再询问"
+  },
+  "confirm_dont_ask_tip": {
+    "message": "关闭此对话框。您可以在扩展设置中重新开启。"
+  },
+  "confirm_cancel": {
+    "message": "取消"
+  },
+  "confirm_close": {
+    "message": "关闭"
+  },
+  "confirm_start": {
+    "message": "开始"
+  },
+  "confirm_sending": {
+    "message": "正在发送到 godm…"
+  },
+  "confirm_handed_back": {
+    "message": "$ERROR$ - 已交还给 Chrome。",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_handed_back_default": {
+    "message": "godm 无法接管该下载"
+  },
+  "confirm_no_answer": {
+    "message": "godm 没有响应，请再点一次“开始”。"
+  },
+  "confirm_choose_folder": {
+    "message": "请在桌面上打开的窗口中选择文件夹…"
+  },
+  "confirm_browse_fail": {
+    "message": "无法打开文件夹选择器：$ERROR$",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_config_fail": {
+    "message": "无法读取 godm 的设置（$ERROR$）。开始下载时可能失败，并将下载交还给 Chrome。",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_sorted": {
+    "message": "$DIR$（按类型分文件夹）",
+    "placeholders": {
+      "dir": {
+        "content": "$1"
+      }
+    }
+  }
+}

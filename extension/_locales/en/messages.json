@@ -1,0 +1,548 @@
+{
+  "ext_name": {
+    "message": "godm takeover"
+  },
+  "ext_description": {
+    "message": "Hands browser downloads to the godm download manager for segmented, resumable transfers."
+  },
+  "menu_link": {
+    "message": "Download with godm"
+  },
+  "menu_page_links": {
+    "message": "Download links on this page with godm…"
+  },
+  "menu_selection_links": {
+    "message": "Download selected links with godm…"
+  },
+  "action_title_down": {
+    "message": "godm - native host unreachable, downloads left to the browser"
+  },
+  "err_unknown": {
+    "message": "unknown error"
+  },
+  "err_host_unreachable": {
+    "message": "native host unreachable"
+  },
+  "err_host_nothing": {
+    "message": "native host returned nothing"
+  },
+  "err_host_timeout": {
+    "message": "native host timed out"
+  },
+  "err_no_response": {
+    "message": "godm did not respond."
+  },
+  "err_no_answer": {
+    "message": "no answer"
+  },
+  "err_unknown_request": {
+    "message": "Unknown download request."
+  },
+  "err_already_starting": {
+    "message": "Already starting."
+  },
+  "err_request_expired": {
+    "message": "This download request has expired. Start it again from the page."
+  },
+  "err_nothing_selected": {
+    "message": "nothing selected"
+  },
+  "err_no_active_tab": {
+    "message": "no active tab"
+  },
+  "notify_host_down_title": {
+    "message": "godm is not connected"
+  },
+  "notify_host_down_body": {
+    "message": "$ERROR$\nDownloads are being left to Chrome until this is fixed.",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_handoff_title": {
+    "message": "godm could not take over"
+  },
+  "notify_handoff_body": {
+    "message": "$ERROR$\nHanded the download back to Chrome.",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_lost_title": {
+    "message": "Download lost"
+  },
+  "notify_lost_body": {
+    "message": "godm failed and Chrome refused the retry.\n$URL$",
+    "placeholders": {
+      "url": {
+        "content": "$1"
+      }
+    }
+  },
+  "notify_error_title": {
+    "message": "godm error"
+  },
+  "notify_page_blocked": {
+    "message": "This page does not allow reading its links."
+  },
+  "notify_no_selection": {
+    "message": "No links in the selection."
+  },
+  "notify_no_links": {
+    "message": "No links found on this page."
+  },
+  "size_unknown": {
+    "message": "Unknown"
+  },
+  "size_exact": {
+    "message": "$SIZE$ ($BYTES$ bytes)",
+    "placeholders": {
+      "size": {
+        "content": "$1"
+      },
+      "bytes": {
+        "content": "$2"
+      }
+    }
+  },
+  "val_name_empty": {
+    "message": "Enter a file name."
+  },
+  "val_name_chars": {
+    "message": "A file name cannot contain \\ / : * ? \" < > |"
+  },
+  "val_name_dot": {
+    "message": "A file name cannot end with a dot."
+  },
+  "val_dir_control": {
+    "message": "The folder path has characters that cannot be used."
+  },
+  "val_dir_chars": {
+    "message": "A folder name cannot contain : * ? \" < > |"
+  },
+  "val_dir_full": {
+    "message": "Enter the full folder path, such as C:\\Downloads."
+  },
+  "val_conns": {
+    "message": "Connections must be a whole number from 1 to $MAX$.",
+    "placeholders": {
+      "max": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_takeover": {
+    "message": "takeover"
+  },
+  "popup_manager": {
+    "message": "manager"
+  },
+  "popup_settings": {
+    "message": "settings"
+  },
+  "popup_grab": {
+    "message": "Download links on this page…"
+  },
+  "popup_loading": {
+    "message": "Loading…"
+  },
+  "popup_empty": {
+    "message": "No downloads yet."
+  },
+  "popup_state_queued": {
+    "message": "queued"
+  },
+  "popup_state_paused": {
+    "message": "paused"
+  },
+  "popup_state_done": {
+    "message": "done"
+  },
+  "popup_state_error": {
+    "message": "failed"
+  },
+  "popup_state_needs_refresh": {
+    "message": "link expired"
+  },
+  "popup_state_awaiting_refresh": {
+    "message": "waiting for link"
+  },
+  "popup_conns": {
+    "message": "$N$ conn",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_unreachable": {
+    "message": "Cannot reach godm."
+  },
+  "popup_no_response": {
+    "message": "no response"
+  },
+  "popup_run_install": {
+    "message": "Run <b>godm install --ext-id $ID$</b> and restart the browser.",
+    "placeholders": {
+      "id": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_dash": {
+    "message": "DASH — not supported yet"
+  },
+  "popup_reading_playlist": {
+    "message": "reading the playlist…"
+  },
+  "popup_segments": {
+    "message": "$N$ segments",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_stream": {
+    "message": "stream"
+  },
+  "popup_playlist_error": {
+    "message": "could not read the playlist"
+  },
+  "popup_ytdlp_missing": {
+    "message": "yt-dlp is not installed — winget install yt-dlp.yt-dlp"
+  },
+  "popup_ytdlp_ask": {
+    "message": "Ask yt-dlp what this page has"
+  },
+  "popup_read_qualities": {
+    "message": "Read qualities"
+  },
+  "popup_ready": {
+    "message": "ready"
+  },
+  "popup_unavailable": {
+    "message": "unavailable"
+  },
+  "popup_download": {
+    "message": "Download"
+  },
+  "popup_this_page": {
+    "message": "This page"
+  },
+  "popup_video_on_page": {
+    "message": "Video on this page ($N$)",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_btn_reading": {
+    "message": "reading…"
+  },
+  "popup_btn_sending": {
+    "message": "sending…"
+  },
+  "popup_btn_queued": {
+    "message": "queued"
+  },
+  "popup_btn_failed": {
+    "message": "failed"
+  },
+  "options_title": {
+    "message": "godm settings"
+  },
+  "options_sub": {
+    "message": "Downloads matching your rules are cancelled in the browser and handed to the godm daemon."
+  },
+  "options_ext_id": {
+    "message": "Extension ID:"
+  },
+  "options_register": {
+    "message": "Register the native host once, then restart the browser:"
+  },
+  "options_connection": {
+    "message": "Connection:"
+  },
+  "options_checking": {
+    "message": "checking…"
+  },
+  "options_selftest": {
+    "message": "Startup self-test:"
+  },
+  "options_probe_ok": {
+    "message": "native host and daemon are reachable"
+  },
+  "options_probe_none": {
+    "message": "no response from the native host"
+  },
+  "options_ping_never": {
+    "message": "not run yet - reload the extension to trigger it"
+  },
+  "options_ping_ok": {
+    "message": "reachable, checked $WHEN$",
+    "placeholders": {
+      "when": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_ping_bad": {
+    "message": "$ERROR$ (checked $WHEN$)",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      },
+      "when": {
+        "content": "$2"
+      }
+    }
+  },
+  "options_interception": {
+    "message": "Interception"
+  },
+  "options_enabled": {
+    "message": "Take over browser downloads"
+  },
+  "options_take_all": {
+    "message": "Take over everything, ignoring the file type list"
+  },
+  "options_confirm": {
+    "message": "Ask before starting each download"
+  },
+  "options_confirm_hint": {
+    "message": "Shows a window to change the file name, save folder and connections, or to cancel. Cancelling downloads nothing. Links picked from a page are added without asking."
+  },
+  "options_types": {
+    "message": "File types"
+  },
+  "options_types_hint": {
+    "message": "Comma separated extensions. Ignored when \"take over everything\" is on."
+  },
+  "options_blocklist": {
+    "message": "Never intercept these hosts"
+  },
+  "options_blocklist_hint": {
+    "message": "One per line or comma separated. Subdomains are matched too."
+  },
+  "options_min_size": {
+    "message": "Minimum size (bytes)"
+  },
+  "options_min_size_hint": {
+    "message": "Only applied when the browser already knows the size before the download starts."
+  },
+  "options_transfer": {
+    "message": "Transfer"
+  },
+  "options_conns": {
+    "message": "Connections per download"
+  },
+  "options_conns_hint": {
+    "message": "Segments are only used when the server answers with 206 Partial Content."
+  },
+  "options_save": {
+    "message": "Save"
+  },
+  "options_saved": {
+    "message": "Saved"
+  },
+  "picker_title": {
+    "message": "godm — pick links"
+  },
+  "picker_heading": {
+    "message": "Links on this page"
+  },
+  "picker_filter_ph": {
+    "message": "Filter by name, text or address"
+  },
+  "picker_select": {
+    "message": "Select:"
+  },
+  "picker_sel_files": {
+    "message": "files"
+  },
+  "picker_sel_files_tip": {
+    "message": "Links whose type is in your godm file type list"
+  },
+  "picker_sel_all": {
+    "message": "all shown"
+  },
+  "picker_sel_none": {
+    "message": "none"
+  },
+  "picker_toggle_tip": {
+    "message": "Select every shown link"
+  },
+  "picker_th_file": {
+    "message": "File"
+  },
+  "picker_th_type": {
+    "message": "Type"
+  },
+  "picker_none": {
+    "message": "(none)"
+  },
+  "picker_media": {
+    "message": "media"
+  },
+  "picker_empty": {
+    "message": "No links match."
+  },
+  "picker_conns": {
+    "message": "Connections"
+  },
+  "picker_cancel": {
+    "message": "Cancel"
+  },
+  "picker_download": {
+    "message": "Download"
+  },
+  "picker_download_many": {
+    "message": "Download $N$ files",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_count": {
+    "message": "$N$ of $TOTAL$ links selected",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      }
+    }
+  },
+  "picker_count_shown": {
+    "message": "$N$ of $TOTAL$ links selected · $SHOWN$ shown",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      },
+      "total": {
+        "content": "$2"
+      },
+      "shown": {
+        "content": "$3"
+      }
+    }
+  },
+  "picker_sending": {
+    "message": "Sending $N$ links to godm…",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_added_one": {
+    "message": "Added $N$ download to godm.",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_added_other": {
+    "message": "Added $N$ downloads to godm.",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_expired": {
+    "message": "This link list has expired"
+  },
+  "picker_expired_sub": {
+    "message": "Pick the links again from the page."
+  },
+  "confirm_title": {
+    "message": "Download with godm"
+  },
+  "confirm_name": {
+    "message": "File name"
+  },
+  "confirm_size": {
+    "message": "Size"
+  },
+  "confirm_save_to": {
+    "message": "Save to"
+  },
+  "confirm_dir_ph": {
+    "message": "godm's default download folder"
+  },
+  "confirm_browse": {
+    "message": "Browse…"
+  },
+  "confirm_conns": {
+    "message": "Connections"
+  },
+  "confirm_dont_ask": {
+    "message": "Don't ask again"
+  },
+  "confirm_dont_ask_tip": {
+    "message": "Turns this dialog off. You can turn it back on in the extension's settings."
+  },
+  "confirm_cancel": {
+    "message": "Cancel"
+  },
+  "confirm_close": {
+    "message": "Close"
+  },
+  "confirm_start": {
+    "message": "Start"
+  },
+  "confirm_sending": {
+    "message": "Sending to godm…"
+  },
+  "confirm_handed_back": {
+    "message": "$ERROR$ - it was handed back to Chrome.",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_handed_back_default": {
+    "message": "godm could not take the download"
+  },
+  "confirm_no_answer": {
+    "message": "godm did not respond. Try Start again."
+  },
+  "confirm_choose_folder": {
+    "message": "Choose a folder in the window that opened on your desktop…"
+  },
+  "confirm_browse_fail": {
+    "message": "Could not open the folder chooser: $ERROR$",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_config_fail": {
+    "message": "Could not read godm's settings ($ERROR$). Starting may fail and hand the download back to Chrome.",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
+  "confirm_sorted": {
+    "message": "$DIR$ (sorted by type)",
+    "placeholders": {
+      "dir": {
+        "content": "$1"
+      }
+    }
+  }
+}

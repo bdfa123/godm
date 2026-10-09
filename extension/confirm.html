@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Download with godm</title>
+<title data-i18n="confirm_title"></title>
 <style>
   :root {
     color-scheme: light dark;
@@ -48,40 +48,41 @@
 <body>
 <form id="form" novalidate autocomplete="off">
   <header>
-    <h1>Download with godm</h1>
+    <h1 data-i18n="confirm_title"></h1>
     <div class="url" id="url"></div>
   </header>
   <main>
     <div class="row">
-      <label for="name">File name</label>
+      <label for="name" data-i18n="confirm_name"></label>
       <input type="text" id="name" spellcheck="false">
     </div>
     <div class="row">
-      <span class="lbl">Size</span>
+      <span class="lbl" data-i18n="confirm_size"></span>
       <span id="size"></span>
     </div>
     <div class="row">
-      <label for="dir">Save to</label>
+      <label for="dir" data-i18n="confirm_save_to"></label>
       <div class="with-btn">
-        <input type="text" id="dir" spellcheck="false" placeholder="godm's default download folder">
-        <button type="button" class="btn" id="browse">Browse…</button>
+        <input type="text" id="dir" spellcheck="false" data-i18n-ph="confirm_dir_ph">
+        <button type="button" class="btn" id="browse" data-i18n="confirm_browse"></button>
       </div>
     </div>
     <div class="row">
-      <label for="conns">Connections</label>
+      <label for="conns" data-i18n="confirm_conns"></label>
       <input type="number" id="conns" min="1" max="32" step="1">
     </div>
     <div id="status" role="status"></div>
   </main>
   <footer>
-    <label class="chk" title="Turns this dialog off. You can turn it back on in the extension's settings.">
-      <input type="checkbox" id="dontAsk"> Don't ask again
+    <label class="chk" data-i18n-title="confirm_dont_ask_tip">
+      <input type="checkbox" id="dontAsk"> <span data-i18n="confirm_dont_ask"></span>
     </label>
     <span class="grow"></span>
-    <button type="button" class="btn" id="cancel">Cancel</button>
-    <button type="submit" class="btn primary" id="start">Start</button>
+    <button type="button" class="btn" id="cancel" data-i18n="confirm_cancel"></button>
+    <button type="submit" class="btn primary" id="start" data-i18n="confirm_start"></button>
   </footer>
 </form>
+<script src="i18n.js"></script>
 <script src="handoff.js"></script>
 <script src="confirm.js"></script>
 </body>

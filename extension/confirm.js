@@ -62,8 +62,8 @@ async function closeSelf() {
 
 function showExpired() {
   expired = true;
-  note = "This download request has expired. Start it again from the page.";
-  ui.cancel.textContent = "Close";
+  note = tr("err_request_expired");
+  ui.cancel.textContent = tr("confirm_close");
   render();
 }
 
@@ -79,7 +79,7 @@ ui.form.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (busy || browsing || expired || firstProblem(formValues())) return;
   busy = true;
-  note = "Sending to godm…";
+  note = tr("confirm_sending");
   render();
 
   const resp = await send(
@@ -98,7 +98,7 @@ ui.form.addEventListener("submit", async (e) => {
   if (resp && resp.handedBack) {
     // godm refused the job and the worker has already given the download back
     // to Chrome and sent a notification. Nothing is left to do here.
-    note = (resp.error || "godm could not take the download") + " - it was handed back to Chrome.";
+    note = tr("confirm_handed_back", resp.error || tr("confirm_handed_back_default"));
     render();
     setTimeout(closeSelf, 4000);
     return;
@@ -107,7 +107,7 @@ ui.form.addEventListener("submit", async (e) => {
   // all. Starting again is safe in both cases: it was not consumed, or it
   // reports that it has expired.
   busy = false;
-  note = (resp && resp.error) || "godm did not respond. Try Start again.";
+  note = (resp && resp.error) || tr("confirm_no_answer");
   render();
 });
 
@@ -124,7 +124,7 @@ ui.dir.addEventListener("input", () => {
 ui.browse.addEventListener("click", async () => {
   if (busy || browsing) return;
   browsing = true;
-  note = "Choose a folder in the window that opened on your desktop…";
+  note = tr("confirm_choose_folder");
   render();
   const resp = await send({ type: "godm-browse", current: ui.dir.value.trim() || defaultDir });
   browsing = false;
@@ -136,7 +136,7 @@ ui.browse.addEventListener("click", async () => {
     }
     note = "";
   } else {
-    note = "Could not open the folder chooser: " + ((resp && resp.error) || "godm did not respond.");
+    note = tr("confirm_browse_fail", (resp && resp.error) || tr("err_no_response"));
   }
   render();
 });
@@ -145,7 +145,7 @@ async function loadConfig() {
   const resp = await send({ type: "godm-config" });
   const cfg = resp && resp.ok && resp.config;
   if (!cfg) {
-    note = "Could not read godm's settings (" + ((resp && resp.error) || "no answer") + "). Starting may fail and hand the download back to Chrome.";
+    note = tr("confirm_config_fail", (resp && resp.error) || tr("err_no_answer"));
     render();
     return;
   }
@@ -153,7 +153,7 @@ async function loadConfig() {
   // decide, sorting included.
   defaultDir = cfg.out_dir || "";
   if (defaultDir) {
-    ui.dir.placeholder = cfg.sort_by_type ? defaultDir + " (sorted by type)" : defaultDir;
+    ui.dir.placeholder = cfg.sort_by_type ? tr("confirm_sorted", defaultDir) : defaultDir;
   }
   if (cfg.can_browse_folders === false) ui.browse.hidden = true;
   render();

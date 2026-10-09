@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "godm takeover",
+  "name": "__MSG_ext_name__",
   "version": "0.2.0",
-  "description": "Hands browser downloads to the godm download manager for segmented, resumable transfers.",
+  "description": "__MSG_ext_description__",
+  "default_locale": "en",
   "permissions": [
     "downloads",
     "cookies",

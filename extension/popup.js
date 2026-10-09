@@ -18,18 +18,19 @@ function esc(s) {
 function render(tasks) {
   const body = document.getElementById("body");
   if (!tasks.length) {
-    body.innerHTML = '<div class="msg">No downloads yet.</div>';
+    body.innerHTML = '<div class="msg">' + esc(tr("popup_empty")) + "</div>";
     return;
   }
   body.innerHTML = tasks.slice(0, 8).map((t) => {
     const pct = t.size > 0 ? Math.min(100, (t.received / t.size) * 100)
       : (t.state === "done" ? 100 : 0);
     const cls = t.state === "done" ? "done" : (t.state === "error" ? "error" : "");
-    const labels = { queued: "queued", paused: "paused", done: "done", error: "failed",
-      needs_refresh: "link expired", awaiting_refresh: "waiting for link" };
+    const labels = { queued: "popup_state_queued", paused: "popup_state_paused", done: "popup_state_done",
+      error: "popup_state_error", needs_refresh: "popup_state_needs_refresh",
+      awaiting_refresh: "popup_state_awaiting_refresh" };
     const right = t.state === "running"
-      ? human(t.speed) + "/s" + (t.segments && t.segments.length > 1 ? " · " + t.active + " conn" : "")
-      : (labels[t.state] || t.state);
+      ? human(t.speed) + "/s" + (t.segments && t.segments.length > 1 ? " · " + tr("popup_conns", t.active) : "")
+      : (labels[t.state] ? tr(labels[t.state]) : t.state);
     return '<div class="task">'
       + '<div class="row"><span class="name">' + esc(t.filename || t.url) + '</span>'
       + '<span class="meta">' + esc(right) + '</span></div>'
@@ -41,11 +42,10 @@ function render(tasks) {
 function refresh() {
   chrome.runtime.sendMessage({ type: "tasks" }, (resp) => {
     if (!resp || !resp.ok) {
-      const err = (resp && resp.error) || "no response";
+      const err = (resp && resp.error) || tr("popup_no_response");
       document.getElementById("body").innerHTML =
-        '<div class="msg bad">Cannot reach godm.<br><small>' + esc(err) + "</small><br><br>"
-        + "<small>Run <b>godm install --ext-id " + esc(chrome.runtime.id)
-        + "</b> and restart the browser.</small></div>";
+        '<div class="msg bad">' + esc(tr("popup_unreachable")) + "<br><small>" + esc(err) + "</small><br><br>"
+        + "<small>" + tr("popup_run_install", esc(chrome.runtime.id)) + "</small></div>";
       return;
     }
     uiURL = resp.ui || "";
@@ -112,13 +112,13 @@ function mediaTitle(m) {
 }
 
 function mediaDetail(m) {
-  if (m.kind === "dash") return "DASH — not supported yet";
+  if (m.kind === "dash") return tr("popup_dash");
   if (m.kind === "file") return [human(m.size), m.type].filter(Boolean).join(" · ");
   const info = infoByUrl.get(m.url);
-  if (!info) return "reading the playlist…";
+  if (!info) return tr("popup_reading_playlist");
   if (info.error) return info.error;
-  return [fmtDuration(info.duration), info.segments ? info.segments + " segments" : ""]
-    .filter(Boolean).join(" · ") || "stream";
+  return [fmtDuration(info.duration), info.segments ? tr("popup_segments", info.segments) : ""]
+    .filter(Boolean).join(" · ") || tr("popup_stream");
 }
 
 // The page itself is worth offering when a site hands its video out through a
@@ -141,18 +141,18 @@ function pageRow() {
   const item = pageItem();
   const info = infoByUrl.get(item.url);
   const missing = daemonCfg.ytdlp === false;
-  let detail, picker = "", label = "Read qualities";
+  let detail, picker = "", label = tr("popup_read_qualities");
   if (missing) {
-    detail = "yt-dlp is not installed — winget install yt-dlp.yt-dlp";
-    label = "unavailable";
+    detail = tr("popup_ytdlp_missing");
+    label = tr("popup_unavailable");
   } else if (!info) {
-    detail = "Ask yt-dlp what this page has";
+    detail = tr("popup_ytdlp_ask");
   } else if (info.error) {
     detail = info.error;
-    label = "unavailable";
+    label = tr("popup_unavailable");
   } else {
-    detail = [info.title || "", fmtDuration(info.duration)].filter(Boolean).join(" · ") || "ready";
-    label = "Download";
+    detail = [info.title || "", fmtDuration(info.duration)].filter(Boolean).join(" · ") || tr("popup_ready");
+    label = tr("popup_download");
     if (info.variants && info.variants.length > 1) {
       const chosen = chosenByUrl.has(item.url) ? chosenByUrl.get(item.url) : info.best;
       picker = '<select data-pick="page">' + info.variants.map((v) =>
@@ -161,7 +161,7 @@ function pageRow() {
     }
   }
   const blocked = missing || (info && info.error);
-  return '<div class="sec">This page</div><div class="media">'
+  return '<div class="sec">' + esc(tr("popup_this_page")) + '</div><div class="media">'
     + '<div class="row"><span class="chip">YT-DLP</span>'
     + '<span class="name">' + esc(mediaState.title || mediaState.page) + "</span></div>"
     + '<div class="meta">' + esc(detail) + "</div>"
@@ -173,7 +173,7 @@ function pageRow() {
 function renderMedia() {
   const el = document.getElementById("media");
   const found = mediaState.items.length
-    ? '<div class="sec">Video on this page (' + mediaState.items.length + ")</div>" +
+    ? '<div class="sec">' + esc(tr("popup_video_on_page", mediaState.items.length)) + "</div>" +
       mediaState.items.map((m, i) => {
       const info = infoByUrl.get(m.url);
       const blocked = m.kind === "dash" || (info && info.error);
@@ -191,7 +191,7 @@ function renderMedia() {
         + '<div class="meta">' + esc(mediaDetail(m)) + "</div>"
         + '<div class="foot">' + picker
         + '<button class="go" data-get="' + i + '"' + (blocked ? " disabled" : "") + ">"
-        + (blocked ? "unavailable" : "Download") + "</button></div>"
+        + esc(blocked ? tr("popup_unavailable") : tr("popup_download")) + "</button></div>"
         + "</div>";
     }).join("")
     : "";
@@ -227,7 +227,7 @@ function inspect(m, done) {
     (resp) => {
       infoByUrl.set(m.url, resp && resp.ok && resp.info
         ? resp.info
-        : { error: (resp && resp.error) || "could not read the playlist" });
+        : { error: (resp && resp.error) || tr("popup_playlist_error") });
       renderMedia();
       if (done) done();
     });
@@ -248,7 +248,7 @@ document.getElementById("media").addEventListener("click", (e) => {
   // so it happens on the first click rather than every time the popup opens.
   if (m.kind === "yt-dlp" && !infoByUrl.has(m.url)) {
     e.target.disabled = true;
-    e.target.textContent = "reading…";
+    e.target.textContent = tr("popup_btn_reading");
     inspect(m);
     return;
   }
@@ -259,7 +259,7 @@ document.getElementById("media").addEventListener("click", (e) => {
     : (info && typeof info.best === "number" ? info.best : -1);
 
   e.target.disabled = true;
-  e.target.textContent = "sending…";
+  e.target.textContent = tr("popup_btn_sending");
   chrome.runtime.sendMessage({
     type: "godm-media-download",
     url: m.url,
@@ -272,7 +272,7 @@ document.getElementById("media").addEventListener("click", (e) => {
     filename: m.kind === "hls" ? (m.title || mediaState.title || "") : "",
     page: mediaState.page
   }, (resp) => {
-    e.target.textContent = resp && resp.ok ? "queued" : "failed";
+    e.target.textContent = tr(resp && resp.ok ? "popup_btn_queued" : "popup_btn_failed");
     if (resp && !resp.ok) e.target.title = resp.error || "";
     refresh();
   });
