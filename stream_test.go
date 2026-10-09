@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -279,5 +280,72 @@ func TestPlayOpensTheFileOrTheStream(t *testing.T) {
 	}
 	if want := "http://127.0.0.1:16801/stream/" + running + "/film.mkv?token=tok"; opened[1] != want {
 		t.Errorf("stream link %q, want %q", opened[1], want)
+	}
+}
+
+// Play must not open a player on a stream that can only refuse it. A stream
+// playlist or a yt-dlp job that has not started looks like any other
+// download, and one whose link expired has nothing more coming until the link
+// is refreshed.
+func TestPlayRefusesWhatCannotBeStreamed(t *testing.T) {
+	var mu sync.Mutex
+	var opened []string
+	old := launchPlayer
+	launchPlayer = func(target, title string) error {
+		mu.Lock()
+		opened = append(opened, target)
+		mu.Unlock()
+		return nil
+	}
+	defer func() { launchPlayer = old }()
+
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	// Keep the downloads queued, so nothing here needs the network.
+	m.mu.Lock()
+	m.running = m.limit
+	m.mu.Unlock()
+	s := &server{mgr: m, token: "tok", port: 16801}
+	play := func(id string) map[string]any {
+		rec := httptest.NewRecorder()
+		s.handlePlay(rec, httptest.NewRequest(http.MethodPost, "/api/play?id="+id, nil))
+		var out map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	hls, _ := m.Add(jobRequest{URL: "https://example.invalid/show/index.m3u8"})
+	defer m.Pause(hls)
+	yt, _ := m.Add(jobRequest{URL: "https://example.invalid/watch?v=x", Kind: "yt-dlp"})
+	defer m.Pause(yt)
+	expired := &managedTask{
+		view: TaskView{
+			ID: "expired", URL: "https://example.invalid/film.mkv", Filename: "film.mkv",
+			Path: filepath.Join(dir, "film.mkv"), Size: 1 << 20, State: StateNeedsRefresh,
+		},
+		req:    jobRequest{URL: "https://example.invalid/film.mkv"},
+		outDir: dir,
+	}
+	m.mu.Lock()
+	m.tasks["expired"] = expired
+	m.order = append(m.order, "expired")
+	m.mu.Unlock()
+
+	for what, id := range map[string]string{"a queued stream playlist": hls, "a queued yt-dlp job": yt, "an expired link": "expired"} {
+		r := play(id)
+		if msg, _ := r["error"].(string); r["ok"] != false || msg == "" {
+			t.Errorf("play %s: %v", what, r)
+		}
+	}
+	if st := expired.snapshot().State; st != StateNeedsRefresh {
+		t.Errorf("playing an expired link left it %s", st)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(opened) > 0 {
+		t.Errorf("opened %q", opened)
 	}
 }

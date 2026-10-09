@@ -143,6 +143,19 @@ func (t *managedTask) available(off int64) int64 {
 	return 0
 }
 
+// playsWhileArriving reports whether a player can read the file before it
+// is finished. A stream playlist or a yt-dlp job only becomes one playable
+// file at the end. The request says which engine runs the job from the
+// start; the view only says once that engine has begun.
+func (t *managedTask) playsWhileArriving() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !isHLSJob(t.req) && !isYTDLPJob(t.req)
+}
+
+// errNotWhileArriving is why such a download cannot be played yet.
+var errNotWhileArriving = errors.New("this kind of download can only be played once it finishes")
+
 func (t *managedTask) stillArriving() bool {
 	switch t.snapshot().State {
 	case StateQueued, StateRunning:
@@ -160,8 +173,8 @@ func waitStreamable(ctx context.Context, mt *managedTask) (TaskView, error) {
 		switch {
 		case v.State == StateDone && v.Path != "":
 			return v, nil
-		case v.Kind != "":
-			return v, errors.New("this kind of download can only be played once it finishes")
+		case !mt.playsWhileArriving():
+			return v, errNotWhileArriving
 		case v.Path != "" && v.Size > 0:
 			return v, nil
 		case !mt.stillArriving():
@@ -373,11 +386,20 @@ func (s *server) handlePlay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 		return
 	}
-	if v.Kind != "" {
-		writeJSON(w, map[string]any{"ok": false, "error": "this kind of download can only be played once it finishes"})
+	if !mt.playsWhileArriving() {
+		writeJSON(w, map[string]any{"ok": false, "error": errNotWhileArriving.Error()})
 		return
 	}
-	if v.State == StatePaused || v.State == StateError {
+	// Nothing more arrives on an expired link, so a player opened now would
+	// only wait for bytes that cannot come.
+	switch v.State {
+	case StateNeedsRefresh:
+		writeJSON(w, map[string]any{"ok": false, "error": "the download link expired: refresh it so the download can continue, then play it"})
+		return
+	case StateAwaitingRefresh:
+		writeJSON(w, map[string]any{"ok": false, "error": "the download is waiting for a fresh link: play it once it continues"})
+		return
+	case StatePaused, StateError:
 		s.mgr.Resume(id)
 	}
 	link := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
