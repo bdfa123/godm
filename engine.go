@@ -1262,10 +1262,12 @@ func freshSegments(pr *ProbeResult, o Options) []*Segment {
 	return segs
 }
 
+// newClient makes the client for one download's requests to the outside
+// world. The daemon's own loopback clients do not come through here.
 func newClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
+			Proxy: downloadProxy(),
 			DialContext: (&net.Dialer{
 				Timeout:   15 * time.Second,
 				KeepAlive: 30 * time.Second,
