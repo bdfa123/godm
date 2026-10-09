@@ -24,12 +24,16 @@ let note = ""; // something worth saying that is not a mistake in the form
 let busy = false; // Start has been pressed and godm has not answered yet
 let browsing = false; // the folder chooser is open on the desktop
 let dirTouched = false; // the person has typed or picked a folder themselves
+let defaultDir = ""; // godm's own download folder, shown as the placeholder
 let expired = false;
 
+// The folder goes to godm only when the person chose one. Sending the default
+// as if it had been chosen would also switch off godm's sorting by type,
+// because an explicit folder always wins over it.
 function formValues() {
   return {
     filename: ui.name.value,
-    outDir: ui.dir.value,
+    outDir: dirTouched ? ui.dir.value : "",
     connections: ui.conns.value
   };
 }
@@ -122,7 +126,7 @@ ui.browse.addEventListener("click", async () => {
   browsing = true;
   note = "Choose a folder in the window that opened on your desktop…";
   render();
-  const resp = await send({ type: "godm-browse", current: ui.dir.value.trim() });
+  const resp = await send({ type: "godm-browse", current: ui.dir.value.trim() || defaultDir });
   browsing = false;
   if (resp && resp.ok) {
     // An empty path is the person closing the chooser; keep what was typed.
@@ -145,8 +149,12 @@ async function loadConfig() {
     render();
     return;
   }
-  // The person may already be typing a folder by the time this arrives.
-  if (!dirTouched && !ui.dir.value && cfg.out_dir) ui.dir.value = cfg.out_dir;
+  // The default is a placeholder, not a value, so leaving it alone lets godm
+  // decide, sorting included.
+  defaultDir = cfg.out_dir || "";
+  if (defaultDir) {
+    ui.dir.placeholder = cfg.sort_by_type ? defaultDir + " (sorted by type)" : defaultDir;
+  }
   if (cfg.can_browse_folders === false) ui.browse.hidden = true;
   render();
 }

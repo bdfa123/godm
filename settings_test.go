@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -169,5 +170,31 @@ func TestTaskListSaysWhatIsArmed(t *testing.T) {
 	arm(t, m, "sleep")
 	if got := read()["after_all"]; got != "sleep" {
 		t.Errorf("after_all = %v, want sleep", got)
+	}
+}
+
+// The extension's confirm dialog leaves the folder out unless the person picks
+// one, so it needs to know whether godm will sort the file to say where it goes.
+func TestConfigTellsTheExtensionAboutSorting(t *testing.T) {
+	m := NewManager(t.TempDir(), 2)
+	s := &server{mgr: m, token: "tok"}
+	read := func() map[string]any {
+		rec := httptest.NewRecorder()
+		s.handleConfig(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		var out map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	if got := read()["sort_by_type"]; got != false {
+		t.Fatalf("sort_by_type = %v before turning it on, want false", got)
+	}
+	on := true
+	if err := m.UpdateSettings(settingsUpdate{SortByType: &on}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read()["sort_by_type"]; got != true {
+		t.Fatalf("sort_by_type = %v after turning it on, want true", got)
 	}
 }

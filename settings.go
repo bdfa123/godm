@@ -52,6 +52,12 @@ func (m *Manager) KeepAwake() bool {
 	return m.settings.KeepAwake
 }
 
+func (m *Manager) SortByType() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.settings.SortByType
+}
+
 // UpdateSettings checks the whole request before applying any of it, so a bad
 // value cannot leave the others half changed.
 func (m *Manager) UpdateSettings(u settingsUpdate) error {

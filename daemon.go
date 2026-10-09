@@ -1512,6 +1512,7 @@ func (s *server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"ok":                 true,
 		"out_dir":            s.mgr.OutDir(),
+		"sort_by_type":       s.mgr.SortByType(),
 		"connections":        DefaultConnections,
 		"max_connections":    MaxConnections,
 		"limit":              s.mgr.Limit(),
