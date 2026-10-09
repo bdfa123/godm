@@ -467,13 +467,15 @@ function metaLine(t) {
       }
       bits.push("<b>" + human(t.speed) + "/s</b>");
       if (hasSize && t.speed > 0) bits.push(dur((t.size - t.received) / t.speed) + " left");
+      // The resume note is only about plain files: yt-dlp fetches on its own
+      // terms, and a stream always resumes by segment.
       if (t.resumable) bits.push("<b>" + t.active + "</b> of " + t.conns + " connections active");
+      else if (!t.kind && t.size !== -1) bits.push("single connection · server cannot resume");
       if (t.quality) bits.push(esc(t.quality));
       // A merged video arrives as two streams, so say which one is running or
       // the bar looks like it started over for no reason.
       if (t.stage === "video") bits.push("video track");
       else if (t.stage === "audio") bits.push("audio track");
-      else if (t.size !== -1) bits.push("single connection · server cannot resume");
       break;
     case "queued":
       var pos = queuePosition(t);
