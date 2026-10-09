@@ -51,7 +51,16 @@ const (
 	// forward: enough to ride out a slow peer, not so much that it starves the
 	// spot being watched.
 	torrentReadahead = 16 << 20
+	// btMetadataWait is how long a magnet link waits for some peer to send the
+	// torrent's file list. It holds a place in the queue all the while, so a
+	// link nobody answers must not hold it for good. Peers found through the
+	// DHT usually answer within a minute, if at all.
+	btMetadataWait = 5 * time.Minute
 )
+
+// errNoMetadata ends a run whose magnet link nobody answered. The link may
+// still be good, so the task stays in the list to be resumed later.
+var errNoMetadata = errors.New("no peers answered with this torrent's metadata; resume it to try again")
 
 // SeedPolicy says what a finished torrent does next. The default is to stop at
 // once: uploading to strangers is something the user should choose, not
@@ -221,6 +230,8 @@ type btEngine struct {
 	// configure adjusts the client before it starts. Tests use it to keep
 	// everything on 127.0.0.1 with no DHT and no trackers.
 	configure func(*torrent.ClientConfig)
+	// metadataWait replaces btMetadataWait when set, for tests.
+	metadataWait time.Duration
 
 	mu     sync.Mutex
 	cl     *torrent.Client
@@ -1257,6 +1268,12 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 	defer tick.Stop()
 	// A magnet link names the torrent but not its files: those come from the
 	// first peers that answer.
+	wait := m.bt.metadataWait
+	if wait <= 0 {
+		wait = btMetadataWait
+	}
+	giveUp := time.NewTimer(wait)
+	defer giveUp.Stop()
 	for tor.Info() == nil {
 		report("metadata")
 		select {
@@ -1267,6 +1284,8 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 			return "", stopped(ctx)
 		case <-ctx.Done():
 			return "", ctx.Err()
+		case <-giveUp.C:
+			return "", errNoMetadata
 		case <-tick.C:
 		}
 	}

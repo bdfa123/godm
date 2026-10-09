@@ -505,6 +505,62 @@ func TestMagnetFetchesMetadataThenDownloads(t *testing.T) {
 	}
 }
 
+func TestAMagnetNobodyAnswersGivesUpItsPlaceInTheQueue(t *testing.T) {
+	m := NewManager(t.TempDir(), 1)
+	m.announce = nil
+	m.bt.dir = t.TempDir()
+	m.bt.configure = btLoopback
+	m.bt.metadataWait = 2 * time.Second
+	t.Cleanup(m.shutdownBT)
+
+	// No peer is named and nothing else is reachable, so no metadata comes.
+	const ih = "0123456789abcdef0123456789abcdef01234567"
+	magnet, err := m.Add(jobRequest{URL: "magnet:?xt=urn:btih:" + ih + "&dn=nobody"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inMetadata := func() bool {
+		v, _ := findTask(m, magnet)
+		return v.State == StateRunning && v.Stage == "metadata"
+	}
+	waitFor(t, 10*time.Second, "the metadata stage", inMetadata)
+	data := makePayload(1000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "a.bin", time.Time{}, bytes.NewReader(data))
+	}))
+	t.Cleanup(srv.Close)
+	file, err := m.Add(jobRequest{URL: srv.URL + "/a.bin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One download at a time, so the file can only start once the magnet
+	// lets go of the slot.
+	waitFor(t, 10*time.Second, "the file queued behind the magnet", stateIs(m, file, StateDone))
+	v, _ := findTask(m, magnet)
+	if v.State != StateError || !strings.Contains(v.Error, "no peers answered") || v.Stage != "" {
+		t.Fatalf("the magnet gave up as state %s, stage %q, error %q", v.State, v.Stage, v.Error)
+	}
+	if m.bt.loadedFor(taskOf(m, magnet)) != nil {
+		t.Error("the magnet that gave up is still in the client")
+	}
+
+	// It can be tried again, and paused or removed while it waits.
+	if !m.Resume(magnet) {
+		t.Fatal("resume refused")
+	}
+	waitFor(t, 10*time.Second, "the metadata stage again", inMetadata)
+	m.Pause(magnet)
+	waitFor(t, 5*time.Second, "the pause", stateIs(m, magnet, StatePaused))
+	if v, _ := findTask(m, magnet); v.Stage != "" || v.Error != "" || m.bt.loadedFor(taskOf(m, magnet)) != nil {
+		t.Errorf("paused while waiting: stage %q, error %q, still loaded %v", v.Stage, v.Error, m.bt.loadedFor(taskOf(m, magnet)) != nil)
+	}
+	m.Resume(magnet)
+	waitFor(t, 10*time.Second, "the metadata stage once more", inMetadata)
+	mt := taskOf(m, magnet)
+	m.Remove(magnet, true)
+	waitFor(t, 5*time.Second, "the removed magnet to leave the client", func() bool { return m.bt.loadedFor(mt) == nil })
+}
+
 func TestTorrentResumesAfterARestartWithoutRefetching(t *testing.T) {
 	const pieceLen = 32 << 10
 	src := t.TempDir()
