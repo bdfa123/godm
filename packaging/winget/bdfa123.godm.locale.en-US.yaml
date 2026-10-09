@@ -1,0 +1,34 @@
+# Template: fill in the __PLACEHOLDERS__ as packaging/winget/README.md describes.
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: bdfa123.godm
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: bdfa123
+PublisherUrl: https://github.com/bdfa123
+PublisherSupportUrl: https://github.com/bdfa123/godm/issues
+Author: bdfa123
+PackageName: godm
+PackageUrl: https://github.com/bdfa123/godm
+License: MIT
+LicenseUrl: https://github.com/bdfa123/godm/blob/master/LICENSE
+Copyright: Copyright (c) 2026 bdfa123
+ShortDescription: Segmented, resumable download manager that takes over browser downloads
+Description: |-
+  godm splits each download over several connections, resumes it after a crash,
+  a reboot or a dropped connection, and takes over downloads from Chrome and
+  Edge through a browser extension. It also downloads HLS video and can play a
+  file in mpv or VLC while it is still arriving.
+
+  The browser extension is in the extension folder next to godm.exe. Load it
+  unpacked, then run "godm install --ext-id <id>" to connect the browser to godm.
+Moniker: godm
+Tags:
+- chrome-extension
+- download-manager
+- downloader
+- hls
+- resumable-downloads
+ReleaseNotesUrl: https://github.com/bdfa123/godm/releases/tag/v__VERSION__
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
