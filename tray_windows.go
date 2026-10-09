@@ -614,8 +614,14 @@ func (t *tray) serveBrowse() {
 }
 
 var browseCallback = syscall.NewCallback(func(hwnd, msg, lparam, data uintptr) uintptr {
-	if msg == bffmInitialized && data != 0 {
-		procSendMessage.Call(hwnd, bffmSetSelectionW, 1, data)
+	if msg == bffmInitialized {
+		// Opened from the daemon, in the background, the chooser would come up
+		// behind the browser. The native host has just allowed this process the
+		// foreground (see letDaemonTakeForeground); this is where it is used.
+		bringToFront(hwnd)
+		if data != 0 {
+			procSendMessage.Call(hwnd, bffmSetSelectionW, 1, data)
+		}
 	}
 	return 0
 })
@@ -629,10 +635,15 @@ func pickFolder(owner uintptr, current, title string) string {
 		Flags:       bifReturnOnlyFSDirs | bifNewDialogStyle | bifEditBox,
 		Callback:    browseCallback,
 	}
+	// The callback reads this when the chooser opens, through a uintptr that
+	// does not keep it alive.
+	var start *uint16
 	if current != "" {
-		bi.LParam = uintptr(unsafe.Pointer(utf16(current)))
+		start = utf16(current)
+		bi.LParam = uintptr(unsafe.Pointer(start))
 	}
 	pidl, _, _ := procSHBrowseFolder.Call(uintptr(unsafe.Pointer(&bi)))
+	runtime.KeepAlive(start)
 	if pidl == 0 {
 		return ""
 	}

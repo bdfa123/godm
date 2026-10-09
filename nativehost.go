@@ -143,6 +143,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	case "browse":
 		// The native folder chooser belongs to the daemon's tray thread, so the
 		// confirmation dialog asks for it through here.
+		letDaemonTakeForeground(c)
 		path, err := c.browse(req.Current)
 		if err != nil {
 			return nativeResponse{Error: err.Error()}
@@ -171,6 +172,34 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 
 	default:
 		return nativeResponse{Error: "unknown message type: " + req.Type}
+	}
+}
+
+// allowForeground is a variable so a test can see it called without changing
+// what is in front on the machine running the tests.
+var allowForeground = allowSetForegroundWindow
+
+// letDaemonTakeForeground lets the daemon bring its folder chooser in front of
+// the browser. Windows refuses that to a process that is not in front itself,
+// was not started by whatever is, and was not handed the right by it, and the
+// daemon is none of these: the chooser would open behind the browser or only
+// flash in the taskbar. This host is the browser's child, so it can hand the
+// right over. It is done for each chooser, right before asking for it,
+// because the right does not last.
+//
+// A failure is only logged. The chooser still opens, perhaps behind.
+func letDaemonTakeForeground(c *daemonClient) {
+	pid, err := c.pid()
+	if err != nil {
+		log.Printf("could not ask the daemon for its process id: %v; the folder chooser may open behind the browser", err)
+		return
+	}
+	if pid <= 0 {
+		log.Printf("the daemon did not say which process it is; the folder chooser may open behind the browser")
+		return
+	}
+	if err := allowForeground(pid); err != nil {
+		log.Printf("could not let the daemon (pid %d) take the foreground: %v", pid, err)
 	}
 }
 

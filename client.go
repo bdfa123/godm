@@ -69,6 +69,18 @@ func (c *daemonClient) ping() error {
 	return c.do(http.MethodGet, "/api/ping", nil, &struct{}{})
 }
 
+// pid asks the daemon which process it is, which the same ping that shows it
+// is alive also says.
+func (c *daemonClient) pid() (int, error) {
+	var out struct {
+		PID int `json:"pid"`
+	}
+	if err := c.do(http.MethodGet, "/api/ping", nil, &out); err != nil {
+		return 0, err
+	}
+	return out.PID, nil
+}
+
 func (c *daemonClient) submit(req jobRequest) (string, error) {
 	var out struct {
 		OK bool   `json:"ok"`

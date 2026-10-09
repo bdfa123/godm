@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -71,6 +74,99 @@ func TestNativeBrowseReportsTheDaemonsReason(t *testing.T) {
 	resp := forwardNative(c, nativeRequest{Type: "browse"})
 	if resp.OK || resp.Error != "a folder chooser is already open" {
 		t.Fatalf("got %+v", resp)
+	}
+}
+
+// watchForeground replaces the step that lets the daemon take the foreground
+// with one that records the process it was asked about.
+func watchForeground(t *testing.T, events *[]string, err error) {
+	t.Helper()
+	saved := allowForeground
+	allowForeground = func(pid int) error {
+		*events = append(*events, "allow "+strconv.Itoa(pid))
+		return err
+	}
+	t.Cleanup(func() { allowForeground = saved })
+}
+
+// Chrome is in front when the dialog's Browse button is pressed, and Windows
+// does not let the daemon put its chooser in front of it. The host, Chrome's
+// child, has to allow the daemon's process to do that, and has to do it
+// before the chooser is asked for, or the chooser is already open behind the
+// browser by the time the permission arrives.
+func TestNativeBrowseAllowsTheDaemonToTakeTheForegroundFirst(t *testing.T) {
+	var events []string
+	watchForeground(t, &events, nil)
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ping":
+			writeJSON(w, map[string]any{"ok": true, "version": "test", "pid": 4242})
+		case "/api/browse":
+			events = append(events, "browse")
+			writeJSON(w, map[string]any{"ok": true, "path": `E:\Movies`})
+		default:
+			t.Errorf("unexpected request to %s", r.URL.Path)
+		}
+	})
+
+	resp := forwardNative(c, nativeRequest{Type: "browse"})
+
+	if !resp.OK || resp.Path != `E:\Movies` {
+		t.Fatalf("got %+v", resp)
+	}
+	if want := []string{"allow 4242", "browse"}; !reflect.DeepEqual(events, want) {
+		t.Errorf("order of events = %v, want %v", events, want)
+	}
+}
+
+// The permission is only a nicety: if it cannot be given, or the daemon's pid
+// cannot be learned, the chooser still has to open.
+func TestNativeBrowseStillOpensTheChooserWhenForegroundCannotBeAllowed(t *testing.T) {
+	tests := []struct {
+		name       string
+		ping       map[string]any
+		allowErr   error
+		wantEvents []string
+	}{
+		{"the call is refused", map[string]any{"ok": true, "pid": 4242}, errors.New("access denied"), []string{"allow 4242", "browse"}},
+		{"the daemon says no pid", map[string]any{"ok": true}, nil, []string{"browse"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var events []string
+			watchForeground(t, &events, tt.allowErr)
+			c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/ping" {
+					writeJSON(w, tt.ping)
+					return
+				}
+				events = append(events, "browse")
+				writeJSON(w, map[string]any{"ok": true, "path": `E:\Movies`})
+			})
+			resp := forwardNative(c, nativeRequest{Type: "browse"})
+			if !resp.OK || resp.Path != `E:\Movies` || resp.Error != "" {
+				t.Fatalf("got %+v", resp)
+			}
+			if !reflect.DeepEqual(events, tt.wantEvents) {
+				t.Errorf("events = %v, want %v", events, tt.wantEvents)
+			}
+		})
+	}
+}
+
+// Only the folder chooser needs the foreground. A download or a ping from the
+// extension must not hand the daemon anything.
+func TestNativeRequestsOtherThanBrowseLeaveTheForegroundAlone(t *testing.T) {
+	var events []string
+	watchForeground(t, &events, nil)
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": true, "id": "t1", "pid": 4242, "tasks": []any{}})
+	})
+	for _, typ := range []string{"ping", "tasks", "download", "config", "inspect", "batch"} {
+		forwardNative(c, nativeRequest{Type: typ, URL: "https://example.test/a.zip"})
+	}
+	if len(events) != 0 {
+		t.Errorf("the foreground was allowed for a request that is not browse: %v", events)
 	}
 }
 
