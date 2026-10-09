@@ -12,3 +12,5 @@ HANDOFF.md
 # resources go-winres generates for the linker while it runs
 /dist/
 *.syso
+# made for each release by scripts/notices from the modules the build links
+/THIRD_PARTY_NOTICES.txt

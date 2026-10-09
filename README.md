@@ -224,4 +224,7 @@ progress and check that the connections gather where the player reads.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The libraries godm is built from are under their own licenses
+(MIT, BSD, ISC, Apache-2.0 and MPL-2.0); their notices, and where to get the
+source of the MPL-2.0 ones, are in `THIRD_PARTY_NOTICES.txt` in every release
+zip, next to `LICENSE`.

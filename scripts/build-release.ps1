@@ -7,7 +7,13 @@
   local run produces the same files a tagged release does. For each
   architecture it embeds the icon, the version info and an application
   manifest with go-winres, builds godm.exe, and packs godm-<version>-windows-<arch>.zip
-  with godm.exe, extension/, README.md and LICENSE at the top level.
+  with godm.exe, extension/, README.md, LICENSE and THIRD_PARTY_NOTICES.txt at
+  the top level.
+
+  THIRD_PARTY_NOTICES.txt is written by scripts/notices from the modules the
+  exe really links and their license files in the module cache. It stops the
+  release when it meets a license it does not know, because the licenses of
+  those modules require their notices to ship with the exe.
 
   The exe stays a console-subsystem binary on purpose: the native messaging
   host and the CLI need the console, and godm hides it itself when it is
@@ -173,6 +179,17 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "go-winres failed with exit code $LASTEXITCODE" }
     }
 
+    # Made once for all the architectures, outside the folders that get zipped.
+    # It runs on this machine, whatever GOOS and GOARCH the caller has set; the
+    # target is given as flags instead.
+    New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
+    $notices = Join-Path $stageRoot 'THIRD_PARTY_NOTICES.txt'
+    $env:GOOS = $null
+    $env:GOARCH = $null
+    $env:CGO_ENABLED = '0'
+    & go run ./scripts/notices -o $notices -goos windows -goarch ($Arch -join ',')
+    if ($LASTEXITCODE -ne 0) { throw "scripts/notices failed with exit code $LASTEXITCODE, so there are no third-party notices to ship" }
+
     $zips = @()
     foreach ($a in $Arch) {
         Write-Host ''
@@ -205,7 +222,7 @@ try {
             Write-Host "   godm.exe version -> $said"
         }
 
-        Copy-Item -LiteralPath 'README.md', 'LICENSE' -Destination $stage
+        Copy-Item -LiteralPath 'README.md', 'LICENSE', $notices -Destination $stage
         Copy-Item -LiteralPath 'extension' -Destination (Join-Path $stage 'extension') -Recurse
         # The unit tests and the icon generator are for developers, not for a
         # user loading the extension unpacked.
@@ -224,7 +241,7 @@ try {
         finally {
             $archive.Dispose()
         }
-        foreach ($needed in 'godm.exe', 'README.md', 'LICENSE', 'extension/manifest.json') {
+        foreach ($needed in 'godm.exe', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.txt', 'extension/manifest.json') {
             if ($names -notcontains $needed) { throw "$zip is missing $needed" }
         }
         if ($names | Where-Object { $_ -match '\\' }) { throw "$zip has backslashes in entry names" }
