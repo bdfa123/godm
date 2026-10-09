@@ -175,6 +175,13 @@ const uiHTML = `<!doctype html>
   .dialog .set { margin: 0 0 16px; }
   .dialog .set p { margin: 3px 0 0; font-size: 12.5px; }
   .dialog .set .check + p { margin-left: 26px; }
+  #setDlg .dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
+  .folders { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 10px 0 0 26px; }
+  .folders.off { opacity: .55; }
+  .folders label { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+  .folders label span { width: 68px; flex: none; }
+  .folders input { flex: 1; min-width: 0; }
+  @media (max-width: 520px) { .folders { grid-template-columns: 1fr; } }
 
   .toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30;
@@ -252,6 +259,11 @@ const uiHTML = `<!doctype html>
     <div class="set" id="afterRow">
       <label class="field">When all downloads finish <select id="setAfter"></select></label>
       <p>Happens once, then goes back to Do nothing, and is forgotten if godm restarts. Shut down waits 60 seconds first: press Win+R, type shutdown /a and press Enter to cancel.</p>
+    </div>
+    <div class="set">
+      <label class="check"><input type="checkbox" id="setSort"> Sort new downloads into folders by type</label>
+      <p>Inside <b id="setBase"></b>. A download that comes with a folder of its own, like one you chose in the browser, goes where you said. Types godm does not recognise stay in the main folder, and downloads already in the list stay where they are. Leave a name empty to keep that type in the main folder.</p>
+      <div class="folders" id="setFolders"></div>
     </div>
     <div class="foot">
       <button class="btn" data-close="setDlg">Cancel</button>
@@ -732,6 +744,15 @@ document.getElementById("addGo").addEventListener("click", function () {
 // put back by pressing Save.
 var AFTER_LABEL = { nothing: "Do nothing", sleep: "Sleep", shutdown: "Shut down" };
 var AFTER_DOES = { sleep: "put this PC to sleep", shutdown: "shut this PC down" };
+// The kinds match what the daemon sorts by; the names are only what to call them.
+var FOLDER_KINDS = [["video", "Video"], ["audio", "Music"], ["archive", "Archives"], ["doc", "Documents"], ["app", "Programs"], ["image", "Images"]];
+function folderInputs() { return document.querySelectorAll("#setFolders input"); }
+function dimFolders() { document.getElementById("setFolders").classList.toggle("off", !document.getElementById("setSort").checked); }
+document.getElementById("setFolders").innerHTML = FOLDER_KINDS.map(function (k) {
+  return '<label><span>' + k[1] + '</span><input type="text" data-folder="' + k[0] + '" maxlength="100" placeholder="main folder" spellcheck="false"></label>';
+}).join("");
+document.getElementById("setSort").addEventListener("change", dimFolders);
+
 function openSettings() {
   api("/api/settings").then(function (d) {
     S.settings = d;
@@ -741,6 +762,10 @@ function openSettings() {
     sel.innerHTML = opts.map(function (o) { return '<option value="' + o + '">' + (AFTER_LABEL[o] || o) + "</option>"; }).join("");
     sel.value = d.after_all;
     document.getElementById("afterRow").hidden = opts.length < 2;
+    document.getElementById("setSort").checked = !!d.sort_by_type;
+    document.getElementById("setBase").textContent = d.out_dir || "";
+    folderInputs().forEach(function (i) { i.value = (d.folders || {})[i.getAttribute("data-folder")] || ""; });
+    dimFolders();
     show("setDlg");
   }).catch(fail);
 }
@@ -751,9 +776,18 @@ document.getElementById("setGo").addEventListener("click", function () {
   if (awake !== !!was.keep_awake) upd.keep_awake = awake;
   var after = document.getElementById("setAfter").value;
   if (after && after !== was.after_all) upd.after_all = after;
-  hide("setDlg");
-  if (!Object.keys(upd).length) return;
+  var sort = document.getElementById("setSort").checked;
+  if (sort !== !!was.sort_by_type) upd.sort_by_type = sort;
+  var names = {}, renamed = false;
+  folderInputs().forEach(function (i) {
+    var k = i.getAttribute("data-folder");
+    if (i.value.trim() !== ((was.folders || {})[k] || "")) { names[k] = i.value; renamed = true; }
+  });
+  if (renamed) upd.folders = names;
+  if (!Object.keys(upd).length) return hide("setDlg");
+  // The dialog stays open if the daemon refuses, so a typo does not cost the rest.
   post("/api/settings", upd).then(function (r) {
+    hide("setDlg");
     toast(upd.after_all && AFTER_DOES[r.after_all]
       ? "godm will " + AFTER_DOES[r.after_all] + " when all downloads finish."
       : "Settings saved.");

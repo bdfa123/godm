@@ -116,6 +116,36 @@ func TestSettingsEndpointArmsAndReportsTheAction(t *testing.T) {
 	}
 }
 
+func TestSettingsEndpointControlsSorting(t *testing.T) {
+	m := NewManager(t.TempDir(), 2)
+	call := settingsAPI(t, m)
+
+	_, got := call("GET", "", "tok")
+	folders, _ := got["folders"].(map[string]any)
+	if got["sort_by_type"] != false || got["out_dir"] != m.outDir || len(folders) != 6 ||
+		folders["video"] != "Video" || folders["audio"] != "Music" || folders["app"] != "Programs" {
+		t.Fatalf("GET = %v, want sorting off, the default folder and six default names", got)
+	}
+
+	code, got := call("POST", `{"sort_by_type":true,"folders":{"video":"Movies","image":""}}`, "tok")
+	folders, _ = got["folders"].(map[string]any)
+	if code != 200 || got["sort_by_type"] != true || folders["video"] != "Movies" || folders["image"] != "" || folders["audio"] != "Music" {
+		t.Fatalf("POST = %d %v, want only the named folders changed", code, got)
+	}
+	if got := m.downloadDir(jobRequest{Filename: "a.mkv"}); !strings.HasSuffix(got, "Movies") {
+		t.Errorf("the manager did not take the change: %s", got)
+	}
+
+	for _, bad := range []string{`{"folders":{"video":"..\\.."}}`, `{"folders":{"video":"a/b"}}`, `{"folders":{"photos":"x"}}`} {
+		if code, _ = call("POST", bad, "tok"); code != http.StatusBadRequest {
+			t.Errorf("%s = %d, want 400", bad, code)
+		}
+	}
+	if _, got = call("GET", "", "tok"); got["folders"].(map[string]any)["video"] != "Movies" {
+		t.Error("a refused request changed a folder")
+	}
+}
+
 // The page learns about an armed action from the task list it already polls.
 func TestTaskListSaysWhatIsArmed(t *testing.T) {
 	m, _, _ := managerWithFakePC(t, 2)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -10,10 +11,27 @@ import (
 type Settings struct {
 	// KeepAwake stops Windows sleeping on its own while a download is running.
 	KeepAwake bool `json:"keep_awake"`
+	// SortByType puts a new download in a subfolder of the default folder
+	// chosen by what it is. Off by default: nobody asked for it yet.
+	SortByType bool `json:"sort_by_type"`
+	// Folders names the subfolder for each kind in folderKinds. An empty name
+	// keeps that kind in the default folder itself.
+	Folders map[string]string `json:"folders"`
 }
 
 func defaultSettings() Settings {
-	return Settings{KeepAwake: true}
+	return Settings{KeepAwake: true, Folders: defaultFolders()}
+}
+
+// clone copies the folder map, so that a snapshot taken under the lock can be
+// written out after it is released without racing a later edit.
+func (s Settings) clone() Settings {
+	f := make(map[string]string, len(s.Folders))
+	for k, v := range s.Folders {
+		f[k] = v
+	}
+	s.Folders = f
+	return s
 }
 
 // settingsUpdate is a request to change settings. A field left out stays as it
@@ -22,7 +40,10 @@ type settingsUpdate struct {
 	KeepAwake *bool `json:"keep_awake"`
 	// AfterAll arms or clears the one-shot action for when the downloads
 	// finish. It is not part of Settings because it is not kept.
-	AfterAll *string `json:"after_all"`
+	AfterAll   *string `json:"after_all"`
+	SortByType *bool   `json:"sort_by_type"`
+	// Folders holds only the kinds being renamed.
+	Folders map[string]string `json:"folders"`
 }
 
 func (m *Manager) KeepAwake() bool {
@@ -34,6 +55,18 @@ func (m *Manager) KeepAwake() bool {
 // UpdateSettings checks the whole request before applying any of it, so a bad
 // value cannot leave the others half changed.
 func (m *Manager) UpdateSettings(u settingsUpdate) error {
+	folders, kinds := make(map[string]string, len(u.Folders)), defaultFolders()
+	for key, name := range u.Folders {
+		if _, known := kinds[key]; !known {
+			return fmt.Errorf("unknown kind of file %q", key)
+		}
+		clean, err := cleanFolderName(name)
+		if err != nil {
+			return err
+		}
+		folders[key] = clean
+	}
+
 	m.mu.Lock()
 	if u.AfterAll != nil {
 		if err := m.checkAfterChoiceLocked(afterAction(*u.AfterAll)); err != nil {
@@ -43,6 +76,12 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	}
 	if u.KeepAwake != nil {
 		m.settings.KeepAwake = *u.KeepAwake
+	}
+	if u.SortByType != nil {
+		m.settings.SortByType = *u.SortByType
+	}
+	for key, name := range folders {
+		m.settings.Folders[key] = name
 	}
 	if u.AfterAll != nil {
 		// Choosing the same thing again changes nothing. Choosing something else
@@ -61,12 +100,16 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 func (m *Manager) settingsView() map[string]any {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	s := m.settings.clone()
 	return map[string]any{
 		"ok":                true,
-		"keep_awake":        m.settings.KeepAwake,
+		"keep_awake":        s.KeepAwake,
 		"can_keep_awake":    m.power.keepAwake != nil,
 		"after_all":         string(m.after),
 		"after_all_options": m.afterOptionsLocked(),
+		"sort_by_type":      s.SortByType,
+		"folders":           s.Folders,
+		"out_dir":           m.outDir,
 	}
 }
 

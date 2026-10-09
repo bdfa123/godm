@@ -406,10 +406,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 		return "", err
 	}
 	id := fmt.Sprintf("t%d-%d", time.Now().UnixMilli(), m.seq.Add(1))
-	outDir := req.OutDir
-	if outDir == "" {
-		outDir = m.outDir
-	}
+	outDir := m.downloadDir(req)
 	req.Connections = requestedConnections(req.Connections)
 	mt := &managedTask{
 		req:    req,
@@ -1109,7 +1106,7 @@ func (m *Manager) save() error {
 	}
 	m.mu.Lock()
 	notify := m.notifyOn.Load()
-	settings := m.settings
+	settings := m.settings.clone()
 	list := savedList{Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings}
 	for _, id := range m.order {
 		t := m.tasks[id]
@@ -1159,6 +1156,7 @@ func (m *Manager) load() error {
 	}
 	if list.Settings != nil {
 		m.settings = *list.Settings
+		m.settings.Folders = folderNames(list.Settings.Folders)
 		m.syncAwakeLocked()
 	}
 	if list.Notify != nil {

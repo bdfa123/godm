@@ -553,6 +553,15 @@ func DownloadHLS(ctx context.Context, o HLSOptions) (string, error) {
 		return "", &LiveStreamError{}
 	}
 
+	// A byte-range download makes its folder once it knows the link works; so
+	// does this. Without it a download aimed at a folder that is not there yet
+	// fails when it first opens its file.
+	if o.OutDir == "" {
+		o.OutDir = "."
+	}
+	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
+		return "", err
+	}
 	target, resume, release, err := planHLSTarget(o, media, chosen)
 	if err != nil {
 		return "", err
