@@ -751,10 +751,23 @@ func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih met
 		return storage.TorrentImpl{}, err
 	}
 	name := filepath.Base(root)
+	paths := torrentFilePaths(info)
+	index := map[string]int{}
+	for i, fi := range info.UpvertedFiles() {
+		if _, ok := index[torrentFileKey(&fi)]; !ok {
+			index[torrentFileKey(&fi)] = i
+		}
+	}
 	files := storage.NewFileOpts(storage.NewFileClientOpts{
 		ClientBaseDir: filepath.Dir(root),
 		FilePathMaker: func(o storage.FilePathMakerOpts) string {
-			return filepath.Join(append([]string{name}, torrentRelPath(o.File)...)...)
+			// Every file is in the table. The plain safe name only stands in
+			// for one that somehow is not.
+			rel := torrentRelPath(o.File)
+			if i, ok := index[torrentFileKey(o.File)]; ok {
+				rel = paths[i]
+			}
+			return filepath.Join(append([]string{name}, rel...)...)
 		},
 		PieceCompletion: s.pc,
 		// With part files the library renames each file once it is whole and,
@@ -892,9 +905,9 @@ func (t *managedTask) claimTorrentRoot(info *metainfo.Info, ih metainfo.Hash) (s
 	return "", fmt.Errorf("no free name for %s in %s", name, dir)
 }
 
-// torrentRelPath is where a file sits inside the torrent's folder, made safe
-// for NTFS one component at a time: the names come from strangers, and ".."
-// must never climb out.
+// torrentRelPath is where a file would sit inside the torrent's folder, made
+// safe for NTFS one component at a time: the names come from strangers, and
+// ".." must never climb out. torrentFilePaths decides where it really goes.
 func torrentRelPath(fi *metainfo.FileInfo) []string {
 	parts := fi.BestPath()
 	out := make([]string, 0, len(parts))
@@ -906,6 +919,62 @@ func torrentRelPath(fi *metainfo.FileInfo) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+// torrentFilePaths is where each of a torrent's files goes inside its folder,
+// in the order of info.UpvertedFiles: the safe name, made unique the way NTFS
+// compares names, which is without regard to case. "a.mkv" and "A.mkv", or
+// "a?.mkv" and "a*.mkv" once "?" and "*" are replaced, would otherwise be one
+// file on disk that each overwrites, and the torrent would still count as
+// finished. The later one gets a number, as any download does whose name is
+// taken. A folder that comes in two cases is one folder, as NTFS has it, spelt
+// as it first came. Writing, playing and deleting all go by this, so they
+// always agree on where a file is.
+func torrentFilePaths(info *metainfo.Info) [][]string {
+	files := map[string]bool{}  // every file placed, by its folded path
+	dirs := map[string]string{} // every folder, by its folded path, as spelt
+	var out [][]string
+	for _, fi := range info.UpvertedFiles() {
+		parts := torrentRelPath(&fi)
+		placed := make([]string, 0, len(parts))
+		key := ""
+		for i, p := range parts {
+			last := i == len(parts)-1
+			for n := 0; ; n++ {
+				name := p
+				if last {
+					name = numberedName(p, n)
+				} else if n > 0 {
+					name = fmt.Sprintf("%s (%d)", p, n)
+				}
+				k := key + "/" + strings.ToUpper(name)
+				if files[k] {
+					continue
+				}
+				if last {
+					if _, ok := dirs[k]; ok {
+						continue
+					}
+					files[k] = true
+				} else if spelt, ok := dirs[k]; ok {
+					name = spelt
+				} else {
+					dirs[k] = name
+				}
+				placed, key = append(placed, name), k
+				break
+			}
+		}
+		out = append(out, placed)
+	}
+	return out
+}
+
+// torrentFileKey tells a torrent's files apart without their index, which the
+// file storage does not pass on when it asks where one goes. Only two empty
+// files of the same name could share a key, and they are the same either way.
+func torrentFileKey(fi *metainfo.FileInfo) string {
+	return fmt.Sprintf("%d %d %q", fi.TorrentOffset, fi.Length, fi.BestPath())
 }
 
 // mediaRank says how good a file is as the thing Play opens.
@@ -955,8 +1024,7 @@ func (t *managedTask) torrentDetails(info *metainfo.Info, size int64) {
 	t.view.Size = size
 	t.view.Media = ""
 	if i, ok := torrentMediaIndex(info); ok {
-		files := info.UpvertedFiles()
-		t.view.Media = path.Join(append([]string{filepath.Base(root)}, torrentRelPath(&files[i])...)...)
+		t.view.Media = path.Join(append([]string{filepath.Base(root)}, torrentFilePaths(info)[i]...)...)
 	}
 }
 
@@ -994,8 +1062,8 @@ func deleteTorrentFiles(root string, info *metainfo.Info) {
 		files = []string{root}
 	} else {
 		seen := map[string]bool{}
-		for _, fi := range info.UpvertedFiles() {
-			p := filepath.Join(append([]string{root}, torrentRelPath(&fi)...)...)
+		for _, rel := range torrentFilePaths(info) {
+			p := filepath.Join(append([]string{root}, rel...)...)
 			files = append(files, p)
 			for d := filepath.Dir(p); len(d) > len(root); d = filepath.Dir(d) {
 				if !seen[d] {

@@ -280,6 +280,112 @@ func TestTorrentPathsStayInsideTheirFolder(t *testing.T) {
 	}
 }
 
+func TestTorrentFilesThatShareANameOnNTFSGetTheirOwn(t *testing.T) {
+	for _, c := range []struct {
+		in   [][]string
+		want []string
+	}{
+		{[][]string{{"a.mkv"}, {"A.mkv"}}, []string{"a.mkv", "A (1).mkv"}},
+		{[][]string{{"a?.mkv"}, {"a*.mkv"}}, []string{"a_.mkv", "a_ (1).mkv"}},
+		// One folder in two cases is one folder; only a file in both is renamed.
+		{[][]string{{"Sub", "x.txt"}, {"sub", "x.txt"}, {"sub", "y.txt"}}, []string{"Sub/x.txt", "Sub/x (1).txt", "Sub/y.txt"}},
+		{[][]string{{"x"}, {"X", "y"}}, []string{"x", "X (1)/y"}},
+		{[][]string{{"d", "f"}, {"D"}}, []string{"d/f", "D (1)"}},
+		{[][]string{{"a (1).mkv"}, {"a.mkv"}, {"A.mkv"}}, []string{"a (1).mkv", "a.mkv", "A (2).mkv"}},
+	} {
+		info := &metainfo.Info{Name: "T", PieceLength: 1 << 10}
+		for _, p := range c.in {
+			info.Files = append(info.Files, metainfo.FileInfo{Path: p, Length: 1})
+		}
+		var got []string
+		for _, rel := range torrentFilePaths(info) {
+			got = append(got, strings.Join(rel, "/"))
+		}
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%q placed as %q, want %q", c.in, got, c.want)
+		}
+	}
+	single := &metainfo.Info{Name: "film.mkv", Length: 5, PieceLength: 1 << 10}
+	if got := torrentFilePaths(single); len(got) != 1 || len(got[0]) != 0 {
+		t.Errorf("a single-file torrent placed as %q, want the root itself", got)
+	}
+
+	// Two files the torrent tells apart only by case: each must keep its own
+	// bytes, and playing and deleting must find the renamed one.
+	src := t.TempDir()
+	small, large := makePayload(100<<10), makePayload(150<<10)
+	for i := range large {
+		large[i] ^= 0xff
+	}
+	os.WriteFile(filepath.Join(src, "0.bin"), small, 0o644)
+	os.WriteFile(filepath.Join(src, "1.bin"), large, 0o644)
+	info := metainfo.Info{Name: "Pair", PieceLength: 32 << 10, Files: []metainfo.FileInfo{
+		{Path: []string{"a.mkv"}, Length: int64(len(small))},
+		{Path: []string{"A.mkv"}, Length: int64(len(large))},
+	}}
+	// The seeder keeps them apart on its own disk under other names.
+	onDisk := func(fi *metainfo.FileInfo) string {
+		if fi.Path[0] == "a.mkv" {
+			return "0.bin"
+		}
+		return "1.bin"
+	}
+	if err := info.GeneratePieces(func(fi metainfo.FileInfo) (io.ReadCloser, error) {
+		return os.Open(filepath.Join(src, onDisk(&fi)))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mi := &metainfo.MetaInfo{}
+	var err error
+	if mi.InfoBytes, err = bencode.Marshal(info); err != nil {
+		t.Fatal(err)
+	}
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := torrent.NewDefaultClientConfig()
+	btLoopback(cfg)
+	cfg.Seed = true
+	cfg.DefaultStorage = storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir:   src,
+		FilePathMaker:   func(o storage.FilePathMakerOpts) string { return onDisk(o.File) },
+		PieceCompletion: storage.NewMapPieceCompletion(),
+		UsePartFiles:    g.Some(false),
+		Logger:          quiet,
+	})
+	cfg.Slogger = quiet
+	cl, err := torrent.NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cl.Close() })
+	seeding, err := cl.AddTorrent(mi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeding.DownloadAll()
+	waitFor(t, 20*time.Second, "the seeder to verify its data", seeding.Complete().Bool)
+
+	m := newBTManager(t)
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "Pair", cl.ListenAddrs()[0].String())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the download", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+	for name, want := range map[string][]byte{"a.mkv": small, "A (1).mkv": large} {
+		got, err := os.ReadFile(filepath.Join(v.Path, name))
+		if err != nil || sum(got) != sum(want) {
+			t.Errorf("%s differs from the seeded file (%v)", name, err)
+		}
+	}
+	if v.Media != "Pair/A (1).mkv" {
+		t.Errorf("media %q, want the larger file under its new name", v.Media)
+	}
+	if !m.Remove(id, true) {
+		t.Fatal("remove refused")
+	}
+	waitFor(t, 10*time.Second, "the torrent's folder to go", func() bool { return !pathExists(v.Path) })
+}
+
 func TestTheLogKeepsHashFailuresButNotEveryGoodPiece(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(quietHashes{slog.NewTextHandler(&buf, nil)}).With("torrent", "x")
