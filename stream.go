@@ -57,11 +57,18 @@ func (p *Playback) focusAt() (int64, bool) {
 // Available reports how many bytes from off are on disk in one unbroken run.
 // ok is false when no transfer is running, so nothing is known.
 func (p *Playback) Available(off int64) (n int64, ok bool) {
+	n, _, ok = p.availableIn(off)
+	return n, ok
+}
+
+// availableIn is Available, also naming the file those bytes are in: the one
+// the running transfer writes, which need not be the one an earlier run wrote.
+func (p *Playback) availableIn(off int64) (n int64, path string, ok bool) {
 	p.mu.Lock()
 	t := p.t
 	p.mu.Unlock()
 	if t == nil {
-		return 0, false
+		return 0, "", false
 	}
 	t.segMu.Lock()
 	n = t.firstMissingLocked(off) - off
@@ -69,7 +76,7 @@ func (p *Playback) Available(off int64) (n int64, ok bool) {
 	if n < 0 {
 		n = 0
 	}
-	return n, true
+	return n, t.target, true
 }
 
 // PlaybackReader is one open request from a player.
@@ -131,16 +138,44 @@ const (
 	streamStall = 2 * time.Minute
 )
 
-// available is how many bytes from off can be read now.
-func (t *managedTask) available(off int64) int64 {
-	if n, ok := t.play.Available(off); ok {
-		return n
+// available is how many bytes from off can be read now, and from which file.
+func (t *managedTask) available(off int64) (int64, string) {
+	if n, path, ok := t.play.availableIn(off); ok {
+		return n, path
 	}
 	v := t.snapshot()
 	if v.State == StateDone && v.Size > off {
-		return v.Size - off
+		return v.Size - off, v.Path
 	}
-	return 0
+	return 0, ""
+}
+
+// streamFile is the file one stream request reads. The request can open it
+// before a run starts, and a run that cannot continue an earlier file starts
+// a new one beside it, so the request moves to whichever file holds the bytes
+// it is told are there.
+type streamFile struct {
+	f    *os.File
+	path string
+}
+
+func (s *streamFile) open(path string) error {
+	if s.f != nil && path == s.path {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	s.Close()
+	s.f, s.path = f, path
+	return nil
+}
+
+func (s *streamFile) Close() {
+	if s.f != nil {
+		s.f.Close()
+	}
 }
 
 // playsWhileArriving reports whether a player can read the file before it
@@ -259,21 +294,21 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer mt.dropPlayer(player)
-	f, err := os.Open(v.Path)
-	if err != nil {
+	var f streamFile
+	defer f.Close()
+	if err := f.open(v.Path); err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	defer f.Close()
 	name := filepath.Base(v.Path)
 
 	if v.State == StateDone {
-		fi, err := f.Stat()
+		fi, err := f.f.Stat()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.ServeContent(w, r, name, fi.ModTime(), f)
+		http.ServeContent(w, r, name, fi.ModTime(), f.f)
 		return
 	}
 
@@ -298,11 +333,11 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	streamRange(ctx, mt, f, w, start, end)
+	streamRange(ctx, mt, &f, w, start, end)
 }
 
 // streamRange copies bytes start..end to w as they land on disk.
-func streamRange(ctx context.Context, mt *managedTask, f *os.File, w io.Writer, start, end int64) {
+func streamRange(ctx context.Context, mt *managedTask, f *streamFile, w io.Writer, start, end int64) {
 	rd := mt.play.NewReader()
 	defer rd.Close()
 	flusher, _ := w.(http.Flusher)
@@ -311,7 +346,7 @@ func streamRange(ctx context.Context, mt *managedTask, f *os.File, w io.Writer, 
 	var waitingSince time.Time
 	for pos <= end {
 		rd.Want(pos)
-		n := mt.available(pos)
+		n, path := mt.available(pos)
 		if n <= 0 {
 			now := time.Now()
 			if waitingSince.IsZero() {
@@ -335,7 +370,10 @@ func streamRange(ctx context.Context, mt *managedTask, f *os.File, w io.Writer, 
 		if n > end-pos+1 {
 			n = end - pos + 1
 		}
-		k, err := f.ReadAt(buf[:n], pos)
+		if err := f.open(path); err != nil {
+			return
+		}
+		k, err := f.f.ReadAt(buf[:n], pos)
 		if k > 0 {
 			if _, werr := w.Write(buf[:k]); werr != nil {
 				return

@@ -322,6 +322,74 @@ func TestRemoveWithDeleteEndsAPlayerThatStoppedReading(t *testing.T) {
 	})
 }
 
+// A run whose saved progress is gone starts a new file beside the one an
+// earlier run wrote. A player that asked in between was opened on the old
+// file, and has to follow: the bytes the transfer says are there are in the
+// file it writes.
+func TestStreamFollowsARunThatStartsANewFile(t *testing.T) {
+	payload := makePayload(4 << 20)
+	h := &slowServer{payload: payload, chunk: 16 << 10, delay: 5 * time.Millisecond}
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") == "bytes=0-0" {
+			// Hold the probe, so the player's request comes before the run
+			// knows which file it writes.
+			time.Sleep(300 * time.Millisecond)
+		}
+		h.ServeHTTP(w, r)
+	}))
+	defer src.Close()
+
+	dir := t.TempDir()
+	old := filepath.Join(dir, "film.mkv")
+	if err := os.WriteFile(old, make([]byte, len(payload)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(dir, 2)
+	m.announce = nil
+	m.streamPiece = 128 << 10
+	mt := &managedTask{
+		view: TaskView{
+			ID: "film", URL: src.URL + "/film.mkv", Filename: "film.mkv",
+			Path: old, Size: int64(len(payload)), State: StatePaused,
+		},
+		req:    jobRequest{URL: src.URL + "/film.mkv", Connections: 4},
+		outDir: dir,
+	}
+	mt.connLimit.Store(4)
+	m.mu.Lock()
+	m.tasks["film"] = mt
+	m.order = append(m.order, "film")
+	m.mu.Unlock()
+	s := &server{mgr: m, token: "tok"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/stream/", s.guard(s.handleStream))
+	api := httptest.NewServer(mux)
+	defer api.Close()
+
+	if !m.Resume("film") {
+		t.Fatal("resume refused")
+	}
+	const from, to = 1 << 20, 2<<20 - 1
+	req, _ := http.NewRequest(http.MethodGet, api.URL+"/stream/film/film.mkv?token=tok", nil)
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", from, to))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "completion", stateIs(m, "film", StateDone))
+	if v := mt.snapshot(); v.Path == old {
+		t.Fatalf("the run continued %s instead of starting a new file", old)
+	}
+	if sum(body) != sum(payload[from:to+1]) {
+		t.Fatal("the player was served the earlier run's file")
+	}
+}
+
 func TestPlayOpensTheFileOrTheStream(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string
