@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows - fmt, vet, test, extension
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      # Git for Windows checks text files out with CRLF by default, and gofmt
+      # would then list every file. Ask for LF so the format check means something.
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: gofmt
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-formatted (run gofmt -w .):"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # Some of the tests are timing-sensitive, so run each once and do not
+      # reuse a cached result from a different machine.
+      - name: go test
+        run: go test -count=1 ./...
+
+      # bash expands the glob, so every extension/*.test.js runs on any Node.
+      - name: Extension tests
+        shell: bash
+        run: node --test extension/*.test.js
+
+  linux:
+    name: Linux - vet, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build .
+
+      # The release builds this target too, so catch a break before a tag does.
+      - name: go build for windows/arm64
+        run: GOOS=windows GOARCH=arm64 go build -o "$RUNNER_TEMP/godm-arm64.exe" .
