@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+// version is "dev" for a plain go build. A release sets it from the tag with
+// go build -ldflags "-X main.version=v1.2.3", which only works on a variable.
+var version = "dev"
 
 type headerFlag map[string]string
 
