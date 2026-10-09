@@ -301,21 +301,42 @@ func TestSingleStreamTrimsLongerLeftoverFile(t *testing.T) {
 }
 
 // refusingServer turns away every request beyond max at once with a 503, as
-// PikPak does past eight connections.
+// PikPak does past eight connections. It can also hiccup: requests for the
+// mebibyte from glitchAt are turned away glitches times, however few
+// connections are open.
 type refusingServer struct {
 	slowServer
 	max      int32
 	inFlight atomic.Int32
+	glitchAt int64
+	glitches atomic.Int32
+
+	logMu   sync.Mutex
+	refused []time.Time // when each request over max was turned away
 }
 
 func (h *refusingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n := h.inFlight.Add(1)
 	defer h.inFlight.Add(-1)
 	if n > h.max {
+		h.logMu.Lock()
+		h.refused = append(h.refused, time.Now())
+		h.logMu.Unlock()
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	if start, _ := rangeOf(r, len(h.payload)); start >= h.glitchAt && start < h.glitchAt+1<<20 &&
+		h.glitches.Load() > 0 && h.glitches.Add(-1) >= 0 {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
 	h.slowServer.ServeHTTP(w, r)
+}
+
+func (h *refusingServer) refusals() []time.Time {
+	h.logMu.Lock()
+	defer h.logMu.Unlock()
+	return append([]time.Time(nil), h.refused...)
 }
 
 func TestRefusedConnectionsDoNotFailTheDownload(t *testing.T) {
@@ -343,6 +364,96 @@ func TestRefusedConnectionsDoNotFailTheDownload(t *testing.T) {
 	defer mu.Unlock()
 	if last.Limit > 3 {
 		t.Errorf("still asking for %d connections from a server that takes 3", last.Limit)
+	}
+}
+
+// One connection turned away for a while, with the others receiving, looks
+// just like a server that takes no more. If the server takes the connection
+// when it is tried again, the cap lifts, and the range given up meanwhile is
+// waiting for a connection, not failed.
+func TestCapFromAPassingRefusalLiftsAgain(t *testing.T) {
+	payload := makePayload(16 << 20)
+	h := &refusingServer{
+		slowServer: slowServer{payload: payload, chunk: 16 << 10, delay: 10 * time.Millisecond},
+		max:        4, glitchAt: 12 << 20,
+	}
+	h.glitches.Store(3) // MaxRetries 2 means three attempts, and all are refused
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var limits []int
+	var failed []SegmentView
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/big.bin", OutDir: t.TempDir(),
+		Connections: 4, MinSplit: 64 << 10, MaxRetries: 2, CapProbe: 300 * time.Millisecond,
+		OnProgress: func(p Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			if n := len(limits); n == 0 || limits[n-1] != p.Limit {
+				limits = append(limits, p.Limit)
+			}
+			for _, s := range p.Segments {
+				if s.State == "failed" {
+					failed = append(failed, s)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	checkFile(t, res.Path, payload)
+	if h.glitches.Load() > 0 {
+		t.Fatal("the test never turned the connection away")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if last := limits[len(limits)-1]; last != 4 {
+		t.Errorf("connections allowed over time: %v; a server that takes 4 was left with %d", limits, last)
+	}
+	if len(failed) > 0 {
+		t.Errorf("a range given back for another connection was shown as failed: %+v", failed[0])
+	}
+}
+
+// A server that keeps to its limit is asked for one connection more only now
+// and then, with a single request each time: a try that is turned away is not
+// retried, and the one after it waits longer.
+func TestAServerThatKeepsItsLimitIsOnlyAskedNowAndThen(t *testing.T) {
+	payload := makePayload(10 << 20)
+	h := &refusingServer{slowServer: slowServer{payload: payload, chunk: 16 << 10, delay: 20 * time.Millisecond}, max: 3}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	const probe = time.Second
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/big.bin", OutDir: t.TempDir(),
+		Connections: 4, MinSplit: 64 << 10, MaxRetries: 1, CapProbe: probe,
+	})
+	if err != nil {
+		t.Fatalf("a server that accepts three connections failed the download: %v", err)
+	}
+	checkFile(t, res.Path, payload)
+
+	// The fourth connection is turned away twice in the first half second,
+	// which is how the cap is learned. Every refusal after that is a try.
+	all := h.refusals()
+	var tries []time.Time
+	prev := all[0]
+	for _, at := range all {
+		if at.Sub(all[0]) < 750*time.Millisecond {
+			prev = at
+			continue
+		}
+		tries = append(tries, at)
+		if gap := at.Sub(prev); gap < probe*3/4 {
+			t.Errorf("turned away %v after the request before; tries should be %v apart", gap.Round(time.Millisecond), probe)
+		}
+		prev = at
+	}
+	if len(tries) == 0 {
+		t.Fatalf("no connection past the cap was tried in %d refusals", len(all))
 	}
 }
 

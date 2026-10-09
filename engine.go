@@ -46,6 +46,10 @@ type Options struct {
 	// StallTimeout ends a connection that has received nothing for this long
 	// and retries it from where it got to. Zero means 30 seconds.
 	StallTimeout time.Duration
+	// CapProbe is how long a limit the server set on connections stands
+	// before one more is tried, in case it was a passing refusal rather than
+	// a limit. Zero means 30 seconds.
+	CapProbe time.Duration
 	// Limiters are the speed limits the download keeps to, all at once: the
 	// one shared by every download and its own, say. Their rates can change
 	// while it runs.
@@ -72,6 +76,18 @@ type Options struct {
 // defaultRetries is how many times a request is retried before a download is
 // called off, unless the caller says otherwise.
 const defaultRetries = 5
+
+// defaultCapProbe is how long a server's limit on connections stands before
+// one more connection is tried. A server that really has a limit, as PikPak
+// has at eight, turns that one request away and nothing else changes; each
+// time it does, the next try waits twice as long, up to capProbeGrowth times
+// this, so a long download there costs one refused request every five
+// minutes. A connection lost to a passing refusal comes back after half a
+// minute instead of never.
+const (
+	defaultCapProbe = 30 * time.Second
+	capProbeGrowth  = 10
+)
 
 func clampConnections(n int) int {
 	if n < 1 {
@@ -103,6 +119,9 @@ func (o *Options) applyDefaults() {
 		o.MaxRetries = defaultRetries
 	}
 	o.StallTimeout = stallTimeoutOr(o.StallTimeout)
+	if o.CapProbe <= 0 {
+		o.CapProbe = defaultCapProbe
+	}
 	if o.OutDir == "" {
 		o.OutDir = "."
 	}
@@ -288,6 +307,10 @@ var errYield = errors.New("connection released: the connection limit was lowered
 
 // errMove stops a connection so it can fetch what a player is waiting for.
 var errMove = errors.New("connection moved to where the player is reading")
+
+// errTurnedAway stops a connection the server would not take on top of the
+// ones it was already serving. Its range goes back to be shared out.
+var errTurnedAway = errors.New("connection turned away: the server takes no more")
 
 // moveCheckEvery is how often a connection asks whether a player needs it
 // somewhere else.
@@ -586,9 +609,16 @@ type task struct {
 	changed chan struct{} // nudges the supervisor when a worker exits
 
 	// serverCap is how many connections the server turned out to accept: it
-	// kept refusing one more while that many were working. Zero means no
-	// refusal has been seen.
+	// kept refusing one more while that many were receiving. Zero means no
+	// refusal like that has been seen.
 	serverCap atomic.Int32
+	// The cap stands for capWait from capSince, after which one connection
+	// more is allowed to find out whether it still holds.
+	capSince atomic.Int64 // UnixNano
+	capWait  atomic.Int64 // time.Duration
+	// receiving counts the connections whose response is under way: the ones
+	// the server is serving right now.
+	receiving atomic.Int32
 }
 
 // limit is how many connections may run right now.
@@ -600,27 +630,74 @@ func (t *task) limit() int {
 	if t.opts.ConnLimit != nil {
 		n = t.opts.ConnLimit()
 	}
-	if c := int(t.serverCap.Load()); c > 0 && n > c {
+	if c := t.serverAllows(); c > 0 && n > c {
 		n = c
 	}
 	return clampConnections(n)
 }
 
-// capConnections lowers the server's cap to n; it never raises it.
+// serverAllows is how many connections the server's cap leaves room for, 0
+// when it has none. Once the cap has stood its wait, it leaves room for one
+// more, to try whether the server still turns it away.
+func (t *task) serverAllows() int {
+	c := int(t.serverCap.Load())
+	if c > 0 && t.probing() {
+		c++
+	}
+	return c
+}
+
+func (t *task) probing() bool {
+	return time.Since(time.Unix(0, t.capSince.Load())) >= time.Duration(t.capWait.Load())
+}
+
+// capConnections lowers the server's cap to n, or sets it, and starts its
+// wait over. It never raises the cap.
 func (t *task) capConnections(n int32) {
 	for {
 		c := t.serverCap.Load()
-		if c > 0 && c <= n {
+		if (c > 0 && c <= n) || t.serverCap.CompareAndSwap(c, n) {
+			break
+		}
+	}
+	if t.capWait.Load() == 0 {
+		t.capWait.Store(int64(t.opts.CapProbe))
+	}
+	t.capSince.Store(time.Now().UnixNano())
+}
+
+// capHeld notes that the connection allowed past the cap was turned away
+// too: the cap stands, and the next try waits twice as long.
+func (t *task) capHeld() {
+	since, wait := t.capSince.Load(), t.capWait.Load()
+	if time.Since(time.Unix(0, since)) < time.Duration(wait) ||
+		!t.capSince.CompareAndSwap(since, time.Now().UnixNano()) {
+		// Not a try: one of the connections that were already over the cap
+		// when it was set, turned away for the same reason.
+		return
+	}
+	t.capWait.Store(min(2*wait, capProbeGrowth*int64(t.opts.CapProbe)))
+}
+
+// serving notes that n connections are receiving at once. More than the cap
+// means the server takes more than it once refused, so the cap rises to
+// match and the next try comes as soon as it can.
+func (t *task) serving(n int32) {
+	for {
+		c := t.serverCap.Load()
+		if c == 0 || n <= c {
 			return
 		}
 		if t.serverCap.CompareAndSwap(c, n) {
-			return
+			break
 		}
 	}
+	t.capWait.Store(int64(t.opts.CapProbe))
+	t.capSince.Store(time.Now().UnixNano())
 }
 
-// refused reports a connection the server kept turning away as busy, which
-// is what a host does when it allows fewer connections than were opened.
+// refused reports a connection the server turned away as busy, which is what
+// a host does when it allows fewer connections than were opened.
 func refused(err error) bool {
 	var se *statusError
 	return errors.As(err, &se) &&
@@ -676,14 +753,6 @@ func (t *task) run(ctx context.Context) error {
 			default:
 			}
 			if err == nil {
-				return
-			}
-			if refused(err) && t.workers.Load() > 0 {
-				// The server kept turning this connection away while the others
-				// carry on, so it takes no more than they already hold. Go on
-				// with those rather than call the whole download off; the range
-				// this one gave up goes to whichever of them frees up first.
-				t.capConnections(t.workers.Load())
 				return
 			}
 			errMu.Lock()
@@ -784,7 +853,10 @@ func (t *task) worker(ctx context.Context) error {
 			yielded = true
 			return nil
 		}
-		if errors.Is(err, errMove) {
+		if errors.Is(err, errMove) || errors.Is(err, errTurnedAway) {
+			// A connection turned away is now over the server's cap and gives
+			// up its slot at the top of the loop, unless others have left
+			// since and there is room for it after all.
 			continue
 		}
 		if err != nil {
@@ -1024,6 +1096,10 @@ func (t *task) splitCandidateLocked() (*Segment, bool) {
 // on disk.
 func (t *task) runSegment(ctx context.Context, seg *Segment) error {
 	var last error
+	// busy is the most other connections that were receiving when the server
+	// turned this one away. Only that makes a refusal a sign of a limit on
+	// connections: a server that refuses while serving nobody is failing.
+	var busy int32
 	for attempt := 0; attempt <= t.opts.MaxRetries; attempt++ {
 		if attempt > 0 {
 			if t.linkDead.Load() {
@@ -1059,7 +1135,27 @@ func (t *task) runSegment(ctx context.Context, seg *Segment) error {
 			seg.set(SegFailed, shortErr(err))
 			return err
 		}
+		if refused(err) {
+			if c := t.serverCap.Load(); c > 0 && t.workers.Load() > c {
+				// A connection past the cap, turned away again: the cap holds,
+				// and asking again would only be refused again.
+				t.capHeld()
+				seg.set(SegWaiting, "")
+				return errTurnedAway
+			}
+			busy = max(busy, t.receiving.Load())
+		}
 		last = err
+	}
+	if refused(last) && busy > 0 {
+		// The server kept turning this connection away while others were
+		// receiving, so it takes no more than they hold. Go on with those
+		// rather than call the whole download off; the range this one gave up
+		// goes to whichever of them frees up first, and is waiting, not
+		// failed, until then.
+		t.capConnections(max(busy, t.receiving.Load()))
+		seg.set(SegWaiting, "")
+		return errTurnedAway
 	}
 	seg.set(SegFailed, shortErr(last))
 	return fmt.Errorf("segment at byte %d gave up after %d retries: %w", seg.Start, t.opts.MaxRetries, last)
@@ -1103,6 +1199,8 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	if err := t.checkResponse(resp, ranged); err != nil {
 		return err
 	}
+	t.serving(t.receiving.Add(1))
+	defer t.receiving.Add(-1)
 	seg.set(SegActive, "")
 
 	// Without this a server that goes quiet part way through a range holds the
