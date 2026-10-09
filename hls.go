@@ -415,6 +415,8 @@ type HLSOptions struct {
 	// StallTimeout ends a request that has received nothing for this long and
 	// retries it. Zero means 30 seconds.
 	StallTimeout time.Duration
+	// Limiters are the speed limits every segment fetch keeps to.
+	Limiters []*RateLimiter
 
 	// Variant picks a stream from a master playlist. A negative value takes the
 	// highest bandwidth on offer, which is what a player on a fast link does.
@@ -993,7 +995,7 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	// Read one byte past the cap: io.LimitReader stops silently at the limit,
 	// and a segment quietly cut short produces a file of the right shape that
 	// plays wrong.
-	data, err := io.ReadAll(io.LimitReader(body, limit+1))
+	data, err := readPaced(ctx, io.LimitReader(body, limit+1), r.opts.Limiters)
 	if err != nil {
 		return nil, err
 	}

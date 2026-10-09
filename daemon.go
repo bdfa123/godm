@@ -57,6 +57,9 @@ type TaskView struct {
 	Active    int           `json:"active"`
 	Resumable bool          `json:"resumable"`
 	Segments  []SegmentView `json:"segments,omitempty"`
+	// SpeedLimit is this download's own limit in bytes per second, 0 for
+	// none. The limit shared by all downloads applies on top of it.
+	SpeedLimit int64 `json:"speed_limit,omitempty"`
 	// Kind is empty for an ordinary file. "hls" means a segmented stream,
 	// where progress is counted in segments because the final size is only
 	// ever an estimate until the last one lands.
@@ -81,6 +84,9 @@ type jobRequest struct {
 	Headers     map[string]string `json:"headers"`
 	Connections int               `json:"connections"`
 	OutDir      string            `json:"out_dir"`
+	// SpeedLimit caps this download in bytes per second; 0 leaves it to the
+	// limit shared by all downloads.
+	SpeedLimit int64 `json:"speed_limit,omitempty"`
 	// Kind lets the caller say outright that this is a stream playlist. When
 	// it is empty the URL decides, which covers links pasted by hand.
 	Kind string `json:"kind,omitempty"`
@@ -118,6 +124,8 @@ type managedTask struct {
 	// connLimit is read live by the engine, so changing it adds or releases
 	// connections on a running download within a fraction of a second.
 	connLimit atomic.Int32
+	// speed is this download's own limit, read live the same way.
+	speed RateLimiter
 	// gen increments on every run so a superseded run cannot overwrite the
 	// state of the one that replaced it.
 	gen         int
@@ -300,6 +308,8 @@ type Manager struct {
 	// streamPiece is the engine's piece size while a player reads; zero keeps
 	// the engine default. Tests shrink it to fit their small files.
 	streamPiece int64
+	// speed is the limit all downloads share between them.
+	speed RateLimiter
 }
 
 func NewManager(outDir string, parallel int) *Manager {
@@ -408,15 +418,18 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	id := fmt.Sprintf("t%d-%d", time.Now().UnixMilli(), m.seq.Add(1))
 	outDir := m.downloadDir(req)
 	req.Connections = requestedConnections(req.Connections)
+	req.SpeedLimit = max(req.SpeedLimit, 0)
 	mt := &managedTask{
 		req:    req,
 		outDir: outDir,
 		view: TaskView{
 			ID: id, URL: req.URL, Referrer: req.Referrer, Filename: req.Filename,
 			State: StateQueued, Size: -1, Conns: req.Connections, AddedAt: time.Now(),
+			SpeedLimit: req.SpeedLimit,
 		},
 	}
 	mt.connLimit.Store(int32(req.Connections))
+	mt.speed.SetRate(req.SpeedLimit)
 
 	m.mu.Lock()
 	for _, existingID := range m.order {
@@ -524,6 +537,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 			Filename:    filename,
 			Connections: req.Connections,
 			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
+			Limiters:    []*RateLimiter{&m.speed, &mt.speed},
 			Variant:     req.Variant,
 			OnStart: func(si HLSStart) {
 				mt.hlsStart(gen, si)
@@ -546,6 +560,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 			Filename:    filename,
 			Connections: req.Connections,
 			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
+			Limiters:    []*RateLimiter{&m.speed, &mt.speed},
 			Refresh:     refresh,
 			Playback:    &mt.play,
 			StreamPiece: m.streamPiece,
@@ -1038,6 +1053,33 @@ func (m *Manager) Limit() int {
 	return m.limit
 }
 
+// SetSpeedLimit caps all downloads together at n bytes per second, or lifts
+// the cap with 0. Running downloads slow down or speed up at once.
+func (m *Manager) SetSpeedLimit(n int64) int64 {
+	m.speed.SetRate(n)
+	m.dirty.Store(true)
+	return m.speed.Rate()
+}
+
+func (m *Manager) SpeedLimit() int64 { return m.speed.Rate() }
+
+// SetTaskSpeedLimit caps one download, on top of the limit they all share;
+// whichever is stricter is the one it keeps to.
+func (m *Manager) SetTaskSpeedLimit(id string, n int64) (int64, error) {
+	mt := m.get(id)
+	if mt == nil {
+		return 0, fmt.Errorf("no such task")
+	}
+	n = max(n, 0)
+	mt.mu.Lock()
+	mt.req.SpeedLimit = n
+	mt.view.SpeedLimit = n
+	mt.mu.Unlock()
+	mt.speed.SetRate(n)
+	m.dirty.Store(true)
+	return n, nil
+}
+
 func (m *Manager) OpenFolder(id string) error {
 	mt := m.get(id)
 	if mt == nil {
@@ -1095,6 +1137,8 @@ type savedList struct {
 	// Settings is a pointer so a file written before it existed can be told
 	// apart from one that holds it, and load can fill in the defaults.
 	Settings *Settings `json:"settings,omitempty"`
+	// SpeedLimit is the limit all downloads share, in bytes per second.
+	SpeedLimit int64 `json:"speed_limit,omitempty"`
 }
 
 // save writes the list atomically. It includes request headers, cookies among
@@ -1107,7 +1151,7 @@ func (m *Manager) save() error {
 	m.mu.Lock()
 	notify := m.notifyOn.Load()
 	settings := m.settings.clone()
-	list := savedList{Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings}
+	list := savedList{Version: 1, Limit: m.limit, Notify: &notify, Settings: &settings, SpeedLimit: m.speed.Rate()}
 	for _, id := range m.order {
 		t := m.tasks[id]
 		t.mu.Lock()
@@ -1162,6 +1206,7 @@ func (m *Manager) load() error {
 	if list.Notify != nil {
 		m.notifyOn.Store(*list.Notify)
 	}
+	m.speed.SetRate(list.SpeedLimit)
 	for _, st := range list.Tasks {
 		v := st.View
 		switch v.State {
@@ -1175,8 +1220,11 @@ func (m *Manager) load() error {
 		}
 		st.Req.Connections = requestedConnections(st.Req.Connections)
 		v.Conns = st.Req.Connections
+		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
+		v.SpeedLimit = st.Req.SpeedLimit
 		mt := &managedTask{view: v, req: st.Req, outDir: st.OutDir}
 		mt.connLimit.Store(int32(st.Req.Connections))
+		mt.speed.SetRate(st.Req.SpeedLimit)
 		m.tasks[v.ID] = mt
 		m.order = append(m.order, v.ID)
 	}
@@ -1297,6 +1345,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/api/address", s.guard(post(s.handleAddress)))
 	mux.HandleFunc("/api/limit", s.guard(post(s.handleLimit)))
 	mux.HandleFunc("/api/connections", s.guard(post(s.handleConnections)))
+	mux.HandleFunc("/api/speed", s.guard(post(s.handleSpeed)))
 	mux.HandleFunc("/api/inspect", s.guard(post(s.handleInspect)))
 	mux.HandleFunc("/api/config", s.guard(s.handleConfig))
 	mux.HandleFunc("/api/settings", s.guard(s.handleSettings))
@@ -1441,7 +1490,10 @@ func (s *server) handleBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit(), "after_all": s.mgr.AfterAll()})
+	writeJSON(w, map[string]any{
+		"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit(),
+		"after_all": s.mgr.AfterAll(), "speed_limit": s.mgr.SpeedLimit(),
+	})
 }
 
 func (s *server) handlePauseAll(w http.ResponseWriter, r *http.Request) {
@@ -1504,6 +1556,27 @@ func (s *server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "connections": got})
+}
+
+// handleSpeed sets a speed limit in bytes per second, 0 for none: for one
+// download when an id is given, otherwise the one all downloads share.
+func (s *server) handleSpeed(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.ParseInt(r.URL.Query().Get("n"), 10, 64)
+	if err != nil {
+		http.Error(w, "n must be a number", http.StatusBadRequest)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeJSON(w, map[string]any{"ok": true, "speed_limit": s.mgr.SetSpeedLimit(n)})
+		return
+	}
+	got, err := s.mgr.SetTaskSpeedLimit(id, n)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "speed_limit": got})
 }
 
 // handleConfig tells the extension where downloads go and how godm is set up,

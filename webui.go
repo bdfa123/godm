@@ -201,6 +201,10 @@ const uiHTML = `<!doctype html>
       Downloads at once
       <select id="limit"></select>
     </label>
+    <label class="field" title="The most all downloads together may use. Each download can be limited on its own as well.">
+      Speed limit
+      <select id="speed"></select>
+    </label>
     <button class="btn" id="pauseAll">Pause all</button>
     <button class="btn" id="resumeAll">Resume all</button>
     <button class="btn primary" id="addBtn">+ Add links</button>
@@ -276,7 +280,7 @@ const uiHTML = `<!doctype html>
 
 <script>
 var TOKEN = "__TOKEN__";
-var S = { tasks: [], limit: 3, tab: "all", open: {}, prev: {}, target: null, online: true };
+var S = { tasks: [], limit: 3, speed: 0, tab: "all", open: {}, prev: {}, target: null, online: true };
 
 function api(path, opts) {
   opts = opts || {};
@@ -409,6 +413,29 @@ function connSelect(t) {
     }).join("") + "</select></label>";
 }
 
+// Speed limits are in bytes per second; 0 means none.
+var SPEED_CHOICES = [0, 512 << 10, 1 << 20, 2 << 20, 5 << 20, 10 << 20, 20 << 20, 50 << 20];
+function speedLabel(n) { return n > 0 ? human(n).replace(".0 ", " ") + "/s" : "Unlimited"; }
+function speedOptions(cur) {
+  var opts = SPEED_CHOICES.slice();
+  if (opts.indexOf(cur) < 0 && cur > 0) opts.push(cur);
+  opts.sort(function (a, b) { return a - b; });
+  return opts.map(function (n) {
+    return '<option value="' + n + '"' + (n === cur ? " selected" : "") + ">" + speedLabel(n) + "</option>";
+  }).join("");
+}
+function speedSelect(t) {
+  return '<label class="field speedsel" title="Speed limit for this download, on top of the overall one. Changing it takes effect immediately.">Speed ' +
+    '<select data-speed="' + t.id + '">' + speedOptions(t.speed_limit || 0) + "</select></label>";
+}
+
+// taskControls are the selects at the end of a card. yt-dlp runs its own
+// transfers, so neither applies to it.
+function taskControls(t) {
+  if (t.state === "done" || t.kind === "yt-dlp") return "";
+  return '<span style="flex:1"></span>' + speedSelect(t) + (t.resumable !== false ? connSelect(t) : "");
+}
+
 function queuePosition(t) {
   var queued = S.tasks.filter(function (x) { return x.state === "queued"; })
     .sort(function (a, b) { return new Date(a.added_at) - new Date(b.added_at); });
@@ -528,7 +555,7 @@ function card(t) {
       '<div class="actions">' + acts.map(function (a) {
         return '<button class="btn ghost small' + (a[0] === "remove" ? " danger" : "") + '" data-act="' + a[0] + '" data-id="' + t.id + '">' + a[1] + "</button>";
       }).join("") +
-      (t.state !== "done" && t.resumable !== false ? '<span style="flex:1"></span>' + connSelect(t) : "") +
+      taskControls(t) +
       "</div>" +
       (open ? connTable(t) : "") +
     "</div></div>";
@@ -581,6 +608,11 @@ function poll() {
     S.tasks = d.tasks || [];
     S.afterAll = d.after_all;
     if (d.limit && d.limit !== S.limit) { S.limit = d.limit; document.getElementById("limit").value = d.limit; }
+    var sp = document.getElementById("speed");
+    if (d.speed_limit !== undefined && d.speed_limit !== S.speed && document.activeElement !== sp) {
+      S.speed = d.speed_limit;
+      sp.innerHTML = speedOptions(S.speed);
+    }
     render();
   }).catch(function () {
     S.online = false;
@@ -662,6 +694,18 @@ document.getElementById("list").addEventListener("change", function (e) {
   }).catch(fail);
 });
 
+document.getElementById("list").addEventListener("change", function (e) {
+  var sel = e.target.closest("select[data-speed]");
+  if (!sel) return;
+  var id = sel.getAttribute("data-speed"), n = parseInt(sel.value, 10);
+  sel.blur();
+  post("/api/speed?id=" + q(id) + "&n=" + n).then(function (r) {
+    if (!r.ok) return toast(r.error, "err");
+    toast(r.speed_limit > 0 ? "This download is limited to " + speedLabel(r.speed_limit) + "." : "This download has no limit of its own.");
+    poll();
+  }).catch(fail);
+});
+
 document.getElementById("tabs").addEventListener("click", function (e) {
   var b = e.target.closest("[data-tab]");
   if (b) { S.tab = b.getAttribute("data-tab"); render(); }
@@ -691,6 +735,18 @@ document.getElementById("addrGo").addEventListener("click", function () {
   sel.value = S.limit;
   sel.addEventListener("change", function () {
     post("/api/limit?n=" + sel.value).then(function (r) { S.limit = r.limit; poll(); }).catch(fail);
+  });
+})();
+(function () {
+  var sel = document.getElementById("speed");
+  sel.innerHTML = speedOptions(S.speed);
+  sel.addEventListener("change", function () {
+    post("/api/speed?n=" + sel.value).then(function (r) {
+      S.speed = r.speed_limit;
+      sel.blur();
+      toast(r.speed_limit > 0 ? "All downloads together are limited to " + speedLabel(r.speed_limit) + "." : "Downloads are no longer speed limited.");
+      poll();
+    }).catch(fail);
   });
 })();
 document.getElementById("pauseAll").addEventListener("click", function () { post("/api/pause-all").then(poll).catch(fail); });

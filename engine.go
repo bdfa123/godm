@@ -46,6 +46,10 @@ type Options struct {
 	// StallTimeout ends a connection that has received nothing for this long
 	// and retries it from where it got to. Zero means 30 seconds.
 	StallTimeout time.Duration
+	// Limiters are the speed limits the download keeps to, all at once: the
+	// one shared by every download and its own, say. Their rates can change
+	// while it runs.
+	Limiters []*RateLimiter
 
 	// Refresh resumes an interrupted download from a different URL, the way a
 	// download manager continues after the user fetches a fresh link. Saved
@@ -967,6 +971,19 @@ func (t *task) shouldMove(seg *Segment) bool {
 	return found
 }
 
+// playerWaitsOn reports that the next bytes seg fetches are the first ones a
+// player is waiting for. Under a speed limit those go ahead of the rest.
+func (t *task) playerWaitsOn(seg *Segment) bool {
+	f, ok := t.focus()
+	if !ok {
+		return false
+	}
+	t.segMu.Lock()
+	g := t.firstMissingLocked(f)
+	t.segMu.Unlock()
+	return seg.Start+seg.done.Load() == g
+}
+
 func (t *task) unclaim(s *Segment) {
 	t.segMu.Lock()
 	s.busy = false
@@ -1093,6 +1110,7 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	// whole download with it.
 	body := newStallGuard(resp.Body, t.opts.StallTimeout, cancel)
 	defer body.stop()
+	limits := rateLimits(t.opts.Limiters)
 	buf := make([]byte, readBufSize)
 	var looked time.Time
 	for {
@@ -1105,11 +1123,18 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 				return errMove
 			}
 		}
-		n, rerr := body.Read(buf)
+		n, rerr := body.Read(buf[:limits.chunk(len(buf))])
 		if n > 0 {
 			reached, werr := t.store(seg, buf[:n], &offset)
 			if werr != nil {
 				return werr
+			}
+			// Pay for the bytes once they are on disk: a player waiting on
+			// them has them now, and the wait falls on the next read.
+			if limits.limited() {
+				if err := limits.wait(ctx, n, t.playerWaitsOn(seg)); err != nil {
+					return err
+				}
 			}
 			if reached {
 				// Also the normal exit when a split shortened this range: the
