@@ -841,8 +841,10 @@ function speedSelect(t) {
 
 // taskControls are the selects at the end of a card. yt-dlp runs its own
 // transfers, so neither applies to it.
-// A torrent counts peers rather than connections, and the speed limit does
-// not reach the torrent client yet, so neither control would do anything.
+// A torrent counts peers rather than connections, and only the overall speed
+// limit reaches the torrent client, which has one limiter for every torrent:
+// a download's own limit is HTTP-only for now. So neither control would do
+// anything for a torrent.
 function taskControls(t) {
   if (t.state === "done" || t.kind === "yt-dlp" || t.kind === "bt") return "";
   return '<span style="flex:1"></span>' + speedSelect(t) + (t.resumable !== false ? connSelect(t) : "");

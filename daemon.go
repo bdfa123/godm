@@ -1105,9 +1105,11 @@ func (m *Manager) Limit() int {
 }
 
 // SetSpeedLimit caps all downloads together at n bytes per second, or lifts
-// the cap with 0. Running downloads slow down or speed up at once.
+// the cap with 0. Running downloads slow down or speed up at once. Torrents
+// keep to the same figure through the torrent client; see setDownloadRate.
 func (m *Manager) SetSpeedLimit(n int64) int64 {
 	m.speed.SetRate(n)
+	m.bt.setDownloadRate(m.speed.Rate())
 	m.dirty.Store(true)
 	return m.speed.Rate()
 }
@@ -1264,6 +1266,7 @@ func (m *Manager) load() error {
 		m.notifyOn.Store(*list.Notify)
 	}
 	m.speed.SetRate(list.SpeedLimit)
+	m.bt.setDownloadRate(m.speed.Rate())
 	if p, ok := parseSeedPolicy(list.SeedPolicy); ok {
 		m.bt.setPolicy(p)
 	}

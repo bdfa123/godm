@@ -857,6 +857,42 @@ func TestADuplicateTorrentLeavesTheOriginalAlone(t *testing.T) {
 	}
 }
 
+func TestTorrentsKeepToTheOverallSpeedLimit(t *testing.T) {
+	const limit = 256 << 10
+	src := t.TempDir()
+	payload := makePayload(3 << 20) // twelve seconds at the limit
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: payload})
+	seed := newSeeder(t, src, mi, 0)
+
+	m := newBTManager(t)
+	m.SetSpeedLimit(limit) // before the client starts
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "film.bin", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tor := waitLoaded(t, m, id)
+	waitFor(t, 10*time.Second, "the file list", func() bool { return tor.Info() != nil })
+	start, before := time.Now(), tor.BytesCompleted()
+	time.Sleep(3 * time.Second)
+	got := tor.BytesCompleted() - before
+	want := int64(time.Since(start).Seconds() * limit)
+	if got < want*6/10 || got > want*14/10 {
+		t.Errorf("under a limit of %d bytes/s, %d bytes arrived in %s; want about %d", limit, got, time.Since(start).Round(time.Millisecond), want)
+	}
+
+	// Lifting the limit reaches the torrent that is already running.
+	m.SetSpeedLimit(0)
+	lifted := time.Now()
+	waitFor(t, 10*time.Second, "the rest without a limit", stateIs(m, id, StateDone))
+	if d := time.Since(lifted); d > 5*time.Second {
+		t.Errorf("the last %d bytes took %s with the limit lifted", int64(len(payload))-got-before, d.Round(time.Millisecond))
+	}
+	v, _ := findTask(m, id)
+	if b, _ := os.ReadFile(v.Path); sum(b) != sum(payload) {
+		t.Fatal("downloaded file differs from the seeded one")
+	}
+}
+
 func TestSeedingPolicyEndpointAndPersistence(t *testing.T) {
 	m := newBTManager(t)
 	_, api := btAPI(t, m)

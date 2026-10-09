@@ -25,6 +25,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"go.etcd.io/bbolt"
+	"golang.org/x/time/rate"
 
 	"godm/internal/torrentio" // before storage initialises; see the package
 )
@@ -252,6 +253,43 @@ type btEngine struct {
 	closed  bool
 	policy  SeedPolicy
 	changed chan struct{} // closed and replaced when the policy changes
+	// down is the client's download limit and downRate the overall limit it
+	// follows, in bytes per second; see setDownloadRate.
+	down     *rate.Limiter
+	downRate int64
+}
+
+// setDownloadRate holds torrents to the limit all downloads share, 0 for none,
+// from now on: the client reads every peer connection through down, and a
+// change reaches the connections at once. The client takes its limiter when
+// it starts and cannot be given one later, so it always has one, unlimited
+// until there is a limit.
+//
+// The client keeps to the figure on its own rather than drawing on the same
+// allowance as HTTP downloads, which it has no way to wait on, so while both
+// kinds run they can use up to twice the limit between them. A download's
+// own limit does not reach torrents at all: the library has one limiter for
+// every torrent in the client.
+func (e *btEngine) setDownloadRate(n int64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.downRate = max(n, 0)
+	if e.down != nil {
+		limit, burst := btDownloadLimit(e.downRate)
+		e.down.SetLimit(limit)
+		e.down.SetBurst(burst)
+	}
+}
+
+// btDownloadLimit is the client's limiter setting for a limit in bytes per
+// second. The burst is a tenth of a second's worth, as for HTTP downloads,
+// within bounds: the client cuts each read to the burst, and reads of under
+// 16 KiB would cost more than they are worth.
+func btDownloadLimit(n int64) (rate.Limit, int) {
+	if n <= 0 {
+		return rate.Inf, 1 << 20
+	}
+	return rate.Limit(n), int(min(max(n/10, 16<<10), 1<<20))
 }
 
 // btLoaded is a torrent in the client and the task it belongs to.
@@ -463,6 +501,9 @@ func (e *btEngine) config(port int) *torrent.ClientConfig {
 	// a second piece database in the working directory.
 	cfg.DefaultStorage = noStorage{}
 	cfg.Slogger = e.slog
+	limit, burst := btDownloadLimit(e.downRate)
+	e.down = rate.NewLimiter(limit, burst)
+	cfg.DownloadRateLimiter = e.down
 	if e.configure != nil {
 		e.configure(cfg)
 	}
