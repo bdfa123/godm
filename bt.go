@@ -26,8 +26,12 @@ import (
 	"github.com/anacrolix/torrent/storage"
 	"go.etcd.io/bbolt"
 
-	_ "godm/internal/torrentio" // before storage initialises; see the package
+	"godm/internal/torrentio" // before storage initialises; see the package
 )
+
+// The storage package has read its setting by now: package main initialises
+// after everything it imports.
+func init() { torrentio.Restore() }
 
 // Torrents run inside the daemon on github.com/anacrolix/torrent. A torrent is
 // one more kind of task: it waits its turn in the same queue, pauses and

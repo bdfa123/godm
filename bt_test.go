@@ -387,6 +387,48 @@ func TestTorrentFilesThatShareANameOnNTFSGetTheirOwn(t *testing.T) {
 	waitFor(t, 10*time.Second, "the torrent's folder to go", func() bool { return !pathExists(v.Path) })
 }
 
+func TestTorrentFilesAreWrittenWithPlainFileIO(t *testing.T) {
+	// The setting is godm's, not something yt-dlp, ffmpeg or a player
+	// should inherit.
+	if v, ok := os.LookupEnv("TORRENT_STORAGE_DEFAULT_FILE_IO"); ok {
+		t.Errorf("TORRENT_STORAGE_DEFAULT_FILE_IO=%s is still set; every program godm starts inherits it", v)
+	}
+
+	// Mapped files would show in two ways: the storage sizes a file in full
+	// the moment it first writes to it, and on Windows the file cannot be
+	// deleted afterwards, because the mapping outlives the torrent.
+	const chunk = 16 << 10
+	info := &metainfo.Info{Name: "film.bin", Length: 2 << 20, PieceLength: 1 << 20, Pieces: make([]byte, 2*20)}
+	mt := &managedTask{outDir: t.TempDir()}
+	pc, err := openBTCompletion(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	st := &btStorage{mt: mt, pc: pc, slog: slog.New(slog.NewTextHandler(io.Discard, nil)), failed: make(chan error, 1)}
+	impl, err := st.OpenTorrent(t.Context(), info, metainfo.NewHashFromHex("0123456789abcdef0123456789abcdef01234567"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := impl.Piece(info.Piece(0)).WriteAt(make([]byte, chunk), 0); err != nil {
+		t.Fatal(err)
+	}
+	p := mt.snapshot().Path
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() != chunk {
+		t.Errorf("one chunk written made the file %d bytes, want %d: the storage is mapping files, not using plain file IO", fi.Size(), chunk)
+	}
+	if err := impl.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Errorf("a file the torrent has let go of cannot be deleted: %v", err)
+	}
+}
+
 func TestTheLogKeepsHashFailuresButNotEveryGoodPiece(t *testing.T) {
 	var buf bytes.Buffer
 	l := slog.New(quietHashes{slog.NewTextHandler(&buf, nil)}).With("torrent", "x")
