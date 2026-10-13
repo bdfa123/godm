@@ -93,12 +93,26 @@ func sanitize(name string) string {
 	if winReserved.MatchString(name) {
 		name = "_" + name
 	}
+	// Every name a server, a playlist or a torrent can choose passes through
+	// here, and none of them may come out as a sidecar's.
+	if isStateName(name) {
+		name += "_"
+	}
 	if len(name) > 180 {
 		ext := path.Ext(name)
 		if len(ext) > 16 {
 			ext = ""
 		}
 		name = trimUTF8(name[:len(name)-len(ext)], 180-len(ext)) + ext
+		// A cut through the middle of a name can end on a dot or a space, which
+		// Windows would drop, or on a sidecar's extension. One byte shorter and
+		// it does not, where adding one would make the name too long again: a
+		// task that is resumed is given its file's name back, and must get the
+		// same name out.
+		name = strings.TrimRight(name, " .")
+		if isStateName(name) {
+			name = name[:len(name)-1]
+		}
 	}
 	return name
 }

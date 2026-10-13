@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const stateVersion = 1
@@ -31,7 +32,19 @@ type SegSnap struct {
 	Done  int64 `json:"done"`
 }
 
-func statePath(target string) string { return target + ".godm" }
+const stateExt = ".godm"
+
+func statePath(target string) string { return target + stateExt }
+
+// isStateName reports whether a file of this name would be read as another
+// file's sidecar. A sidecar is taken as godm's word that the file beside it
+// is its own unfinished work and may be written into, so no download may ever
+// be saved under such a name: its contents are the server's. Windows ignores
+// case in names and drops dots and spaces from their end, so "x.GODM" and
+// "x.godm. " are both x's sidecar there.
+func isStateName(name string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimRight(name, " .")), stateExt)
+}
 
 func loadState(target string) (*State, bool) {
 	b, err := os.ReadFile(statePath(target))
