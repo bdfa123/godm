@@ -58,7 +58,7 @@ function event() {
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {} }, options);
   const data = { session: {}, sync: Object.assign({}, opts.settings), local: {} };
-  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [] };
+  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [] };
   const events = {
     determining: event(),
     removed: event(),
@@ -111,8 +111,12 @@ function start(options) {
     URL,
     console: { debug() {}, log() {}, warn() {}, error() {} },
     // Nothing waits on a timer in these tests, and a real one would keep the
-    // test run from ending.
-    setTimeout: () => 0,
+    // test run from ending. The delays asked for are kept, so a test can see
+    // how long the worker was willing to wait.
+    setTimeout: (fn, ms) => {
+      seen.timeouts.push(ms);
+      return 0;
+    },
     importScripts: (...files) => {
       for (const f of files) {
         vm.runInContext(fs.readFileSync(path.join(__dirname, f), "utf8"), context, { filename: f });
@@ -312,6 +316,20 @@ test("a refusal of a picked batch, a stream or an inspection leaves takeover on"
 
   await w.download(ITEM);
   assert.deepEqual(w.seen.cancelled, [ITEM.id]);
+});
+
+// The host waits up to 35 seconds for the daemon to read a stream, and says so
+// when it gives up. The worker has to still be there to hear it.
+test("an inspection is given longer than the host gives the daemon", async () => {
+  const w = start();
+  await w.message({ type: "godm-media-inspect", url: "https://example.test/a.m3u8", kind: "hls" });
+  const waits = w.seen.timeouts.filter((ms) => ms !== 4000 && ms !== 15000);
+  assert.equal(waits.length, 1, "the inspection asked to be waited for: " + w.seen.timeouts);
+  assert.ok(waits[0] > 35000, "waits " + waits[0] + " ms");
+
+  const other = start();
+  await other.message({ type: "godm-media-download", url: "https://example.test/a.m3u8", kind: "hls" });
+  assert.deepEqual(other.seen.timeouts.filter((ms) => ms > 15000), [], "other requests keep the short wait");
 });
 
 test("a host that is down on a stream or an inspection still switches takeover off", async () => {

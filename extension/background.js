@@ -20,6 +20,11 @@ const CONFIRM_HEIGHT = 370;
 // The folder chooser waits for a person; the daemon itself gives up after three
 // minutes, so this only has to outlast that.
 const BROWSE_TIMEOUT_MS = 4 * 60 * 1000 + 10000;
+// Reading a stream's qualities can take as long as the daemon lets yt-dlp run
+// (30 seconds), and the host waits a little longer than that (35) before it
+// gives up; the worker must outlast both or it reports a timeout for an answer
+// that is still coming.
+const INSPECT_TIMEOUT_MS = 40000;
 
 const DEFAULTS = {
   enabled: true,
@@ -872,7 +877,7 @@ async function inspectStream(msg) {
     cookie: await cookieHeader(msg.url),
     referrer: msg.page || "",
     userAgent: navigator.userAgent
-  });
+  }, INSPECT_TIMEOUT_MS);
   await noteHost(resp);
   return resp;
 }

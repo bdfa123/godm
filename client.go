@@ -185,13 +185,21 @@ func (c *daemonClient) browse(current string) (string, error) {
 	return out.Path, nil
 }
 
+// inspectTimeout is how long an inspection may take. The daemon gives yt-dlp
+// and the playlist fetch 30 seconds and then answers with what went wrong, so
+// this waits a little longer than that rather than cutting in just before an
+// answer that is on its way.
+const inspectTimeout = 35 * time.Second
+
 func (c *daemonClient) inspect(req jobRequest) (*StreamInfo, error) {
 	var out struct {
 		OK    bool        `json:"ok"`
 		Error string      `json:"error"`
 		Info  *StreamInfo `json:"info"`
 	}
-	if err := c.do(http.MethodPost, "/api/inspect", req, &out); err != nil {
+	slow := *c
+	slow.http = &http.Client{Timeout: inspectTimeout}
+	if err := slow.do(http.MethodPost, "/api/inspect", req, &out); err != nil {
 		return nil, err
 	}
 	if !out.OK {

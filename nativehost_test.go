@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -394,6 +395,25 @@ func TestNativeKeepsTheDaemonsReasonShort(t *testing.T) {
 	}
 	if !strings.HasPrefix(resp.Error, "汉汉") {
 		t.Errorf("the reason does not start with what the daemon said: %.20q", resp.Error)
+	}
+}
+
+// The daemon lets yt-dlp or a playlist fetch take up to 30 seconds. The host's
+// ordinary short wait would give up on a slow site long before that, with a
+// timeout error for an answer that was on its way.
+func TestNativeInspectWaitsLongerThanOtherRequests(t *testing.T) {
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		writeJSON(w, map[string]any{"ok": true, "info": map[string]any{"title": "slow"}, "tasks": []any{}})
+	})
+	c.http.Timeout = 50 * time.Millisecond
+
+	if resp := forwardNative(c, nativeRequest{Type: "tasks"}); resp.OK {
+		t.Fatalf("the ordinary wait did not apply to the control request: %+v", resp)
+	}
+	resp := forwardNative(c, nativeRequest{Type: "inspect", Kind: "yt-dlp", URL: "https://example.test/watch"})
+	if !resp.OK || resp.Info == nil || resp.Info.Title != "slow" {
+		t.Fatalf("got %+v", resp)
 	}
 }
 
