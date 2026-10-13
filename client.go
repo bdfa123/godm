@@ -64,13 +64,20 @@ func refusalReason(body io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(body, maxReason+utf8.UTFMax))
 	why := strings.TrimSpace(strings.ToValidUTF8(string(b), ""))
 	if len(why) > maxReason {
-		why = why[:maxReason]
-		for !utf8.ValidString(why) {
-			why = why[:len(why)-1]
-		}
-		why = strings.TrimSpace(why) + "..."
+		why = strings.TrimSpace(clip(why, maxReason)) + "..."
 	}
 	return why
+}
+
+// clip cuts s to at most n bytes without cutting a character in two.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func refusalStatus(code int) bool {

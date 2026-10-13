@@ -13,6 +13,14 @@ import (
 // message at 1 MB. We stay far below both.
 const maxNativeMessage = 8 << 20
 
+// maxHostReply is the most the host will write to the browser in one message,
+// under Chrome's 1 MB so that a reply too big is replaced by an explanation and
+// not by the browser closing the connection.
+const maxHostReply = 900 << 10
+
+// popupTaskLimit is how many downloads the popup lists. It is sent no more.
+const popupTaskLimit = 8
+
 type nativeRequest struct {
 	Type        string            `json:"type"` // download | batch | inspect | config | browse | tasks | open | ping
 	URL         string            `json:"url"`
@@ -126,7 +134,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		if err != nil {
 			return failed(err)
 		}
-		return nativeResponse{OK: true, Tasks: tasks}
+		return nativeResponse{OK: true, Tasks: popupTasks(tasks)}
 
 	case "open":
 		// The popup's link to the manager. The address of the page has the
@@ -189,6 +197,37 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	default:
 		return nativeResponse{Error: "unknown message type: " + req.Type}
 	}
+}
+
+// popupTasks cuts the daemon's task list down to what the popup draws: the
+// first few, in the daemon's order, with only the fields it reads. Finished
+// downloads stay in the list until they are removed, so the whole of it grows
+// without limit and would one day be more than the browser takes in a single
+// message from the host.
+//
+// The popup tells a download fetched in several pieces from one fetched in a
+// piece by how many segments it has, so up to two empty ones are kept to say
+// so. An address or a name is clipped, not dropped: it stands in for the name
+// of a download that has none yet.
+func popupTasks(tasks []TaskView) []TaskView {
+	if len(tasks) > popupTaskLimit {
+		tasks = tasks[:popupTaskLimit]
+	}
+	out := make([]TaskView, len(tasks))
+	for i, t := range tasks {
+		out[i] = TaskView{
+			ID:       t.ID,
+			URL:      clip(t.URL, 2000),
+			Filename: clip(t.Filename, 500),
+			State:    t.State,
+			Size:     t.Size,
+			Received: t.Received,
+			Speed:    t.Speed,
+			Active:   t.Active,
+			Segments: make([]SegmentView, min(len(t.Segments), 2)),
+		}
+	}
+	return out
 }
 
 // failed is the answer for a request the daemon did not carry out.
@@ -284,6 +323,15 @@ func writeNativeMessage(w io.Writer, v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
+	}
+	if len(b) > maxHostReply {
+		// Chrome would drop this and close the host, which the extension can only
+		// read as the host being gone. Say what happened instead.
+		log.Printf("reply of %d bytes is too big for the browser", len(b))
+		b, err = json.Marshal(nativeResponse{Error: fmt.Sprintf("the reply was %d bytes, more than the browser accepts from a native host", len(b))})
+		if err != nil {
+			return err
+		}
 	}
 	var hdr [4]byte
 	binary.NativeEndian.PutUint32(hdr[:], uint32(len(b)))

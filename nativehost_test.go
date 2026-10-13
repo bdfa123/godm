@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -414,6 +415,105 @@ func TestNativeInspectWaitsLongerThanOtherRequests(t *testing.T) {
 	resp := forwardNative(c, nativeRequest{Type: "inspect", Kind: "yt-dlp", URL: "https://example.test/watch"})
 	if !resp.OK || resp.Info == nil || resp.Info.Title != "slow" {
 		t.Fatalf("got %+v", resp)
+	}
+}
+
+// bigList is what the daemon answers once a long run of downloads has piled up:
+// n finished tasks, each with the signed address and the path it really has,
+// and a running one at the front that is fetching in sixteen pieces.
+func bigList(n int) []TaskView {
+	long := "https://cdn.example.test/dl/" + strings.Repeat("sig=abcdef0123456789&", 25)
+	tasks := []TaskView{{
+		ID: "run", URL: long, Filename: "big.iso", Path: `D:\Downloads\big.iso`, State: "running",
+		Size: 5 << 30, Received: 1 << 30, Speed: 9 << 20, Conns: 16, Active: 16,
+		Segments: make([]SegmentView, 16),
+	}}
+	for i := 0; i < n; i++ {
+		tasks = append(tasks, TaskView{
+			ID: "t" + strconv.Itoa(i), URL: long, Referrer: "https://example.test/page/" + strconv.Itoa(i),
+			Filename: "file" + strconv.Itoa(i) + ".zip", Path: `D:\Downloads\file` + strconv.Itoa(i) + ".zip",
+			State: "done", Size: 1 << 20, Received: 1 << 20, Conns: 8,
+		})
+	}
+	return tasks
+}
+
+// Chrome closes the host for a message over 1 MB, which then looks like the host
+// being gone. The popup shows a handful of downloads, so that is all it is sent,
+// however long the list has grown.
+func TestNativeTasksReplyIsBoundedWhateverTheListHolds(t *testing.T) {
+	for _, n := range []int{0, 5, 3000} {
+		c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]any{"ok": true, "tasks": bigList(n)})
+		})
+		resp := forwardNative(c, nativeRequest{Type: "tasks"})
+		wire, _ := json.Marshal(resp)
+		if !resp.OK || len(wire) > 64<<10 {
+			t.Errorf("%d tasks: ok=%v, the reply is %d bytes", n, resp.OK, len(wire))
+		}
+		if want := min(n+1, popupTaskLimit); len(resp.Tasks) != want {
+			t.Errorf("%d tasks: the popup is sent %d, want %d", n, len(resp.Tasks), want)
+		}
+	}
+}
+
+// What the popup draws has to survive the trimming, in the order it came.
+func TestNativeTasksReplyKeepsWhatThePopupShows(t *testing.T) {
+	list := bigList(20)
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": true, "tasks": list})
+	})
+	resp := forwardNative(c, nativeRequest{Type: "tasks"})
+	if len(resp.Tasks) < 2 {
+		t.Fatalf("got %+v", resp)
+	}
+	for i, got := range resp.Tasks {
+		want := list[i]
+		if got.ID != want.ID || got.Filename != want.Filename || got.State != want.State ||
+			got.Size != want.Size || got.Received != want.Received || got.Speed != want.Speed || got.Active != want.Active {
+			t.Errorf("task %d changed: got %+v, want %+v", i, got, want)
+		}
+		if (len(got.Segments) > 1) != (len(want.Segments) > 1) {
+			t.Errorf("task %d: the popup tells a download in pieces from one in a piece by this; %d became %d", i, len(want.Segments), len(got.Segments))
+		}
+		if !strings.HasPrefix(want.URL, got.URL) || got.URL == "" {
+			t.Errorf("task %d: the address was changed, not shortened: %q", i, got.URL)
+		}
+	}
+	if len(resp.Tasks[0].Segments) < 2 {
+		t.Errorf("the running download lost its pieces: %+v", resp.Tasks[0].Segments)
+	}
+}
+
+// Whatever else grows, a message the browser would drop must not be sent as if
+// it were fine: the popup is told what happened instead.
+func TestNativeMessageTooBigForTheBrowserIsReplacedByAnError(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeNativeMessage(&buf, nativeResponse{OK: true, Path: strings.Repeat("x", maxHostReply)}); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() > maxHostReply {
+		t.Fatalf("wrote %d bytes, over what the browser takes", buf.Len())
+	}
+	got, err := readNativeMessage(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp nativeResponse
+	if err := json.Unmarshal(got, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.OK || resp.Error == "" {
+		t.Errorf("got %+v", resp)
+	}
+
+	buf.Reset()
+	if err := writeNativeMessage(&buf, nativeResponse{OK: true, ID: "t1"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = readNativeMessage(&buf)
+	if string(got) != `{"ok":true,"id":"t1"}` {
+		t.Errorf("an ordinary answer was changed: %s", got)
 	}
 }
 
