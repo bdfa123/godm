@@ -118,7 +118,10 @@ func (s *State) reusable(pr *ProbeResult, url string, refresh bool) bool {
 		return false
 	}
 	for _, sg := range s.Segments {
-		if sg.Start < 0 || sg.End >= s.Size || sg.Done < 0 || sg.Start+sg.Done > sg.End+1 {
+		// End before Start is also how a range with no end is written, the one
+		// range of a download that could not be resumed. This server can, and
+		// there is no asking it for bytes "0 to -1".
+		if sg.Start < 0 || sg.End < sg.Start || sg.End >= s.Size || sg.Done < 0 || sg.Start+sg.Done > sg.End+1 {
 			return false
 		}
 	}

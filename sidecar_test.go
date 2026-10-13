@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -237,5 +238,180 @@ func TestNoStreamIsNamedLikeASidecar(t *testing.T) {
 		if got, _ := os.ReadFile(target); !bytes.Equal(got, joined(segs)) {
 			t.Errorf("%s: the saved file does not match the stream", what)
 		}
+	}
+}
+
+// downloadHLSWithin fails the test instead of waiting for ever on a download
+// that has stopped making progress without ending.
+func downloadHLSWithin(t *testing.T, limit time.Duration, o HLSOptions) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type result struct {
+		target string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		target, err := DownloadHLS(ctx, o)
+		done <- result{target, err}
+	}()
+	select {
+	case r := <-done:
+		return r.target, r.err
+	case <-time.After(limit):
+		t.Fatalf("the download had not ended after %v", limit)
+		return "", nil
+	}
+}
+
+// A sidecar's numbers decide where the file is cut and which segment is
+// fetched next. One that was damaged, edited by hand or written by something
+// else must not get that far: a segment index below zero took the daemon down
+// with every download in it, and one past the end left the task running for
+// ever with nothing to wait for.
+func TestAMalformedStreamSidecarIsNotResumedFrom(t *testing.T) {
+	segs := makeSegments(4)
+	whole := joined(segs)
+	initSeg := []byte("FTYPISO6MOOVBOXHERE")
+	cases := []struct {
+		name string
+		file []byte
+		st   hlsState
+		init bool // the stream has an EXT-X-MAP
+	}{
+		{name: "a segment index below zero", st: hlsState{Next: -1}},
+		{name: "a segment index past the end", file: whole, st: hlsState{Next: 5, Written: int64(len(whole))}},
+		{name: "a length below zero", st: hlsState{Written: -1}},
+		{name: "segments counted but no bytes", file: whole[:len(segs[0])], st: hlsState{Next: 2}},
+		{name: "bytes counted but no segments", file: []byte("not part of the stream"), st: hlsState{Written: 22}},
+		{name: "segments without the init segment before them", file: segs[0], st: hlsState{Next: 1, Written: int64(len(segs[0]))}, init: true},
+		{name: "an init segment the stream does not have", file: initSeg, st: hlsState{Written: int64(len(initSeg)), InitDone: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newHLSServer(t, segs)
+			want := whole
+			if c.init {
+				s.init = initSeg
+				want = append(append([]byte{}, initSeg...), whole...)
+			}
+			dir := t.TempDir()
+			o := HLSOptions{URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip.ts", Connections: 2, MaxRetries: 1}
+			target := filepath.Join(dir, "clip.ts")
+			if err := os.WriteFile(target, c.file, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st := c.st
+			st.Version, st.Kind, st.Playlist, st.Variant, st.Total = stateVersion, "hls", o.URL, -1, len(segs)
+			if err := saveHLSState(target, &st); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := downloadHLSWithin(t, 10*time.Second, o)
+			if err != nil {
+				t.Fatalf("the download failed: %v", err)
+			}
+			// The sidecar names this playlist, so the file is this download's
+			// own and is started over where it is.
+			if got != target {
+				t.Errorf("the stream went to %s, want it started over in %s", filepath.Base(got), filepath.Base(target))
+			}
+			if b, _ := os.ReadFile(got); !bytes.Equal(b, want) {
+				t.Errorf("the file is %d bytes and is not the stream (%d bytes)", len(b), len(want))
+			}
+			if pathExists(statePath(target)) {
+				t.Error("the sidecar is still there after the download finished")
+			}
+		})
+	}
+}
+
+// The sidecar is written on a timer, and cleared only after the finished file
+// has been flushed to disk. A process that dies in between leaves one that
+// counts every segment as written. That is a sound sidecar, and the only work
+// left is to say so.
+func TestAStreamWithEverySegmentWrittenFinishesWhenResumed(t *testing.T) {
+	segs := makeSegments(4)
+	whole := joined(segs)
+	s := newHLSServer(t, segs)
+	dir := t.TempDir()
+	o := HLSOptions{URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip.ts", Connections: 2}
+	target := filepath.Join(dir, "clip.ts")
+	// Something of a write that never completed is past the counted length.
+	if err := os.WriteFile(target, append(append([]byte{}, whole...), "torn"...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := saveHLSState(target, &hlsState{
+		Version: stateVersion, Kind: "hls", Playlist: o.URL, Variant: -1,
+		Total: len(segs), Next: len(segs), Written: int64(len(whole)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var last HLSProgress
+	o.OnProgress = func(p HLSProgress) {
+		mu.Lock()
+		last = p
+		mu.Unlock()
+	}
+	got, err := downloadHLSWithin(t, 10*time.Second, o)
+	if err != nil {
+		t.Fatalf("the download failed: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got != target {
+		t.Errorf("the stream went to %s instead of finishing %s", filepath.Base(got), filepath.Base(target))
+	}
+	if b, _ := os.ReadFile(target); !bytes.Equal(b, whole) {
+		t.Errorf("the file is %d bytes, want the %d of the stream", len(b), len(whole))
+	}
+	if pathExists(statePath(target)) {
+		t.Error("the sidecar is still there after the download finished")
+	}
+	for i := range segs {
+		if n := s.hitCount(fmt.Sprintf("/seg%d.ts", i)); n != 0 {
+			t.Errorf("segment %d was fetched again; it was already in the file", i)
+		}
+	}
+	if last.Segments != len(segs) || last.Bytes != int64(len(whole)) {
+		t.Errorf("the last progress report was %d segments and %d bytes, want it to show the stream complete",
+			last.Segments, last.Bytes)
+	}
+}
+
+// A plain download's sidecar is checked range by range before it is resumed
+// from. A range with no end is how a download whose server gave no way to
+// resume is recorded; once the server does offer ranges, there is no request
+// that asks for "the rest" of it.
+func TestASidecarRangeWithoutAnEndIsNotResumedFrom(t *testing.T) {
+	payload := makePayload(64 << 10)
+	srv := httptest.NewServer(&rangedHandler{payload: payload})
+	defer srv.Close()
+	dir := t.TempDir()
+	o := Options{URL: srv.URL + "/f.bin", OutDir: dir, Connections: 2, MinSplit: 4 << 10, MaxRetries: 1}
+	target := filepath.Join(dir, "f.bin")
+	if err := os.WriteFile(target, make([]byte, len(payload)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := saveState(target, &State{
+		Version: stateVersion, URL: o.URL, Size: int64(len(payload)), ETag: `"fixed-etag"`,
+		Segments: []SegSnap{{Start: 0, End: -1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Download(context.Background(), o)
+	if err != nil {
+		t.Fatalf("the download failed: %v", err)
+	}
+	if res.Resumed || res.Path != target {
+		t.Errorf("resumed = %v into %s, want the download started over in f.bin", res.Resumed, filepath.Base(res.Path))
+	}
+	if got, _ := os.ReadFile(res.Path); sum(got) != sum(payload) {
+		t.Error("content mismatch")
 	}
 }

@@ -470,6 +470,27 @@ func loadHLSState(target string) (*hlsState, bool) {
 	return &s, true
 }
 
+// fits reports whether the sidecar describes a point a download of media
+// could have stopped at. Its numbers go straight into the run, as the length
+// the file is cut to and the index of the segment fetched next, so one that
+// was damaged or edited by hand has to be turned down before then: an index
+// below zero is a panic in a worker, which ends the daemon and every download
+// in it, and the rest resume into a file that is not the stream.
+func (s *hlsState) fits(media *hlsMedia) bool {
+	if s.Total != len(media.Segments) || s.Next < 0 || s.Next > s.Total || s.Written < 0 {
+		return false
+	}
+	hasInit := media.Init != nil
+	if s.InitDone && !hasInit {
+		return false // the length counts an init segment the stream no longer has
+	}
+	if s.Next > 0 {
+		// Segments are in the file, behind the init segment if there is one.
+		return s.Written > 0 && s.InitDone == hasInit
+	}
+	return s.InitDone || s.Written == 0
+}
+
 func saveHLSState(target string, s *hlsState) error {
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -626,7 +647,7 @@ func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsStat
 	base := filepath.Join(o.OutDir, hlsName(o, media))
 
 	if st, ok := loadHLSState(base); ok && st.Playlist == o.URL {
-		if st.Total == len(media.Segments) && st.Variant == variant {
+		if st.Variant == variant && st.fits(media) {
 			if fi, err := os.Stat(base); err == nil && fi.Size() >= st.Written {
 				if release, ok := reserveTarget(base); ok {
 					return base, st, release, nil
@@ -634,8 +655,9 @@ func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsStat
 			}
 		}
 		// Our own earlier attempt at this playlist that cannot be picked up:
-		// the stream was re-encoded, or a different quality was chosen. Start
-		// it over in place rather than leave a dead file behind.
+		// the stream was re-encoded, a different quality was chosen, or the
+		// sidecar does not add up. Start it over in place rather than leave a
+		// dead file behind.
 		if release, ok := reserveTarget(base); ok {
 			clearState(base)
 			return base, nil, release, nil
@@ -781,6 +803,14 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
 	for {
 		r.mu.Lock()
+		// Checked before waiting, not after writing: a run that died between
+		// its last segment and clearing its sidecar resumes with every segment
+		// written, and no worker will ever deliver another to wake this up.
+		if r.want >= len(r.media.Segments) {
+			r.mu.Unlock()
+			r.report()
+			return nil
+		}
 		for r.ready[r.want] == nil && r.failed == nil && ctx.Err() == nil {
 			r.cond.Wait()
 		}
@@ -816,13 +846,7 @@ func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
 		r.mu.Lock()
 		r.want++
 		r.bytes += int64(n)
-		done := r.want
 		r.mu.Unlock()
-
-		if done >= len(r.media.Segments) {
-			r.report()
-			return nil
-		}
 	}
 }
 
