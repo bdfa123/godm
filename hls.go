@@ -535,11 +535,10 @@ func DownloadHLS(ctx context.Context, o HLSOptions) (string, error) {
 	}
 	client := newClient()
 
-	base, err := url.Parse(o.URL)
-	if err != nil {
+	if _, err := url.Parse(o.URL); err != nil {
 		return "", fmt.Errorf("bad playlist URL: %w", err)
 	}
-	body, err := fetchPlaylist(ctx, client, o, o.URL)
+	body, base, err := fetchPlaylist(ctx, client, o, o.URL)
 	if err != nil {
 		return "", err
 	}
@@ -560,10 +559,10 @@ func DownloadHLS(ctx context.Context, o HLSOptions) (string, error) {
 			return "", &SeparateAudioError{Group: variants[chosen].AudioGroup}
 		}
 		vURL := variants[chosen].URI
-		if base, err = url.Parse(vURL); err != nil {
+		if _, err = url.Parse(vURL); err != nil {
 			return "", fmt.Errorf("bad variant URL: %w", err)
 		}
-		if body, err = fetchPlaylist(ctx, client, o, vURL); err != nil {
+		if body, base, err = fetchPlaylist(ctx, client, o, vURL); err != nil {
 			return "", err
 		}
 		if inner, m2, err := parsePlaylist(body, base); err != nil {
@@ -969,34 +968,46 @@ func (r *hlsRun) fetchKey(ctx context.Context, uri string) ([]byte, error) {
 }
 
 func (r *hlsRun) getWithRetry(ctx context.Context, u string, offset, length int64) ([]byte, error) {
+	b, _, err := r.getWithRetryFrom(ctx, u, offset, length)
+	return b, err
+}
+
+// getWithRetryFrom also says where the bytes came from once redirects were
+// followed, which a playlist needs: its relative entries mean that address.
+func (r *hlsRun) getWithRetryFrom(ctx context.Context, u string, offset, length int64) ([]byte, *url.URL, error) {
 	var last error
 	for attempt := 1; attempt <= r.opts.MaxRetries+1; attempt++ {
-		b, err := r.getOnce(ctx, u, offset, length)
+		b, final, err := r.getOnceFrom(ctx, u, offset, length)
 		if err == nil {
-			return b, nil
+			return b, final, nil
 		}
 		last = err
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 		if !retryable(err) {
-			return nil, err
+			return nil, nil, err
 		}
 		select {
 		case <-time.After(backoff(attempt, err)):
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 	}
-	return nil, last
+	return nil, nil, last
 }
 
 func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([]byte, error) {
+	b, _, err := r.getOnceFrom(ctx, u, offset, length)
+	return b, err
+}
+
+func (r *hlsRun) getOnceFrom(ctx context.Context, u string, offset, length int64) ([]byte, *url.URL, error) {
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// u is whatever the playlist named: a variant, a segment or a key, on any
 	// host it likes.
@@ -1006,11 +1017,11 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	}
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return nil, &statusError{
+		return nil, nil, &statusError{
 			code:       resp.StatusCode,
 			status:     resp.Status,
 			retryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
@@ -1031,23 +1042,26 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	// stall along with the last bytes.
 	data, err := readPaced(ctx, io.LimitReader(body, limit+1), r.opts.Limiters)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("response is too large (over %d bytes)", limit)
+		return nil, nil, fmt.Errorf("response is too large (over %d bytes)", limit)
 	}
 	if length > 0 && int64(len(data)) != length {
-		return nil, fmt.Errorf("byte range asked for %d bytes, got %d", length, len(data))
+		return nil, nil, fmt.Errorf("byte range asked for %d bytes, got %d", length, len(data))
 	}
-	return data, nil
+	return data, resp.Request.URL, nil
 }
 
-func fetchPlaylist(ctx context.Context, c *http.Client, o HLSOptions, u string) ([]byte, error) {
+// fetchPlaylist returns the playlist and the address it was finally served
+// from. After a redirect that is not the address that was asked for, and the
+// playlist's relative entries are relative to it.
+func fetchPlaylist(ctx context.Context, c *http.Client, o HLSOptions, u string) ([]byte, *url.URL, error) {
 	r := &hlsRun{opts: o, client: c}
 	if r.opts.MaxRetries <= 0 {
 		r.opts.MaxRetries = defaultRetries
 	}
-	return r.getWithRetry(ctx, u, 0, 0)
+	return r.getWithRetryFrom(ctx, u, 0, 0)
 }
 
 // defaultIV is the segment's sequence number as a 128-bit big-endian integer,
@@ -1151,11 +1165,10 @@ func InspectHLS(ctx context.Context, o HLSOptions) (*StreamInfo, error) {
 		o.MaxRetries = defaultRetries
 	}
 	client := newClient()
-	base, err := url.Parse(o.URL)
-	if err != nil {
+	if _, err := url.Parse(o.URL); err != nil {
 		return nil, fmt.Errorf("bad playlist URL: %w", err)
 	}
-	body, err := fetchPlaylist(ctx, client, o, o.URL)
+	body, base, err := fetchPlaylist(ctx, client, o, o.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -1182,11 +1195,9 @@ func InspectHLS(ctx context.Context, o HLSOptions) (*StreamInfo, error) {
 		if master.hasSeparateAudio(chosen) {
 			return nil, &SeparateAudioError{Group: chosen.AudioGroup}
 		}
-		if vb, err := url.Parse(chosen.URI); err == nil {
-			if body, err := fetchPlaylist(ctx, client, o, chosen.URI); err == nil {
-				if _, m2, err := parsePlaylist(body, vb); err == nil && m2 != nil {
-					media = m2
-				}
+		if body, vb, err := fetchPlaylist(ctx, client, o, chosen.URI); err == nil {
+			if _, m2, err := parsePlaylist(body, vb); err == nil && m2 != nil {
+				media = m2
 			}
 		}
 	}

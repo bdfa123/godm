@@ -766,3 +766,61 @@ func TestProgressIsReportedWhileASegmentIsStillArriving(t *testing.T) {
 			"the display freezes and the speed shown goes stale", first)
 	}
 }
+
+// ---------- redirects ----------
+
+// A playlist that was redirected is read from where it ended up: that is the
+// address its relative entries mean, and it is the one every player resolves
+// them against.
+func TestRelativeURIsFollowTheRedirectedPlaylist(t *testing.T) {
+	segs := makeSegments(3)
+	s := newHLSServer(t, segs)
+
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/watch/123/index.m3u8":
+			http.Redirect(w, r, s.URL+"/media.m3u8", http.StatusFound)
+		case "/watch/master.m3u8":
+			http.Redirect(w, r, s.URL+"/master.m3u8", http.StatusFound)
+		case "/plain-master.m3u8":
+			// A master that is served in place but names a variant that redirects.
+			fmt.Fprint(w, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\nvariant/media.m3u8\n")
+		case "/variant/media.m3u8":
+			http.Redirect(w, r, s.URL+"/media.m3u8", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(front.Close)
+
+	for name, path := range map[string]string{
+		"a media playlist":                  "/watch/123/index.m3u8",
+		"a master playlist":                 "/watch/master.m3u8",
+		"a variant of a master that is not": "/plain-master.m3u8",
+	} {
+		t.Run(name, func(t *testing.T) {
+			target, err := DownloadHLS(context.Background(), HLSOptions{
+				URL: front.URL + path, OutDir: t.TempDir(), Filename: "clip.ts",
+				Connections: 1, MaxRetries: 1, Variant: -1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := os.ReadFile(target)
+			if !bytes.Equal(got, joined(segs)) {
+				t.Fatalf("file is %d bytes, want %d", len(got), len(joined(segs)))
+			}
+			if path == "/watch/123/index.m3u8" {
+				return // nothing in a media playlist is fetched by an inspection
+			}
+			info, err := InspectHLS(context.Background(), HLSOptions{URL: front.URL + path, MaxRetries: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Segments != len(segs) {
+				t.Errorf("inspection saw %d segments, want %d: the variant was looked for beside the "+
+					"address that was asked for", info.Segments, len(segs))
+			}
+		})
+	}
+}
