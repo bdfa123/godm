@@ -104,6 +104,11 @@ hands over the URL along with:
 
 - **Cookies** via `chrome.cookies.getAll`, including httpOnly ones. Page JS can
   never read those; without them any authenticated download returns a login page.
+  godm sends them, and any `Authorization` header, only to the host the link
+  was on and hosts below it, and never over plain http when the link was https:
+  a redirect to a file host, or a playlist's segments on a CDN, does not get
+  them. A site that needs its login on a sibling host (`files.site.com` for a
+  link on `www.site.com`) will answer as if you were logged out.
 - **Referer**, because plenty of sites check it for hotlink protection.
 - **User-Agent**, matching the browser exactly.
 
@@ -129,7 +134,10 @@ type, and queue them in one go.
   separate rendition is refused rather than saved silent.
 - **yt-dlp**: for sites that guard their video behind their own protocol, godm
   can hand the page to [yt-dlp](https://github.com/yt-dlp/yt-dlp) if it is
-  installed, and still shows progress and pausing in the same list.
+  installed, and still shows progress and pausing in the same list. It reads
+  your own yt-dlp configuration (`%APPDATA%\yt-dlp\config` and the other user
+  locations) and no other: a `yt-dlp.conf` in the download folder or beside
+  `yt-dlp.exe` is ignored, because a download could have put it there.
 - DRM-protected streams (Widevine, PlayReady, FairPlay) and live streams are
   refused with a reason.
 
