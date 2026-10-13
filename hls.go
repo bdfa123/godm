@@ -80,19 +80,47 @@ type hlsSegment struct {
 	Key      *hlsKey
 	Offset   int64 // EXT-X-BYTERANGE, zero length means the whole resource
 	Length   int64
+	Init     *hlsSegment // the EXT-X-MAP in force for this segment, nil for none
 }
 
 type hlsMedia struct {
 	TargetDuration float64
 	TotalDuration  float64
 	Segments       []hlsSegment
-	Init           *hlsSegment // EXT-X-MAP, present for fragmented MP4
+	Init           *hlsSegment // the map the first segment is played with: what the file starts with
 	Complete       bool        // saw EXT-X-ENDLIST
 }
 
 // fragmented reports whether the segments are fragmented MP4, which is what an
 // EXT-X-MAP says they are.
-func (m *hlsMedia) fragmented() bool { return m.Init != nil }
+func (m *hlsMedia) fragmented() bool {
+	if m.Init != nil {
+		return true
+	}
+	for i := range m.Segments {
+		if m.Segments[i].Init != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// initBefore returns the init segment to write in front of segment i, or nil.
+// The one the file starts with is written by run() itself; a later one belongs
+// where its map takes effect (after a discontinuity, an ad break, a change of
+// codec or size), because the segments before it were made against the old one
+// and the ones after against the new. A map named again unchanged is not a new
+// map.
+func (m *hlsMedia) initBefore(i int) *hlsSegment {
+	if i <= 0 || i >= len(m.Segments) {
+		return nil
+	}
+	cur, prev := m.Segments[i].Init, m.Segments[i-1].Init
+	if cur == nil || (prev != nil && cur.URI == prev.URI && cur.Offset == prev.Offset && cur.Length == prev.Length) {
+		return nil
+	}
+	return cur
+}
 
 type hlsVariant struct {
 	URI        string
@@ -258,6 +286,7 @@ func parseMedia(body []byte, base *url.URL) (*hlsMedia, error) {
 	m := &hlsMedia{}
 	var (
 		key      *hlsKey
+		curInit  *hlsSegment // the EXT-X-MAP most recently seen
 		dur      float64
 		haveDur  bool
 		rangeLen int64
@@ -292,7 +321,7 @@ func parseMedia(body []byte, base *url.URL) (*hlsMedia, error) {
 			if br := a["BYTERANGE"]; br != "" {
 				init.Length, init.Offset, _ = parseByteRange(br, 0)
 			}
-			m.Init = &init
+			curInit = &init
 		case strings.HasPrefix(line, "#EXTINF:"):
 			v := strings.TrimPrefix(line, "#EXTINF:")
 			if i := strings.IndexByte(v, ','); i >= 0 {
@@ -313,7 +342,7 @@ func parseMedia(body []byte, base *url.URL) (*hlsMedia, error) {
 			if err != nil {
 				return nil, fmt.Errorf("bad segment URI %q: %w", line, err)
 			}
-			s := hlsSegment{URI: u.String(), Duration: dur, Seq: seq, Key: key}
+			s := hlsSegment{URI: u.String(), Duration: dur, Seq: seq, Key: key, Init: curInit}
 			if haveRng {
 				s.Offset, s.Length = rangeOff, rangeLen
 				prevEnd = rangeOff + rangeLen
@@ -330,6 +359,7 @@ func parseMedia(body []byte, base *url.URL) (*hlsMedia, error) {
 	if len(m.Segments) == 0 {
 		return nil, errors.New("playlist lists no segments")
 	}
+	m.Init = m.Segments[0].Init
 	return m, nil
 }
 
@@ -933,7 +963,7 @@ func (r *hlsRun) worker(ctx context.Context) (retired bool) {
 		r.mu.Unlock()
 
 		r.fetching.Add(1)
-		data, err := r.fetchSegment(ctx, &r.media.Segments[i])
+		data, err := r.fetchWithMap(ctx, i)
 		r.fetching.Add(-1)
 
 		r.mu.Lock()
@@ -950,6 +980,25 @@ func (r *hlsRun) worker(ctx context.Context) (retired bool) {
 		r.cond.Broadcast()
 		r.mu.Unlock()
 	}
+}
+
+// fetchWithMap fetches segment i, with the init segment that takes effect at it
+// in front. Carrying the two as one piece keeps the write loop, the byte count
+// and the sidecar as they were: a resume cuts the file at a segment boundary,
+// which is also the boundary of the map that belongs to the next one.
+func (r *hlsRun) fetchWithMap(ctx context.Context, i int) ([]byte, error) {
+	data, err := r.fetchSegment(ctx, &r.media.Segments[i])
+	if err != nil {
+		return nil, err
+	}
+	if init := r.media.initBefore(i); init != nil {
+		head, err := r.fetchSegment(ctx, init)
+		if err != nil {
+			return nil, fmt.Errorf("initialisation segment: %w", err)
+		}
+		data = append(head, data...)
+	}
+	return data, nil
 }
 
 func (r *hlsRun) fetchSegment(ctx context.Context, seg *hlsSegment) ([]byte, error) {

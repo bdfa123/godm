@@ -903,6 +903,115 @@ func TestProgressIsReportedWhileASegmentIsStillArriving(t *testing.T) {
 	}
 }
 
+// ---------- more than one EXT-X-MAP ----------
+
+const twoMapsPlaylist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n" +
+	"#EXT-X-MAP:URI=\"init-a.mp4\"\n#EXTINF:4,\na0.m4s\n#EXTINF:4,\na1.m4s\n" +
+	"#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init-b.mp4\"\n#EXTINF:4,\nb0.m4s\n" +
+	// Some packagers repeat the tag at every discontinuity; the same map again
+	// is not a new one.
+	"#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init-b.mp4\"\n#EXTINF:4,\nb1.m4s\n#EXT-X-ENDLIST\n"
+
+func TestParseMediaKeepsTheMapEachSegmentIsPlayedWith(t *testing.T) {
+	base, _ := url.Parse("https://x.test/a/index.m3u8")
+	_, m, err := parsePlaylist([]byte(twoMapsPlaylist), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Segments) != 4 {
+		t.Fatalf("%d segments, want 4", len(m.Segments))
+	}
+	if m.Init == nil || m.Init.URI != "https://x.test/a/init-a.mp4" {
+		t.Errorf("the file starts with %+v, want init-a", m.Init)
+	}
+	wantMap := []string{"init-a", "init-a", "init-b", "init-b"}
+	for i, s := range m.Segments {
+		if s.Init == nil || s.Init.URI != "https://x.test/a/"+wantMap[i]+".mp4" {
+			t.Errorf("segment %d is played with %+v, want %s", i, s.Init, wantMap[i])
+		}
+	}
+	for i, want := range []string{"", "", "https://x.test/a/init-b.mp4", ""} {
+		got := ""
+		if init := m.initBefore(i); init != nil {
+			got = init.URI
+		}
+		if got != want {
+			t.Errorf("init segment to write before segment %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestDownloadHLSWritesEachInitSegmentWhereItApplies(t *testing.T) {
+	var mu sync.Mutex
+	hits := map[string]int{}
+	failB0 := true
+	body := map[string][]byte{
+		"/init-a.mp4": []byte("INIT-A"), "/init-b.mp4": []byte("INIT-B"),
+		"/a0.m4s": bytes.Repeat([]byte("a"), 100), "/a1.m4s": bytes.Repeat([]byte("A"), 120),
+		"/b0.m4s": bytes.Repeat([]byte("b"), 140), "/b1.m4s": bytes.Repeat([]byte("B"), 160),
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		fail := r.URL.Path == "/b0.m4s" && failB0
+		mu.Unlock()
+		switch {
+		case r.URL.Path == "/index.m3u8":
+			fmt.Fprint(w, twoMapsPlaylist)
+		case fail:
+			http.Error(w, "no", http.StatusForbidden)
+		case body[r.URL.Path] != nil:
+			w.Write(body[r.URL.Path])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	want := bytes.Join([][]byte{
+		body["/init-a.mp4"], body["/a0.m4s"], body["/a1.m4s"],
+		body["/init-b.mp4"], body["/b0.m4s"], body["/b1.m4s"],
+	}, nil)
+	opts := HLSOptions{URL: srv.URL + "/index.m3u8", OutDir: t.TempDir(), Filename: "clip", Connections: 1, MaxRetries: 1}
+
+	// The first attempt dies at the segment that needs the second map, so the
+	// second one resumes from a file that stops right before it.
+	target, err := DownloadHLS(context.Background(), opts)
+	if err == nil {
+		t.Fatal("expected the first attempt to fail")
+	}
+	mu.Lock()
+	failB0 = false
+	mu.Unlock()
+	target2, err := DownloadHLS(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target2 != target {
+		t.Fatalf("resumed into %s, not %s", target2, target)
+	}
+	if filepath.Ext(target) != ".mp4" {
+		t.Errorf("target = %s, want fragmented MP4", target)
+	}
+	got, _ := os.ReadFile(target)
+	if !bytes.Equal(got, want) {
+		t.Errorf("file is %d bytes, want %d: each init segment belongs in front of the segments it "+
+			"applies to\n got %q...\nwant %q...", len(got), len(want), clip(got), clip(want))
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits["/init-a.mp4"] != 1 || hits["/init-b.mp4"] < 1 || hits["/init-b.mp4"] > 2 {
+		t.Errorf("init segments fetched %d and %d times", hits["/init-a.mp4"], hits["/init-b.mp4"])
+	}
+}
+
+func clip(b []byte) string {
+	if len(b) > 40 {
+		b = b[:40]
+	}
+	return string(b)
+}
+
 // ---------- naming ----------
 
 // The extension sends the page title as the file name. A dot in a title is
