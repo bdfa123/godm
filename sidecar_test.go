@@ -241,6 +241,32 @@ func TestNoStreamIsNamedLikeASidecar(t *testing.T) {
 	}
 }
 
+// A name that sanitizes to nothing must not become the download folder itself
+// as the target, which would put the stream beside the folder.
+func TestAStreamWithNoUsableNameStaysInItsFolder(t *testing.T) {
+	segs := makeSegments(2)
+	s := newHLSServer(t, segs)
+	for _, name := range []string{"...", " . ", "bad\xff\xfename"} {
+		parent := t.TempDir()
+		out := filepath.Join(parent, "Downloads")
+		if err := os.Mkdir(out, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target, err := DownloadHLS(context.Background(), HLSOptions{
+			URL: s.URL + "/media.m3u8", Filename: name, OutDir: out, Connections: 2,
+		})
+		if err != nil {
+			t.Fatalf("%q: %v", name, err)
+		}
+		if filepath.Dir(target) != out {
+			t.Errorf("%q: the stream was saved as %q, outside %q", name, target, out)
+		}
+		if got := dirNames(t, parent); len(got) != 1 {
+			t.Errorf("%q: the folder holds %v beside the download folder", name, got)
+		}
+	}
+}
+
 // downloadHLSWithin fails the test instead of waiting for ever on a download
 // that has stopped making progress without ending.
 func downloadHLSWithin(t *testing.T, limit time.Duration, o HLSOptions) (string, error) {

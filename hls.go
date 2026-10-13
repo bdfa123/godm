@@ -629,14 +629,20 @@ func hlsName(o HLSOptions, media *hlsMedia) string {
 			name = "video"
 		}
 	}
-	if filepath.Ext(name) == "" {
-		if media.Init != nil {
-			name += ".mp4"
-		} else {
-			name += ".ts"
-		}
+	ext := ".ts"
+	if media.Init != nil {
+		ext = ".mp4"
 	}
-	return sanitize(name)
+	if filepath.Ext(name) == "" {
+		name += ext
+	}
+	if n := sanitize(name); n != "" {
+		return n
+	}
+	// Nothing in the name survives (a name of dots, or bytes that are not
+	// text). An empty one would plan the download folder itself as the target
+	// and save the stream beside it, as "<folder> (1)".
+	return "video" + ext
 }
 
 // planHLSTarget applies the same rule as a byte-range download: pick up our own
