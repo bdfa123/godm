@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log"
 	"math"
 	"net"
@@ -1399,6 +1400,34 @@ func RunDaemon(port int, outDir string, parallel int) error {
 		}
 	}()
 
+	srv := &http.Server{Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+	ready := &daemonClient{
+		base:  fmt.Sprintf("http://127.0.0.1:%d", actual),
+		token: token,
+		http:  &http.Client{Timeout: 250 * time.Millisecond},
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for ready.ping() != nil {
+		select {
+		case err := <-serveErr:
+			return err
+		case <-time.After(25 * time.Millisecond):
+		}
+		if time.Now().After(deadline) {
+			return errors.New("godm daemon did not become ready")
+		}
+	}
+	startTray(mgr)
+	releaseStartup()
+	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
+	return <-serveErr
+}
+
+// routes is everything the daemon answers. Each address but the page's own
+// goes through guard; the page checks its caller itself, in handleUI.
+func (s *server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleUI)
 	mux.HandleFunc("/api/ping", s.guard(s.handlePing))
@@ -1425,30 +1454,29 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mux.HandleFunc("/stream/", s.guard(s.handleStream))
 	mux.HandleFunc("/api/torrent", s.guard(post(s.handleTorrentFile)))
 	mux.HandleFunc("/api/seeding", s.guard(s.handleSeeding))
+	return mux
+}
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
-	ready := &daemonClient{
-		base:  fmt.Sprintf("http://127.0.0.1:%d", actual),
-		token: token,
-		http:  &http.Client{Timeout: 250 * time.Millisecond},
+// addressedToUs reports whether a request names the daemon's own loopback
+// address as the host it was sent to. A web page can point a name of its own
+// at 127.0.0.1 (DNS rebinding), and the browser then takes the daemon for that
+// page's own server and lets it read every answer; no Origin header gives it
+// away on a GET. What the browser cannot change is the name it sends: it is
+// the page's, not ours. The port has to be the one the request arrived on,
+// which is the daemon's whichever port it ended up with.
+func (s *server) addressedToUs(r *http.Request) bool {
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		return false // no port at all: nothing reaches a daemon on port 80
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for ready.ping() != nil {
-		select {
-		case err := <-serveErr:
-			return err
-		case <-time.After(25 * time.Millisecond):
-		}
-		if time.Now().After(deadline) {
-			return errors.New("godm daemon did not become ready")
-		}
+	if host != "127.0.0.1" && !strings.EqualFold(host, "localhost") {
+		return false
 	}
-	startTray(mgr)
-	releaseStartup()
-	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
-	return <-serveErr
+	own := s.port
+	if a, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr); ok {
+		own = a.Port
+	}
+	return port == strconv.Itoa(own)
 }
 
 // guard enforces the bearer token and rejects cross-origin browser callers.
@@ -1456,6 +1484,10 @@ func RunDaemon(port int, outDir string, parallel int) error {
 // still fire off requests, so the token is the real gate.
 func (s *server) guard(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.addressedToUs(r) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
 		origin := r.Header.Get("Origin")
 		if strings.HasPrefix(origin, "chrome-extension://") ||
 			strings.HasPrefix(origin, "moz-extension://") {
@@ -1688,13 +1720,59 @@ func (s *server) handleOpen(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// lockedHTML is what / answers to a caller that showed no token. There is no
+// secret in it. The manager page takes the token out of its own address once
+// it has loaded, so reloading it arrives here; the page left the token where
+// only this tab can read it, and this sends the tab back with it. Anybody else
+// is told how the manager is opened.
+const lockedHTML = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>godm</title>
+</head>
+<body style="font:14px system-ui,sans-serif;margin:3em">
+<p id="why" hidden>__WHY__</p>
+<script>
+var kept = null;
+try { kept = sessionStorage.getItem("godm-token"); } catch (e) {}
+if (kept) location.replace("/?token=" + encodeURIComponent(kept));
+else document.getElementById("why").hidden = false;
+</script>
+<noscript><p>__WHY__</p></noscript>
+</body>
+</html>
+`
+
+// handleUI serves the manager page. The page holds the token, so being given
+// the page is being given the whole API: it goes only to a caller that already
+// has the token, which godm app, godm ui and the tray put in the address.
+// Anything else on this computer can reach loopback, another account's
+// programs included, and they cannot read the token file.
 func (s *server) handleUI(w http.ResponseWriter, r *http.Request) {
+	if !s.addressedToUs(r) {
+		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
+	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	if !s.authorized(r) {
+		// A token that is wrong gets no second try from the stand-in page:
+		// the one it would send is the one that was just refused.
+		if r.URL.Query().Has("token") || r.Header.Get("Authorization") != "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, strings.ReplaceAll(lockedHTML, "__WHY__", html.EscapeString(s.mgr.tr("page.locked"))))
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// The token is injected here so the page can call the API without asking
 	// the user to paste anything. So is the language setting, which lets the
 	// first paint be in the right language; the page works out for itself what

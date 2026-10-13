@@ -249,7 +249,13 @@ download:
 ## Security notes
 
 - The daemon binds `127.0.0.1` only and requires a bearer token stored at
-  `%LOCALAPPDATA%\godm\token` (mode 0600).
+  `%LOCALAPPDATA%\godm\token` (mode 0600). The manager page holds the token, so
+  it too is served only to a caller that already has it: `godm app`, `godm ui`
+  and the tray put it in the address, and the page takes it out of the address
+  bar once it has loaded.
+- A request has to be addressed to `127.0.0.1:<port>` or `localhost:<port>`.
+  Any other `Host` is refused, so a web page that points a name of its own at
+  loopback (DNS rebinding) gets nothing.
 - Requests carrying a browser `Origin` from anywhere except the extension or
   loopback are rejected outright, so a random web page cannot queue downloads.
 - The extension never sees the token; the native host injects it into the

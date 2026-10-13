@@ -216,10 +216,10 @@ func TestLanguageSettingFromAnOlderFileOrAMangledOne(t *testing.T) {
 // follows a change, and gets it in the page itself so the first paint is right.
 func TestThePageIsToldTheLanguage(t *testing.T) {
 	m := NewManager(t.TempDir(), 2)
-	s := &server{mgr: m, token: "tok"}
+	s := &server{mgr: m, token: "tok", port: defaultPort}
 	page := func() string {
 		rec := httptest.NewRecorder()
-		s.handleUI(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		s.handleUI(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1:16801/?token=tok", nil))
 		return rec.Body.String()
 	}
 	if got := page(); !strings.Contains(got, `var LANG_SETTING = "auto";`) || strings.Contains(got, "__LANG__") || strings.Contains(got, "__TOKEN__") {

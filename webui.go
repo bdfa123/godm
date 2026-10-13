@@ -290,6 +290,13 @@ const uiHTML = `<!doctype html>
 
 <script>
 var TOKEN = "__TOKEN__";
+// The address this page was opened with carries the token. It comes out of the
+// address bar here, so that it is not left in the tab's history or copied
+// along with the link. Reloading then asks for the page without it, and the
+// daemon's answer to that looks for the copy kept here, which only this tab
+// can read.
+try { sessionStorage.setItem("godm-token", TOKEN); } catch (e) {}
+try { history.replaceState(null, "", location.pathname); } catch (e) {}
 // The Language setting as godm has it: auto, en or zh. The page works out what
 // auto means for this browser; the tray and the notifications do the same for
 // Windows.
