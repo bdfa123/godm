@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -103,6 +104,93 @@ var newYTDLPCmd = func(ctx context.Context, bin string, args []string) *exec.Cmd
 	return exec.CommandContext(ctx, bin, args...)
 }
 
+// ytdlpConfigArgs keeps yt-dlp from taking a downloaded file for its
+// configuration. Left to itself it reads a yt-dlp.conf from the folder given
+// to -P (the current folder when there is no -P) and from the folder its own
+// binary is in, and every line of one is an option, --exec among them. The
+// first is where godm saves files under names that servers choose; the second
+// is that same folder for anyone who keeps yt-dlp next to a godm.exe they run
+// from where it was downloaded. So it is told to look nowhere, and is handed
+// the one file that is the user's own. A yt-dlp.conf kept beside yt-dlp on
+// purpose goes unread with the rest: nothing tells it from one that a download
+// left there.
+func ytdlpConfigArgs() []string {
+	args := []string{"--ignore-config"}
+	if conf := ytdlpUserConfig(); conf != "" {
+		args = append(args, "--config-locations", conf)
+	}
+	return args
+}
+
+// ytdlpUserConfig finds the user's configuration where yt-dlp would have: the
+// "User Configuration" list in its README, in that order, the first file that
+// can be opened. It is empty when there is none.
+func ytdlpUserConfig() string {
+	// yt-dlp lets HOME stand in for the profile folder on Windows.
+	home := ""
+	if runtime.GOOS == "windows" {
+		home = os.Getenv("HOME")
+	}
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	var files []string
+	// Each place is a folder of yt-dlp's own, with yt-dlp.conf allowed to sit
+	// beside that folder instead of in it.
+	place := func(parent, folder string) {
+		files = append(files, filepath.Join(parent, "yt-dlp.conf"))
+		if strings.HasPrefix(folder, ".") {
+			files = append(files, filepath.Join(parent, "yt-dlp.conf.txt"))
+		}
+		files = append(files,
+			filepath.Join(parent, folder, "config"),
+			filepath.Join(parent, folder, "config.txt"))
+	}
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		place(xdg, "yt-dlp")
+	} else if home != "" {
+		place(filepath.Join(home, ".config"), "yt-dlp")
+	}
+	if appdata := os.Getenv("APPDATA"); appdata != "" {
+		place(appdata, "yt-dlp")
+	}
+	if home != "" {
+		place(home, ".yt-dlp")
+	}
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			continue
+		}
+		fi, err := f.Stat()
+		f.Close()
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		// A file named on the command line that is not there stops yt-dlp, so
+		// the name must not depend on which folder yt-dlp is started in.
+		if abs, err := filepath.Abs(file); err == nil {
+			return abs
+		}
+		return file
+	}
+	return ""
+}
+
+// runFromOwnFolder starts yt-dlp in the folder it lives in rather than in
+// godm's, which is wherever godm happened to be started: the download folder,
+// for a godm.exe double-clicked where it was saved. A script standing in for
+// yt-dlp, or the Python under it, may load what it finds in the current folder
+// whatever yt-dlp was told about configuration, and the folder the program
+// came from is the one that has to be trusted anyway.
+func runFromOwnFolder(cmd *exec.Cmd) {
+	// A relative path would be looked up from the new folder.
+	if abs, err := filepath.Abs(cmd.Path); err == nil {
+		cmd.Path = abs
+	}
+	cmd.Dir = filepath.Dir(cmd.Path)
+}
+
 func ytdlpArgs(o YTDLPOptions) []string {
 	args := []string{
 		"--newline",       // one progress update per line instead of carriage returns
@@ -117,6 +205,7 @@ func ytdlpArgs(o YTDLPOptions) []string {
 		"--fragment-retries", "10",
 		"-P", o.OutDir,
 	}
+	args = append(ytdlpConfigArgs(), args...)
 	if o.Format != "" {
 		args = append(args, "-f", o.Format)
 	}
@@ -151,10 +240,16 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		!strings.HasPrefix(strings.ToLower(o.URL), "https://") {
 		return "", errors.New("only http and https URLs can be handed to yt-dlp")
 	}
+	// yt-dlp is not started in godm's folder, so a folder named from there has
+	// to be spelled out in full or it would be made inside yt-dlp's.
+	if abs, err := filepath.Abs(o.OutDir); err == nil {
+		o.OutDir = abs
+	}
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return "", err
 	}
 	cmd := newYTDLPCmd(ctx, bin, ytdlpArgs(o))
+	runFromOwnFolder(cmd)
 	// Progress goes to stderr and the printed path to stdout. Both ends of one
 	// pipe keeps them in order and means neither can fill its own buffer and
 	// wedge the process.
@@ -329,7 +424,7 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 		}
 		bin = found
 	}
-	args := []string{"-J", "--no-playlist", "--no-warnings"}
+	args := append(ytdlpConfigArgs(), "-J", "--no-playlist", "--no-warnings")
 	for k, v := range o.Headers {
 		if v == "" {
 			continue
@@ -345,6 +440,7 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 	}
 	args = append(args, "--", o.URL)
 	cmd := newYTDLPCmd(ctx, bin, args)
+	runFromOwnFolder(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
