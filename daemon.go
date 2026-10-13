@@ -301,7 +301,11 @@ type Manager struct {
 
 	store   string // tasks.json; empty disables persistence
 	dirty   atomic.Bool
+	saveMu  sync.Mutex // one save at a time, in the order they were asked for
 	openURL func(string) error
+	// loadNote is what load found wrong with the saved list, kept until there
+	// is a tray to tell the user through. Guarded by mu.
+	loadNote *loadNote
 
 	notifyOn atomic.Bool
 	// announce is what tells the user a download finished or needs them. The
@@ -1199,6 +1203,12 @@ type savedList struct {
 	SpeedLimit int64 `json:"speed_limit,omitempty"`
 }
 
+// backupPath is where the list is kept as it was before the last save.
+func backupPath(store string) string { return store + ".bak" }
+
+// writeList is a variable so that a test can make a save fail part of the way.
+var writeList = writeFileAtomic
+
 // save writes the list atomically. It includes request headers, cookies among
 // them, because resuming an authenticated download needs them; the file sits
 // in the user's own profile, as IDM's equivalent does.
@@ -1206,6 +1216,8 @@ func (m *Manager) save() error {
 	if m.store == "" {
 		return nil
 	}
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	m.mu.Lock()
 	notify := m.notifyOn.Load()
 	settings := m.settings.clone()
@@ -1227,33 +1239,172 @@ func (m *Manager) save() error {
 	if err != nil {
 		return err
 	}
-	tmp := m.store + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
+	// The list being replaced becomes the backup, so there is always one whole
+	// generation on disk whatever happens to the other. For a moment there is
+	// no tasks.json at all; load takes that to mean the backup is the list.
+	// Failing to keep a backup is no reason not to save.
+	if err := os.Rename(m.store, backupPath(m.store)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("could not keep the last task list as a backup: %v", err)
 	}
-	return os.Rename(tmp, m.store)
+	// writeFileAtomic flushes the file before giving it its name. Without that
+	// a power cut can leave the name on NTFS with none of the data behind it,
+	// and a save every two seconds while downloads run gives it every chance.
+	return writeList(m.store, b)
 }
 
-// load restores the list. Anything that was moving is paused rather than
-// restarted, so a crash never silently kicks off a batch of large downloads.
-func (m *Manager) load() error {
-	if m.store == "" {
-		return nil
-	}
-	b, err := os.ReadFile(m.store)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
+// readTaskList reads one saved list. A field of the wrong type is an error,
+// but encoding/json reads everything else all the same and what comes back
+// holds it; partlyRead tells that case from one with nothing usable in it.
+func readTaskList(path string) (savedList, error) {
 	// Decoding over the defaults leaves any setting the file does not mention
 	// as it would be on a first run.
 	loaded := defaultSettings()
 	list := savedList{Settings: &loaded}
-	if err := json.Unmarshal(b, &list); err != nil {
-		return fmt.Errorf("parse %s: %w", m.store, err)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return list, err
 	}
+	if err := json.Unmarshal(b, &list); err != nil {
+		return list, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return list, nil
+}
+
+func partlyRead(err error) bool {
+	var wrongType *json.UnmarshalTypeError
+	return errors.As(err, &wrongType)
+}
+
+// setAside takes a list that could not be read out of the way of the next
+// save, under a name that says when, and returns where it went. It is the
+// only copy of the user's queue: with it kept, somebody can still get the
+// links back out of it. A file that cannot be moved is copied.
+func setAside(path string) (string, error) {
+	stamp := path + ".bad-" + time.Now().Format("20060102-150405")
+	to := stamp
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(to); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		to = fmt.Sprintf("%s-%d", stamp, n)
+	}
+	moveErr := os.Rename(path, to)
+	if moveErr == nil {
+		return to, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", moveErr
+	}
+	if err := writeFileAtomic(to, b); err != nil {
+		return "", moveErr
+	}
+	return to, nil
+}
+
+// loadNote is how a list that could not be read was dealt with: how names the
+// words for it, and kept is where the unreadable file was set aside, empty
+// when it could not be.
+type loadNote struct {
+	how, kept string
+}
+
+// load restores the list. Anything that was moving is paused rather than
+// restarted, so a crash never silently kicks off a batch of large downloads.
+//
+// A list that cannot be read is never left where the next save would write
+// over it, which any change at all brings on within two seconds. It is set
+// aside, and what replaces it is the best there is: the backup save keeps,
+// failing that whatever of the file itself could be read, failing that
+// nothing. The error says which, and announceLoad tells the user.
+func (m *Manager) load() error {
+	if m.store == "" {
+		return nil
+	}
+	list, err := readTaskList(m.store)
+	if err == nil {
+		m.restore(list)
+		return nil
+	}
+	bak := backupPath(m.store)
+	prev, prevErr := readTaskList(bak)
+	damaged, why := m.store, err
+	if errors.Is(err, os.ErrNotExist) {
+		if errors.Is(prevErr, os.ErrNotExist) {
+			return nil // nothing has been saved yet
+		}
+		if prevErr == nil {
+			// A save was cut off after the list it was replacing had become
+			// the backup and before the new one was in place. Nothing is
+			// damaged and nothing but that last save is missing.
+			log.Printf("%s is missing; using %s", m.store, bak)
+			m.restore(prev)
+			m.dirty.Store(true)
+			return nil
+		}
+		damaged, why = bak, prevErr
+	}
+
+	how, outcome := "notify.listLost", "starting with an empty list"
+	switch {
+	case prevErr == nil:
+		m.restore(prev)
+		how, outcome = "notify.listBak", "the last backup was restored"
+	case partlyRead(err):
+		m.restore(list)
+		how, outcome = "notify.listPart", "what could be read of it was restored"
+	case partlyRead(prevErr):
+		m.restore(prev)
+		how, outcome = "notify.listPart", "what could be read of the last backup was restored"
+	}
+	kept, keepErr := setAside(damaged)
+	switch {
+	case keepErr == nil:
+		outcome += "; the unreadable file is kept as " + kept
+		m.dirty.Store(true) // put a list that can be read back in its place
+	case how == "notify.listLost":
+		// Not read and not set aside either, which is what a file another
+		// program holds open looks like, and such a file is most likely fine.
+		// Saving would put an empty list where it is, so this run does not
+		// save, and the next start gets another try at reading it.
+		how = "notify.listStuck"
+		outcome += fmt.Sprintf("; the file could not be set aside (%v), so nothing is saved until godm is restarted", keepErr)
+		m.store = ""
+	default:
+		// What was restored is the file's own contents or one save short of
+		// them, so losing the file to a later save costs little.
+		outcome += fmt.Sprintf("; the unreadable file could not be set aside (%v)", keepErr)
+		m.dirty.Store(true)
+	}
+	m.mu.Lock()
+	m.loadNote = &loadNote{how: how, kept: kept}
+	m.mu.Unlock()
+	return fmt.Errorf("%w; %s", why, outcome)
+}
+
+// announceLoad tells the user that the saved list could not be read as it was
+// left, when load found that. It is a step of its own because load runs before
+// there is a tray to say anything through. Like a warning about the computer's
+// power it ignores the notifications switch, which may be among what was lost.
+// A click on the notice shows the file that was set aside.
+func (m *Manager) announceLoad() {
+	m.mu.Lock()
+	n := m.loadNote
+	m.loadNote = nil
+	m.mu.Unlock()
+	if n == nil || m.announce == nil {
+		return
+	}
+	text, open := m.tr(n.how), "app"
+	if n.kept != "" {
+		text += "\n" + m.tr("notify.listKept", "file", filepath.Base(n.kept))
+		open = n.kept
+	}
+	m.announce(m.tr("notify.listBad"), text, open)
+}
+
+// restore takes a saved list as the manager's own.
+func (m *Manager) restore(list savedList) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if list.Limit > 0 {
@@ -1297,7 +1448,6 @@ func (m *Manager) load() error {
 		m.tasks[v.ID] = mt
 		m.order = append(m.order, v.ID)
 	}
-	return nil
 }
 
 func (m *Manager) saveLoop() {
@@ -1383,7 +1533,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mgr.bt.dir = filepath.Join(configDir(), "bt")
 	defer mgr.shutdownBT()
 	if err := mgr.load(); err != nil {
-		log.Printf("could not restore the task list: %v", err)
+		log.Printf("the task list could not be read as it was saved: %v", err)
 	}
 	mgr.SetPower(osPower())
 	go mgr.saveLoop()
@@ -1420,6 +1570,9 @@ func RunDaemon(port int, outDir string, parallel int) error {
 		}
 	}
 	startTray(mgr)
+	// The tray makes its window on a thread of its own and drops a notice
+	// that arrives before the window exists, so this one waits for it.
+	time.AfterFunc(3*time.Second, mgr.announceLoad)
 	releaseStartup()
 	log.Printf("godm daemon listening on http://127.0.0.1:%d/  (downloads -> %s)", actual, outDir)
 	return <-serveErr
