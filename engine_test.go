@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -426,6 +427,99 @@ func TestAProbeThatFailsWithAndWithoutARangeReportsTheSecondAnswer(t *testing.T)
 	if !errors.As(err, &se) || se.code != http.StatusNotFound {
 		t.Fatalf("error %v, want the 404", err)
 	}
+}
+
+// The sidecar says which bytes are done, and a resume believes it. If it
+// reached the disk before the bytes did, a power cut leaves ranges marked done
+// that are zeros in a file of the right length, which nothing would notice. So
+// whatever a sidecar claims must have been flushed before it was written.
+func TestTheSidecarNeverClaimsMoreThanWasFlushed(t *testing.T) {
+	defer func(f func(*os.File) error, every time.Duration) { syncData, dataSyncEvery = f, every }(syncData, dataSyncEvery)
+	dataSyncEvery = 600 * time.Millisecond
+
+	// What the file held at the last flush that completed.
+	var mu sync.Mutex
+	var flushed []byte
+	var flushes int
+	syncData = func(f *os.File) error {
+		err := f.Sync()
+		b, _ := os.ReadFile(f.Name())
+		mu.Lock()
+		flushed, flushes = b, flushes+1
+		mu.Unlock()
+		return err
+	}
+
+	payload := makePayload(8 << 20)
+	srv := httptest.NewServer(&slowServer{payload: payload, chunk: 16 << 10, delay: 10 * time.Millisecond})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "big.bin")
+	var claimed int64
+	var lastReceived atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := Download(ctx, Options{
+		URL: srv.URL + "/big.bin", OutDir: dir, Connections: 2, MinSplit: 64 << 10, MaxRetries: 1,
+		// This runs just before the supervisor saves again, so the sidecar it
+		// reads is the one saved a tick ago, and the last flush is no older.
+		OnProgress: func(p Progress) {
+			lastReceived.Store(p.Received)
+			if p.Received >= 5<<20 {
+				cancel()
+			}
+			st, ok := loadState(target)
+			if !ok {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, s := range st.Segments {
+				claimed += s.Done
+				lo, hi := s.Start, s.Start+s.Done
+				if hi > int64(len(flushed)) || !bytes.Equal(flushed[lo:hi], payload[lo:hi]) {
+					t.Errorf("the sidecar says bytes %d to %d are done; after the last flush the file holds %d bytes there that match",
+						lo, hi, matching(flushed, payload, lo, hi))
+					cancel()
+					return
+				}
+			}
+		},
+	})
+	if err == nil {
+		t.Fatal("the download was not interrupted")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if flushes < 2 || claimed == 0 {
+		t.Fatalf("%d flushes and %d bytes claimed: the test looked at nothing", flushes, claimed)
+	}
+
+	// An interrupted download keeps all that it got: the lag is for the
+	// sidecar of a running one, and ends when it stops.
+	st, ok := loadState(target)
+	if !ok {
+		t.Fatal("no sidecar after the interruption")
+	}
+	var done int64
+	for _, s := range st.Segments {
+		done += s.Done
+	}
+	if done < lastReceived.Load() {
+		t.Errorf("the sidecar after stopping holds %d bytes, %d were reported received", done, lastReceived.Load())
+	}
+}
+
+// matching counts how many of payload[lo:hi] the file holds, for a message.
+func matching(file, payload []byte, lo, hi int64) int64 {
+	var n int64
+	for i := lo; i < hi && i < int64(len(file)); i++ {
+		if file[i] == payload[i] {
+			n++
+		}
+	}
+	return n
 }
 
 func TestStaleSidecarIsDiscardedWhenETagChanges(t *testing.T) {
