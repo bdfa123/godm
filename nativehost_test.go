@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeDaemon stands in for the daemon's HTTP API and records what reached it.
@@ -343,6 +344,56 @@ func TestNativeMarksWhatTheDaemonRefusedAndNothingElse(t *testing.T) {
 	c.base = "http://127.0.0.1:1"
 	if resp := forwardNative(c, nativeRequest{Type: "download", URL: "https://example.test/a"}); resp.OK || resp.Rejected {
 		t.Errorf("an unreachable daemon was reported as a refusal: %+v", resp)
+	}
+}
+
+// The daemon says why it will not take a job, and the person who right-clicked
+// should read that, not the status line it was sent with.
+func TestNativeReportsTheReasonTheDaemonGave(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"a sentence", 400, "this magnet link has no BitTorrent v1 info hash (urn:btih)\n", "this magnet link has no BitTorrent v1 info hash (urn:btih)"},
+		{"in Chinese", 400, "只支持 http 和 https 链接\n", "只支持 http 和 https 链接"},
+		{"nothing said", 400, "", "daemon returned 400 Bad Request"},
+		{"only blanks", 400, " \r\n", "daemon returned 400 Bad Request"},
+		{"a fault of its own", 500, "runtime error: index out of range\n", "daemon returned 500 Internal Server Error"},
+		{"a token it does not know", 401, "unauthorized\n", "daemon returned 401 Unauthorized"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+				w.Write([]byte(tt.body))
+			})
+			for _, typ := range []string{"download", "batch", "tasks", "config"} {
+				if resp := forwardNative(c, nativeRequest{Type: typ, URL: "https://example.test/a"}); resp.Error != tt.want {
+					t.Errorf("%s: error = %q, want %q", typ, resp.Error, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// A page of HTML or a long dump is not something to put in a notification, nor
+// to push through the host's reply.
+func TestNativeKeepsTheDaemonsReasonShort(t *testing.T) {
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(strings.Repeat("汉", 100000)))
+	})
+	resp := forwardNative(c, nativeRequest{Type: "download", URL: "https://example.test/a"})
+	if n := len(resp.Error); n == 0 || n > 1200 {
+		t.Fatalf("the reason is %d bytes", n)
+	}
+	if !utf8.ValidString(resp.Error) {
+		t.Errorf("the reason was cut in the middle of a character: %q", resp.Error[len(resp.Error)-8:])
+	}
+	if !strings.HasPrefix(resp.Error, "汉汉") {
+		t.Errorf("the reason does not start with what the daemon said: %.20q", resp.Error)
 	}
 }
 

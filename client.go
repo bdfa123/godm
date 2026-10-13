@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // daemonClient talks to a running daemon over loopback.
@@ -50,6 +53,26 @@ func refusedByDaemon(err error) bool {
 	return errors.As(err, &r)
 }
 
+// maxReason bounds the reason that is passed on: it ends up in a notification,
+// and in a reply to the browser that Chrome drops past 1 MB.
+const maxReason = 1000
+
+// refusalReason is the sentence the daemon wrote to say why it refused: the body
+// of its error answer, trimmed, and cut short (on a character boundary) if it
+// runs on. It is empty when the daemon said nothing.
+func refusalReason(body io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(body, maxReason+utf8.UTFMax))
+	why := strings.TrimSpace(strings.ToValidUTF8(string(b), ""))
+	if len(why) > maxReason {
+		why = why[:maxReason]
+		for !utf8.ValidString(why) {
+			why = why[:len(why)-1]
+		}
+		why = strings.TrimSpace(why) + "..."
+	}
+	return why
+}
+
 func refusalStatus(code int) bool {
 	switch code {
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
@@ -81,11 +104,13 @@ func (c *daemonClient) do(method, path string, body any, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err := fmt.Errorf("daemon returned %s", resp.Status)
 		if refusalStatus(resp.StatusCode) {
-			return &daemonRefusal{err.Error()}
+			if why := refusalReason(resp.Body); why != "" {
+				return &daemonRefusal{why}
+			}
+			return &daemonRefusal{"daemon returned " + resp.Status}
 		}
-		return err
+		return fmt.Errorf("daemon returned %s", resp.Status)
 	}
 	if out == nil {
 		return nil
