@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -30,7 +33,7 @@ func Probe(ctx context.Context, c *http.Client, o Options) (*ProbeResult, error)
 	if err != nil {
 		return nil, err
 	}
-	applyHeaders(req, o.Headers)
+	applyHeaders(req, o.Headers, o.URL)
 	req.Header.Set("Range", "bytes=0-0")
 
 	resp, err := c.Do(req)
@@ -98,9 +101,17 @@ func parseContentRangeTotal(v string) (int64, bool) {
 	return n, true
 }
 
-func applyHeaders(req *http.Request, h map[string]string) {
+// applyHeaders puts a download's headers on a request. origin is the address
+// they came with, the link that was clicked: the cookies and tokens among
+// them were the browser's for that site, and a request to anywhere else goes
+// without them.
+func applyHeaders(req *http.Request, h map[string]string, origin string) {
+	login := loginMayGo(origin, req.URL)
 	for k, v := range h {
 		if v == "" {
+			continue
+		}
+		if !login && loginHeader(k) {
 			continue
 		}
 		switch strings.ToLower(k) {
@@ -118,4 +129,78 @@ func applyHeaders(req *http.Request, h map[string]string) {
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
+}
+
+// loginHeader reports whether a header says who the user is to a site. They
+// are the ones net/http takes off a request it redirects to another site.
+func loginHeader(name string) bool {
+	switch strings.ToLower(name) {
+	case "cookie", "cookie2", "authorization", "www-authenticate",
+		"proxy-authorization", "proxy-authenticate":
+		return true
+	}
+	return false
+}
+
+// loginMayGo reports whether a request to dest may carry the cookies and
+// tokens that came with the link at origin. The extension hands over the
+// browser's cookies for the page's own address, httpOnly ones included, and
+// the browser would send them nowhere else. A download seldom stays there: the
+// site redirects to a file host, a playlist names segments and keys on a CDN,
+// and every one of those requests is made here, straight to that address, with
+// no redirect for net/http to police.
+//
+// So this is the rule net/http applies when it follows a redirect: the same
+// host or one below it, since nothing says how wide a cookie handed over as a
+// plain header was meant to reach. One thing is added, that what was taken for
+// an https page never goes out over plain http, where anyone on the path
+// could read it.
+func loginMayGo(origin string, dest *url.URL) bool {
+	from, err := url.Parse(origin)
+	return err == nil && loginInScope(from, dest)
+}
+
+func loginInScope(from, dest *url.URL) bool {
+	if from.Scheme == "https" && dest.Scheme != "https" {
+		return false
+	}
+	return hostWithin(dest.Hostname(), from.Hostname())
+}
+
+// hostWithin reports whether host is parent or a name below it. Ports are
+// left out, as they are for cookies.
+func hostWithin(host, parent string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	parent = strings.TrimSuffix(strings.ToLower(parent), ".")
+	if host == "" || parent == "" {
+		return false
+	}
+	if host == parent {
+		return true
+	}
+	// An address has nothing below it, and the end of an IPv6 zone is not a
+	// domain: "::1%.site.example" is not part of site.example.
+	if strings.ContainsAny(host, ":%") || net.ParseIP(parent) != nil {
+		return false
+	}
+	return strings.HasSuffix(host, "."+parent)
+}
+
+// dropLoginOnRedirect is the client's CheckRedirect. net/http already leaves
+// the login off a redirect to another site; this holds a redirect to the rule
+// above, which also covers one that drops from https to http on the same
+// host. It keeps net/http's limit of ten redirects, which setting a
+// CheckRedirect would otherwise remove.
+func dropLoginOnRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	if !loginInScope(via[0].URL, req.URL) {
+		for k := range req.Header {
+			if loginHeader(k) {
+				delete(req.Header, k)
+			}
+		}
+	}
+	return nil
 }

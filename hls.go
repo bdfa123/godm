@@ -968,7 +968,9 @@ func (r *hlsRun) getOnce(ctx context.Context, u string, offset, length int64) ([
 	if err != nil {
 		return nil, err
 	}
-	applyHeaders(req, r.opts.Headers)
+	// u is whatever the playlist named: a variant, a segment or a key, on any
+	// host it likes.
+	applyHeaders(req, r.opts.Headers, r.opts.URL)
 	if length > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
 	}

@@ -1180,7 +1180,9 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	if err != nil {
 		return err
 	}
-	applyHeaders(req, t.opts.Headers)
+	// The address is the one the redirects led to, which need not be the site
+	// the headers were for.
+	applyHeaders(req, t.opts.Headers, t.opts.URL)
 
 	ranged := t.probe.Resumable
 	if ranged {
@@ -1407,6 +1409,7 @@ func newClient() *http.Client {
 			ResponseHeaderTimeout: 30 * time.Second,
 			ForceAttemptHTTP2:     true,
 		},
+		CheckRedirect: dropLoginOnRedirect,
 		// No client-level Timeout: it would kill long transfers mid-flight.
 	}
 }
