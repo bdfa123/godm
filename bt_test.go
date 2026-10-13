@@ -940,6 +940,126 @@ func TestTorrentsKeepToTheOverallSpeedLimit(t *testing.T) {
 	}
 }
 
+// The library cuts each read from a peer to the limiter's burst as it is
+// before the read, pays for the bytes after it, and panics if the limiter
+// refuses, which it does to anything larger than its burst as it is by then.
+// A read lasts as long as the peer keeps it waiting, so the limit has to be
+// changeable in every direction while reads are out.
+func TestTheSpeedLimitChangesUnderARunningTorrent(t *testing.T) {
+	const (
+		high   = 1 << 20
+		low    = 64 << 10
+		middle = 128 << 10
+	)
+	src := t.TempDir()
+	payload := makePayload(6 << 20)
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: payload})
+	// Slower than the high limit, so that under it godm's reads are waiting on
+	// the peer, cut to that limit's burst, when the limit changes.
+	const peerRate = 384 << 10
+	seed := newSeeder(t, src, mi, peerRate)
+
+	m := newBTManager(t)
+	m.SetSpeedLimit(high)
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "film.bin", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tor := waitLoaded(t, m, id)
+	waitFor(t, 20*time.Second, "the first of the film", func() bool { return tor.BytesCompleted() >= 256<<10 })
+
+	// A read begun under an earlier limit is paid for whole when it returns,
+	// so around a change one read's worth may arrive early or late: at most
+	// the burst of the highest limit so far.
+	_, oneRead := btDownloadLimit(high)
+	holds := func(limit int64, d time.Duration) {
+		t.Helper()
+		start, before := time.Now(), tor.BytesCompleted()
+		time.Sleep(d)
+		got := tor.BytesCompleted() - before
+		want := int64(time.Since(start).Seconds() * float64(limit))
+		if got < want*6/10-int64(oneRead) || got > want*14/10+int64(oneRead) {
+			t.Errorf("with the limit changed to %d bytes/s, %d bytes arrived in %s; want about %d", limit, got, time.Since(start).Round(time.Millisecond), want)
+		}
+	}
+
+	m.SetSpeedLimit(low)
+	holds(low, 4*time.Second)
+
+	m.SetSpeedLimit(middle)
+	holds(middle, 3*time.Second)
+
+	// With no limit the peer sets the pace, three times the last limit: two
+	// seconds of it would take six under that limit.
+	m.SetSpeedLimit(0)
+	before := tor.BytesCompleted()
+	waitFor(t, 4*time.Second, "the peer's own pace once the limit is lifted", func() bool {
+		return tor.BytesCompleted()-before >= 2*peerRate
+	})
+
+	// A limit that comes back finds reads that began before it went away:
+	// sized under the high limit, still out through the time without one,
+	// and paid for under the low one.
+	m.SetSpeedLimit(high)
+	time.Sleep(time.Second)
+	m.SetSpeedLimit(0)
+	m.SetSpeedLimit(low)
+	holds(low, 4*time.Second)
+
+	if tor.Complete().Bool() {
+		t.Fatal("the film finished before the last change of limit; make it longer")
+	}
+}
+
+// The same rule without a swarm: whatever the limit becomes, the limiter must
+// still accept a read cut to any burst it has had under a limit, and a limit
+// must not come into force with more saved up than it would have let build.
+func TestTheTorrentLimiterKeepsRoomForReadsAlreadyBegun(t *testing.T) {
+	e := &btEngine{}
+	e.setDownloadRate(1 << 20)
+	lim := e.config(0).DownloadRateLimiter
+	begun := 0 // the largest read that may still be waiting on a peer
+	for _, n := range []int64{64 << 10, 32 << 20, 0, 16 << 10, 0, 0, 256 << 10, 1 << 10, 4 << 20, 64 << 10} {
+		// Without a limit the library reads past the limiter altogether.
+		if lim.Limit() != rate.Inf {
+			begun = max(begun, lim.Burst())
+		}
+		e.setDownloadRate(n)
+		if lim.Burst() < begun {
+			t.Fatalf("with the limit now %d bytes/s the burst is %d: a read of %d bytes begun earlier is refused, and the library panics", n, lim.Burst(), begun)
+		}
+		if n == 0 {
+			if lim.Limit() != rate.Inf {
+				t.Fatalf("lifting the limit left one of %v bytes/s", lim.Limit())
+			}
+			continue
+		}
+		if lim.Limit() != rate.Limit(n) {
+			t.Fatalf("limit is %v bytes/s, want %d", lim.Limit(), n)
+		}
+		// A tenth of a second's worth, and what the clock adds while this runs.
+		_, most := btDownloadLimit(n)
+		if saved := lim.Tokens(); saved > float64(most)+float64(n)/20 {
+			t.Errorf("a limit of %d bytes/s came into force with %.0f bytes saved up; the most it lets build is %d", n, saved, most)
+		}
+	}
+
+	// Nor may the room a higher limit left fill up later, while less arrives
+	// than the limit allows. Running torrents see to that as they tick.
+	const limit = 2 << 20
+	e.setDownloadRate(32 << 20)
+	e.setDownloadRate(limit)
+	_, most := btDownloadLimit(limit)
+	time.Sleep(300 * time.Millisecond)
+	if saved := lim.Tokens(); saved < float64(most)+limit/10 {
+		t.Fatalf("only %.0f bytes saved up after a quiet 300ms at %d bytes/s; this no longer tests the trim", saved, limit)
+	}
+	e.trimDownload()
+	if saved := lim.Tokens(); saved > float64(most)+limit/20 {
+		t.Errorf("%.0f bytes saved up under a limit of %d bytes/s after the trim; the most it lets build is %d", saved, limit, most)
+	}
+}
+
 func TestSeedingPolicyEndpointAndPersistence(t *testing.T) {
 	m := newBTManager(t)
 	_, api := btAPI(t, m)

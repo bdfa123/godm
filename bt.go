@@ -254,7 +254,8 @@ type btEngine struct {
 	policy  SeedPolicy
 	changed chan struct{} // closed and replaced when the policy changes
 	// down is the client's download limit and downRate the overall limit it
-	// follows, in bytes per second; see setDownloadRate.
+	// follows, in bytes per second; see setDownloadRate. Its burst must never
+	// be made smaller while the client runs.
 	down     *rate.Limiter
 	downRate int64
 }
@@ -270,24 +271,68 @@ type btEngine struct {
 // kinds run they can use up to twice the limit between them. A download's
 // own limit does not reach torrents at all: the library has one limiter for
 // every torrent in the client.
+//
+// The limiter's burst only ever grows. The client cuts each read to the burst
+// it finds before the read and pays for the bytes after it, and it panics,
+// taking godm with it, if the payment is refused, which the limiter does to
+// one larger than its burst at that moment. A read lasts as long as the peer
+// keeps it waiting, so a burst made smaller at any time could meet a read
+// sized by the larger one. After the limit has come down, reads stay as large
+// as the highest limit so far made them: the pace is coarser, the average the
+// same.
 func (e *btEngine) setDownloadRate(n int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.downRate = max(n, 0)
-	if e.down != nil {
-		limit, burst := btDownloadLimit(e.downRate)
-		e.down.SetLimit(limit)
+	if e.down == nil {
+		return
+	}
+	limit, burst := btDownloadLimit(e.downRate)
+	e.down.SetLimit(limit)
+	if burst > e.down.Burst() {
 		e.down.SetBurst(burst)
+	}
+	e.trimDownloadLocked()
+}
+
+// trimDownload takes back what the limiter has saved up beyond what the limit
+// in force would have let it save. The burst is also how much the limiter
+// saves while less arrives than it allows, and all of that may come at once.
+// A burst left from a higher limit, or filled while there was no limit, is
+// more than this one should let through that way: a megabyte under a limit
+// of 64 KB/s is sixteen seconds' worth. A change of limit trims at once and
+// every running torrent trims as it ticks, so the saving never gets far.
+func (e *btEngine) trimDownload() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.trimDownloadLocked()
+}
+
+func (e *btEngine) trimDownloadLocked() {
+	if e.down == nil || e.downRate <= 0 {
+		return
+	}
+	_, burst := btDownloadLimit(e.downRate)
+	if e.down.Burst() <= burst {
+		return
+	}
+	// AllowN takes the bytes only if they are all there, so a read paid for
+	// in between costs this trim rather than putting the limiter in debt.
+	now := time.Now()
+	if over := int(e.down.TokensAt(now)) - burst; over > 0 {
+		e.down.AllowN(now, over)
 	}
 }
 
 // btDownloadLimit is the client's limiter setting for a limit in bytes per
 // second. The burst is a tenth of a second's worth, as for HTTP downloads,
 // within bounds: the client cuts each read to the burst, and reads of under
-// 16 KiB would cost more than they are worth.
+// 16 KiB would cost more than they are worth. Without a limit the client
+// reads past the limiter, and the burst is the smallest so that it is no
+// larger than the first limit wants; see setDownloadRate.
 func btDownloadLimit(n int64) (rate.Limit, int) {
 	if n <= 0 {
-		return rate.Inf, 1 << 20
+		return rate.Inf, 16 << 10
 	}
 	return rate.Limit(n), int(min(max(n/10, 16<<10), 1<<20))
 }
@@ -1438,6 +1483,7 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 	defer giveUp.Stop()
 	for tor.Info() == nil {
 		report("metadata")
+		m.bt.trimDownload()
 		select {
 		case <-tor.GotInfo():
 		case err := <-st.failed:
@@ -1474,6 +1520,7 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 	tor.DownloadAll()
 	for !tor.Complete().Bool() {
 		report("")
+		m.bt.trimDownload()
 		select {
 		case <-tor.Complete().On():
 		case err := <-writeErr:
