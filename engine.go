@@ -464,6 +464,13 @@ func planTarget(pr *ProbeResult, o Options) (*targetPlan, error) {
 
 	for n := 0; n < 10000; n++ {
 		cand := numberedName(base, n)
+		if n > 0 {
+			// The name this link was given the last time it was started, when
+			// the plain one was already someone else's.
+			if plan := ownNumbered(cand, pr, o); plan != nil {
+				return plan, nil
+			}
+		}
 		if pathExists(cand) || pathExists(statePath(cand)) {
 			continue
 		}
@@ -472,6 +479,32 @@ func planTarget(pr *ProbeResult, o Options) (*targetPlan, error) {
 		}
 	}
 	return nil, fmt.Errorf("no free file name for %s", pr.Filename)
+}
+
+// ownNumbered plans the download for a numbered name whose sidecar says it is
+// this very link's earlier attempt, nil when it is not. Starting the same link
+// again must not leave that attempt behind at its full preallocated size and
+// begin another beside it, and every interruption would add one more. The
+// command line has no stored name to hand back, so the sidecar is the only
+// thing that says whose the file is.
+func ownNumbered(cand string, pr *ProbeResult, o Options) *targetPlan {
+	st, ok := loadState(cand)
+	if !ok || st.URL != o.URL {
+		return nil
+	}
+	release, ok := reserveTarget(cand)
+	if !ok {
+		return nil // being downloaded right now by another task
+	}
+	if st.reusable(pr, o.URL, false) {
+		if fi, err := os.Stat(cand); err == nil && fi.Size() == st.Size {
+			return &targetPlan{path: cand, segs: restoreSegments(st), resumed: true, release: release}
+		}
+	}
+	// It can no longer be continued: start it over in place, as the plain name
+	// is.
+	clearState(cand)
+	return &targetPlan{path: cand, segs: freshSegments(pr, o), overwrite: true, release: release}
 }
 
 func restoreSegments(st *State) []*Segment {

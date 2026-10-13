@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func makePayload(n int) []byte {
@@ -250,6 +251,107 @@ func TestResumeFromSidecarSkipsFinishedBytes(t *testing.T) {
 		if start < half {
 			t.Errorf("resume refetched finished bytes: %s", rg)
 		}
+	}
+}
+
+// A download that was given a numbered name because the plain one is someone
+// else's is still the same download when it is run again: it carries on in
+// that file instead of starting another beside it. The command line has no
+// stored name to hand back, so the sidecar is all that says whose it is.
+func TestADownloadThatGotANumberedNameResumesInIt(t *testing.T) {
+	payload := makePayload(4 << 20)
+	srv := httptest.NewServer(&slowServer{payload: payload, chunk: 16 << 10, delay: 10 * time.Millisecond})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.bin"), []byte("somebody else's"), 0o644)
+	opts := Options{URL: srv.URL + "/f.bin", OutDir: dir, Connections: 1, MaxRetries: 1}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	first := opts
+	first.OnProgress = func(p Progress) {
+		if p.Received >= 512<<10 {
+			cancel()
+		}
+	}
+	if _, err := Download(ctx, first); err == nil {
+		t.Fatal("the first run was not interrupted")
+	}
+	numbered := filepath.Join(dir, "f (1).bin")
+	if !pathExists(statePath(numbered)) {
+		t.Fatalf("the interrupted run left no sidecar for %s: %v", numbered, dirNames(t, dir))
+	}
+
+	res, err := Download(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != numbered || !res.Resumed {
+		t.Fatalf("second run went to %s (resumed %v), want to carry on in %s", res.Path, res.Resumed, numbered)
+	}
+	checkFile(t, numbered, payload)
+	if got := dirNames(t, dir); len(got) != 2 {
+		t.Errorf("the folder holds %v, want just f.bin and f (1).bin", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "f.bin")); string(got) != "somebody else's" {
+		t.Errorf("the other file was changed to %q", got)
+	}
+}
+
+// The same, when the earlier attempt can no longer be continued: it starts
+// over in its own file rather than in a third.
+func TestANumberedNameIsRestartedInPlaceWhenItCannotResume(t *testing.T) {
+	payload := makePayload(256 << 10)
+	srv := httptest.NewServer(&rangedHandler{payload: payload})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.bin"), []byte("somebody else's"), 0o644)
+	numbered := filepath.Join(dir, "f (1).bin")
+	os.WriteFile(numbered, make([]byte, len(payload)), 0o644)
+	saveState(numbered, &State{
+		Version: stateVersion, URL: srv.URL + "/f.bin", Size: int64(len(payload)),
+		ETag: `"an-old-etag"`, Filename: "f (1).bin",
+		Segments: []SegSnap{{Start: 0, End: int64(len(payload)) - 1, Done: int64(len(payload))}},
+	})
+
+	res, err := Download(context.Background(), Options{URL: srv.URL + "/f.bin", OutDir: dir, Connections: 2, MinSplit: 4 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != numbered || res.Resumed {
+		t.Fatalf("went to %s (resumed %v), want a fresh start in %s", res.Path, res.Resumed, numbered)
+	}
+	checkFile(t, numbered, payload)
+	if got := dirNames(t, dir); len(got) != 2 {
+		t.Errorf("the folder holds %v, want just f.bin and f (1).bin", got)
+	}
+}
+
+// Another link's partial download under a numbered name is not ours to touch.
+func TestAnotherLinksNumberedPartialIsLeftAlone(t *testing.T) {
+	payload := makePayload(64 << 10)
+	srv := httptest.NewServer(&rangedHandler{payload: payload})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.bin"), []byte("somebody else's"), 0o644)
+	numbered := filepath.Join(dir, "f (1).bin")
+	os.WriteFile(numbered, make([]byte, len(payload)), 0o644)
+	saveState(numbered, &State{
+		Version: stateVersion, URL: srv.URL + "/another.bin", Size: int64(len(payload)),
+		Filename: "f (1).bin", Segments: []SegSnap{{Start: 0, End: int64(len(payload)) - 1, Done: 100}},
+	})
+
+	res, err := Download(context.Background(), Options{URL: srv.URL + "/f.bin", OutDir: dir, Connections: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "f (2).bin"); res.Path != want {
+		t.Fatalf("went to %s, want %s beside the other link's partial file", res.Path, want)
+	}
+	if st, ok := loadState(numbered); !ok || st.URL != srv.URL+"/another.bin" {
+		t.Errorf("the other link's sidecar was disturbed: %+v", st)
 	}
 }
 
