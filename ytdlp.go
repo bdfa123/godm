@@ -227,8 +227,11 @@ func ytdlpArgs(o YTDLPOptions) []string {
 		// --print makes yt-dlp quiet, so nothing it would say about itself
 		// (which file it is writing, say) is there to be read; what we need to
 		// know is asked for by name. The title comes before the download so
-		// the task has its name from the start.
-		"--print", "before_dl:" + titleMarker + "%(title)s",
+		// the task has its name from the start. It is asked for as JSON (which
+		// yt-dlp writes in ASCII): a title is whatever the page says, a line
+		// break in it would let it pose as the line below that names the file,
+		// and a title that is missing comes out as a bare NA rather than text.
+		"--print", "before_dl:" + titleMarker + "%(title)j",
 		"--print", "after_move:" + fileMarker + "%(filepath)s",
 		"--retries", "10",
 		"--fragment-retries", "10",
@@ -361,8 +364,11 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			continue
 		}
 		if got, ok := strings.CutPrefix(line, titleMarker); ok {
-			if t := strings.TrimSpace(got); t != "" && o.OnStart != nil {
-				o.OnStart(YTStart{Title: t})
+			var t string
+			if json.Unmarshal([]byte(got), &t) == nil {
+				if t = strings.TrimSpace(t); t != "" && o.OnStart != nil {
+					o.OnStart(YTStart{Title: t})
+				}
 			}
 			continue
 		}

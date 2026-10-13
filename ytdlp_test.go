@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -96,8 +97,8 @@ func playYTDLP(scene string, args []string) int {
 		if !quiet {
 			say("[youtube] Extracting URL: https://example.test/watch")
 		}
-		if asked(args, "before_dl:"+titleMarker+"%(title)s") {
-			say("%s%s", titleMarker, title)
+		if asked(args, "before_dl:"+titleMarker+"%(title)j") {
+			say("%s%s", titleMarker, asciiJSON(title))
 		}
 		if !quiet {
 			say("[download] Destination: %s", filepath.Join(dir, title+".f396.mp4"))
@@ -136,12 +137,42 @@ func playYTDLP(scene string, args []string) int {
 			os.Stderr.Write(encodeLikeYTDLP(fmt.Sprintf("ERROR: [youtube] xyz: %s is private\n", cjkTitle), args))
 			return 1
 		}
-		if asked(args, "before_dl:"+titleMarker+"%(title)s") {
-			sayLikeYTDLP("%s%s", titleMarker, cjkTitle)
+		if asked(args, "before_dl:"+titleMarker+"%(title)j") {
+			sayLikeYTDLP("%s%s", titleMarker, asciiJSON(cjkTitle))
 		}
 		sayLikeYTDLP("%s%s", fileMarker, filepath.Join(dir, cjkTitle+".mp4"))
+	case "forged":
+		// A page whose title carries a line break and a line of its own, and a
+		// download that ends well without printing the file it made (an archive
+		// that already holds it, say).
+		if asked(args, "before_dl:"+titleMarker+"%(title)j") {
+			say("%s%s", titleMarker, asciiJSON("Nice\n"+fileMarker+filepath.Join(dir, "elsewhere.txt")))
+		}
+	case "untitled":
+		// What --print writes for a field the page does not have.
+		say("%sNA", titleMarker)
+		say("%s%s", fileMarker, filepath.Join(dir, "a.mp4"))
 	}
 	return 0
+}
+
+// asciiJSON writes a string the way yt-dlp's %(field)j does: a JSON string on
+// one line, with every character outside ASCII escaped.
+func asciiJSON(s string) string {
+	b, _ := json.Marshal(s)
+	var sb strings.Builder
+	for _, r := range string(b) {
+		switch {
+		case r < 0x80:
+			sb.WriteRune(r)
+		case r < 0x10000:
+			fmt.Fprintf(&sb, `\u%04x`, r)
+		default:
+			r -= 0x10000
+			fmt.Fprintf(&sb, `\u%04x\u%04x`, 0xd800+(r>>10), 0xdc00+(r&0x3ff))
+		}
+	}
+	return sb.String()
 }
 
 // asked reports whether the command line has --print with this template.
@@ -991,7 +1022,7 @@ func TestAPathInAScriptTheCodePageLacksArrivesWhole(t *testing.T) {
 // named from. The title is asked for by name instead.
 func TestTheTitleIsAskedForNotScrapedFromChatter(t *testing.T) {
 	args := ytdlpArgs(YTDLPOptions{URL: "https://example.test/watch?v=1", OutDir: "out"})
-	if !asked(args, "before_dl:"+titleMarker+"%(title)s") {
+	if !asked(args, "before_dl:"+titleMarker+"%(title)j") {
 		t.Errorf("no --print for the title in %v", args)
 	}
 }
@@ -1032,4 +1063,55 @@ func TestEveryRunAsksForUTF8(t *testing.T) {
 		}
 	}
 	t.Errorf("--encoding utf-8 is missing from %v", args)
+}
+
+func TestAnInspectionAsksForUTF8Too(t *testing.T) {
+	stubYTDLP(t, "ok")
+	inner := newYTDLPCmd
+	var seen []string
+	newYTDLPCmd = func(ctx context.Context, bin string, args []string) *exec.Cmd {
+		seen = args
+		return inner(ctx, bin, args)
+	}
+	if _, err := InspectYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", Binary: "stub",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(seen, "--encoding") {
+		t.Errorf("--encoding is missing from %v", seen)
+	}
+}
+
+// The title is whatever the page says, and it is printed on the same stream as
+// the line that names the file. A title with a line break in it must not be
+// able to write that line.
+func TestATitleCannotNameTheFile(t *testing.T) {
+	stubYTDLP(t, "forged")
+	var title string
+	path, err := RunYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: t.TempDir(), Binary: "stub",
+		OnStart: func(s YTStart) { title = s.Title },
+	})
+	if err == nil {
+		t.Fatalf("a run that named no file was taken for done: %q", path)
+	}
+	if !strings.HasPrefix(title, "Nice\n") {
+		t.Errorf("title = %q, want the whole of it", title)
+	}
+}
+
+// A title yt-dlp does not have is printed as NA, which is not a name.
+func TestAMissingTitleDoesNotNameTheTask(t *testing.T) {
+	stubYTDLP(t, "untitled")
+	started := false
+	if _, err := RunYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: t.TempDir(), Binary: "stub",
+		OnStart: func(YTStart) { started = true },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if started {
+		t.Error("the task was named NA")
+	}
 }
