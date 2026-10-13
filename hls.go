@@ -720,6 +720,18 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 		r.next, r.want, r.bytes = resume.Next, resume.Next, resume.Written
 		r.initDone = resume.InitDone
 	}
+	// The init segment is fetched before the file exists. One that cannot be had
+	// (refused, timed out, or the user pausing while it is in flight) then
+	// leaves nothing behind, where an empty file would burn the name and the
+	// next attempt would go to "clip (1).mp4".
+	var initData []byte
+	needInit := r.media.Init != nil && !r.initDone
+	if needInit {
+		var err error
+		if initData, err = r.fetchSegment(ctx, r.media.Init); err != nil {
+			return fmt.Errorf("initialisation segment: %w", err)
+		}
+	}
 	f, err := os.OpenFile(r.target, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
@@ -735,13 +747,14 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 		return err
 	}
 
-	if r.media.Init != nil && !r.initDone {
-		data, err := r.fetchSegment(ctx, r.media.Init)
+	if needInit {
+		n, err := f.Write(initData)
 		if err != nil {
-			return fmt.Errorf("initialisation segment: %w", err)
-		}
-		n, err := f.Write(data)
-		if err != nil {
+			if r.bytes == 0 {
+				f.Close()
+				os.Remove(r.target)
+				clearState(r.target)
+			}
 			return err
 		}
 		r.bytes += int64(n)

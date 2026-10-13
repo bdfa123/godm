@@ -30,6 +30,9 @@ type hlsServer struct {
 	key  []byte // nil leaves the segments in the clear
 	live bool   // omit EXT-X-ENDLIST
 
+	initFail  int           // status to answer the init segment with, zero for the bytes
+	initDelay time.Duration // how long to hold the init segment back
+
 	mu       sync.Mutex
 	hits     map[string]int
 	failAt   map[int]int           // segment index -> status code to answer with
@@ -78,6 +81,20 @@ func (s *hlsServer) serve(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/key.bin":
 		w.Write(s.key)
 	case r.URL.Path == "/init.mp4":
+		s.mu.Lock()
+		code, d := s.initFail, s.initDelay
+		s.mu.Unlock()
+		if d > 0 {
+			select {
+			case <-time.After(d):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if code != 0 {
+			http.Error(w, http.StatusText(code), code)
+			return
+		}
 		w.Write(s.init)
 	case strings.HasPrefix(r.URL.Path, "/seg"):
 		i, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/seg"), ".ts"))
@@ -709,6 +726,61 @@ func TestAFailedStartLeavesNothingBehind(t *testing.T) {
 	if filepath.Base(target) != "clip.ts" {
 		t.Errorf("retried into %s; a failed attempt that wrote nothing must not burn the name",
 			filepath.Base(target))
+	}
+}
+
+// The same holds when it is the initialisation segment that cannot be had, and
+// when the download is stopped while it is still being fetched.
+func TestAFailedInitSegmentLeavesNothingBehind(t *testing.T) {
+	segs := makeSegments(3)
+	s := newHLSServer(t, segs)
+	s.init = []byte("FTYPISO6MOOVBOXHERE")
+
+	leftIn := func(dir string) []string {
+		var names []string
+		ents, _ := os.ReadDir(dir)
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		return names
+	}
+
+	dir := t.TempDir()
+	opts := HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip",
+		Connections: 1, MaxRetries: 1,
+	}
+
+	s.initFail = http.StatusForbidden
+	if _, err := DownloadHLS(context.Background(), opts); err == nil {
+		t.Fatal("expected the download to fail")
+	}
+	if names := leftIn(dir); len(names) != 0 {
+		t.Errorf("a refused init segment left %v behind", names)
+	}
+
+	s.initFail, s.initDelay = 0, 5*time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := DownloadHLS(ctx, opts); err == nil {
+		t.Fatal("expected the stopped download to fail")
+	}
+	if names := leftIn(dir); len(names) != 0 {
+		t.Errorf("a download stopped during its init segment left %v behind", names)
+	}
+
+	s.initDelay = 0
+	target, err := DownloadHLS(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(target) != "clip.mp4" {
+		t.Errorf("finished as %s; failed attempts that wrote nothing must not burn the name",
+			filepath.Base(target))
+	}
+	got, _ := os.ReadFile(target)
+	if want := append(append([]byte{}, s.init...), joined(segs)...); !bytes.Equal(got, want) {
+		t.Errorf("file is %d bytes, want %d", len(got), len(want))
 	}
 }
 
