@@ -26,7 +26,23 @@ type ProbeResult struct {
 // Probe issues a one-byte ranged GET. HEAD is unreliable in the wild: plenty of
 // CDNs 405 it, and some report Accept-Ranges on HEAD then ignore Range on GET.
 // Asking for bytes 0-0 costs nothing and gives us the truth.
+//
+// A server that follows the RFC to the letter answers 416 to a range into an
+// object with nothing in it (S3 and nginx do), which would make an empty file
+// impossible to download. A 416 to this request says nothing about whether the
+// URL leads to a file, so the question is asked again without a range: the
+// answer is then a plain 200, taken as a stream that cannot be resumed, or the
+// real reason the URL does not work.
 func Probe(ctx context.Context, c *http.Client, o Options) (*ProbeResult, error) {
+	pr, err := probe(ctx, c, o, true)
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusRequestedRangeNotSatisfiable {
+		return probe(ctx, c, o, false)
+	}
+	return pr, err
+}
+
+func probe(ctx context.Context, c *http.Client, o Options, ranged bool) (*ProbeResult, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, o.URL, nil)
@@ -34,7 +50,9 @@ func Probe(ctx context.Context, c *http.Client, o Options) (*ProbeResult, error)
 		return nil, err
 	}
 	applyHeaders(req, o.Headers, o.URL)
-	req.Header.Set("Range", "bytes=0-0")
+	if ranged {
+		req.Header.Set("Range", "bytes=0-0")
+	}
 
 	resp, err := c.Do(req)
 	if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -352,6 +353,78 @@ func TestAnotherLinksNumberedPartialIsLeftAlone(t *testing.T) {
 	}
 	if st, ok := loadState(numbered); !ok || st.URL != srv.URL+"/another.bin" {
 		t.Errorf("the other link's sidecar was disturbed: %+v", st)
+	}
+}
+
+// S3 and nginx answer a range request for an object with nothing in it with
+// 416, where the same request without a range gets an empty 200. A browser
+// saves the empty file, and so does this.
+func TestAnEmptyFileIsSavedFromAServerThatAnswers416ToTheProbe(t *testing.T) {
+	var ranged, plain atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			ranged.Add(1)
+			w.Header().Set("Content-Range", "bytes */0")
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		plain.Add(1)
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	res, err := Download(context.Background(), Options{URL: srv.URL + "/empty.txt", OutDir: dir, MaxRetries: 1})
+	if err != nil {
+		t.Fatalf("an empty file could not be downloaded: %v", err)
+	}
+	if fi, err := os.Stat(res.Path); err != nil || fi.Size() != 0 || filepath.Base(res.Path) != "empty.txt" {
+		t.Fatalf("saved %s (%v, %v), want an empty empty.txt", res.Path, fi, err)
+	}
+	if got := dirNames(t, dir); len(got) != 1 {
+		t.Errorf("the folder holds %v, want just the file", got)
+	}
+}
+
+// A 416 from the probe is no verdict on the file when it is not empty: asking
+// again without a range gets the whole of it as one stream.
+func TestA416ToTheProbeFallsBackToOneStream(t *testing.T) {
+	payload := makePayload(100 << 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.Write(payload)
+	}))
+	defer srv.Close()
+
+	res, err := Download(context.Background(), Options{URL: srv.URL + "/odd.bin", OutDir: t.TempDir(), MaxRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkFile(t, res.Path, payload)
+	if res.Resumable {
+		t.Error("a server that refused every range was taken for one that resumes")
+	}
+}
+
+// When the plain request fails too, that is the answer given, not the 416.
+func TestAProbeThatFailsWithAndWithoutARangeReportsTheSecondAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	_, err := Download(context.Background(), Options{URL: srv.URL + "/gone.bin", OutDir: t.TempDir(), MaxRetries: 1})
+	var se *statusError
+	if !errors.As(err, &se) || se.code != http.StatusNotFound {
+		t.Fatalf("error %v, want the 404", err)
 	}
 }
 
