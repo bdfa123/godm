@@ -89,10 +89,11 @@ type YTProgress struct {
 	ETA        int64
 }
 
-// progressMarker and fileMarker prefix the two things we ask yt-dlp to print,
-// so its lines can be picked out of everything else it says.
+// progressMarker, titleMarker and fileMarker prefix the three things we ask
+// yt-dlp to print, so its lines can be picked out of everything else it says.
 const (
 	progressMarker = "godm-progress|"
+	titleMarker    = "godm-title|"
 	fileMarker     = "godm-file|"
 )
 
@@ -223,6 +224,11 @@ func ytdlpArgs(o YTDLPOptions) []string {
 		"--progress",
 		"--progress-template", ytProgressTemplate,
 		"--no-simulate", // --print would otherwise only pretend
+		// --print makes yt-dlp quiet, so nothing it would say about itself
+		// (which file it is writing, say) is there to be read; what we need to
+		// know is asked for by name. The title comes before the download so
+		// the task has its name from the start.
+		"--print", "before_dl:" + titleMarker + "%(title)s",
 		"--print", "after_move:" + fileMarker + "%(filepath)s",
 		"--retries", "10",
 		"--fragment-retries", "10",
@@ -354,8 +360,11 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			}
 			continue
 		}
-		if t := ytdlpTitle(line); t != "" && o.OnStart != nil {
-			o.OnStart(YTStart{Title: t})
+		if got, ok := strings.CutPrefix(line, titleMarker); ok {
+			if t := strings.TrimSpace(got); t != "" && o.OnStart != nil {
+				o.OnStart(YTStart{Title: t})
+			}
+			continue
 		}
 		// Keep the last few lines: when yt-dlp fails, its reason is in them.
 		tail = append(tail, line)
@@ -427,17 +436,6 @@ func ytNum(s string) int64 {
 		return int64(f)
 	}
 	return 0
-}
-
-// ytdlpTitle picks the video's name out of the line yt-dlp prints when it
-// starts, so the task is named before any bytes arrive.
-func ytdlpTitle(line string) string {
-	const marker = "] Destination: "
-	if i := strings.Index(line, marker); i >= 0 {
-		name := filepath.Base(strings.TrimSpace(line[i+len(marker):]))
-		return strings.TrimSuffix(name, filepath.Ext(name))
-	}
-	return ""
 }
 
 // ytdlpReason turns the tail of the output into one line worth showing. Its

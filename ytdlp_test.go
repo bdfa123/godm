@@ -89,14 +89,27 @@ func playYTDLP(scene string, args []string) int {
 				`{"format_id": "18", "ext": "mp4", "height": 720, "tbr": 1500, "vcodec": "avc1"}]}`, title)
 			break
 		}
-		say("[youtube] Extracting URL: https://example.test/watch")
-		say("[download] Destination: %s", filepath.Join(dir, title+".f396.mp4"))
+		// --print implies --quiet, and then yt-dlp leaves out what it would say
+		// about itself, the Destination line with the rest, unless it is told
+		// not to be quiet. What is printed is only what was asked for.
+		quiet := !contains(args, "--no-quiet")
+		if !quiet {
+			say("[youtube] Extracting URL: https://example.test/watch")
+		}
+		if asked(args, "before_dl:"+titleMarker+"%(title)s") {
+			say("%s%s", titleMarker, title)
+		}
+		if !quiet {
+			say("[download] Destination: %s", filepath.Join(dir, title+".f396.mp4"))
+		}
 		progress("downloading", 1<<20, 8<<20, 500000, 14, "avc1.4d401f")
 		progress("downloading", 4<<20, 8<<20, 900000, 4, "avc1.4d401f")
 		progress("finished", 8<<20, 8<<20, 0, 0, "avc1.4d401f")
 		progress("downloading", 1<<19, 2<<20, 400000, 3, "none")
 		progress("finished", 2<<20, 2<<20, 0, 0, "none")
-		say("[Merger] Merging formats into \"%s\"", filepath.Join(dir, title+".mp4"))
+		if !quiet {
+			say("[Merger] Merging formats into \"%s\"", filepath.Join(dir, title+".mp4"))
+		}
 		say("%s%s", fileMarker, filepath.Join(dir, title+".mp4"))
 	case "unavailable":
 		say("[youtube] Extracting URL: https://example.test/watch")
@@ -123,9 +136,22 @@ func playYTDLP(scene string, args []string) int {
 			os.Stderr.Write(encodeLikeYTDLP(fmt.Sprintf("ERROR: [youtube] xyz: %s is private\n", cjkTitle), args))
 			return 1
 		}
+		if asked(args, "before_dl:"+titleMarker+"%(title)s") {
+			sayLikeYTDLP("%s%s", titleMarker, cjkTitle)
+		}
 		sayLikeYTDLP("%s%s", fileMarker, filepath.Join(dir, cjkTitle+".mp4"))
 	}
 	return 0
+}
+
+// asked reports whether the command line has --print with this template.
+func asked(args []string, template string) bool {
+	for i, a := range args {
+		if (a == "--print" || a == "-O") && i+1 < len(args) && args[i+1] == template {
+			return true
+		}
+	}
+	return false
 }
 
 // cjkTitle is a file name that cp1252 can only hold part of, and cp936 holds
@@ -688,8 +714,9 @@ func TestRunYTDLPReportsBothHalvesAndTheFinalFile(t *testing.T) {
 	if want := filepath.Join(dir, "A Video Title.mp4"); path != want {
 		t.Errorf("path = %q, want %q", path, want)
 	}
-	if title != "A Video Title.f396" {
-		t.Errorf("title = %q", title)
+	// The title yt-dlp gives, not the name of the first stream's part file.
+	if title != "A Video Title" {
+		t.Errorf("title = %q, want the task named while it downloads", title)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -944,14 +971,28 @@ func TestFormatSelectorAsksForAHeightNotAFormatID(t *testing.T) {
 func TestAPathInAScriptTheCodePageLacksArrivesWhole(t *testing.T) {
 	stubYTDLP(t, "ansi")
 	dir := t.TempDir()
+	var title string
 	path, err := RunYTDLP(context.Background(), YTDLPOptions{
 		URL: "https://example.test/watch?v=1", OutDir: dir, Binary: "stub",
+		OnStart: func(s YTStart) { title = s.Title },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := filepath.Join(dir, cjkTitle+".mp4"); path != want {
 		t.Errorf("path = %q, want %q", path, want)
+	}
+	if title != cjkTitle {
+		t.Errorf("title = %q, want %q", title, cjkTitle)
+	}
+}
+
+// --print makes yt-dlp quiet, which leaves out the line the task used to be
+// named from. The title is asked for by name instead.
+func TestTheTitleIsAskedForNotScrapedFromChatter(t *testing.T) {
+	args := ytdlpArgs(YTDLPOptions{URL: "https://example.test/watch?v=1", OutDir: "out"})
+	if !asked(args, "before_dl:"+titleMarker+"%(title)s") {
+		t.Errorf("no --print for the title in %v", args)
 	}
 }
 
