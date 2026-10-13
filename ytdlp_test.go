@@ -108,8 +108,56 @@ func playYTDLP(scene string, args []string) int {
 		// The folder it was started in, reported as if it were the file.
 		wd, _ := os.Getwd()
 		say("%s%s", fileMarker, wd)
+	case "encoding":
+		// What the child was told about the encoding of its output, reported as
+		// if it were the file.
+		say("%s%s", fileMarker, os.Getenv("PYTHONIOENCODING"))
+	case "ansi":
+		// A video whose title no Western code page can hold, as a machine that
+		// writes piped output in one sees it.
+		sayLikeYTDLP := func(format string, a ...any) {
+			out.Write(encodeLikeYTDLP(fmt.Sprintf(format, a...)+"\n", args))
+		}
+		if contains(args, "-J") {
+			// Errors go to stderr, which is where an inspection looks for them.
+			os.Stderr.Write(encodeLikeYTDLP(fmt.Sprintf("ERROR: [youtube] xyz: %s is private\n", cjkTitle), args))
+			return 1
+		}
+		sayLikeYTDLP("%s%s", fileMarker, filepath.Join(dir, cjkTitle+".mp4"))
 	}
 	return 0
+}
+
+// cjkTitle is a file name that cp1252 can only hold part of, and cp936 holds
+// in bytes that are not UTF-8.
+const cjkTitle = "视频标题 café [BV1xx411c7mD]"
+
+// encodeLikeYTDLP writes text the way yt-dlp's write_string does: in the
+// encoding it was told to use with --encoding, or that of the stream it writes
+// to, which for a pipe is the code page of the machine (PYTHONIOENCODING and
+// Python's UTF-8 mode override it), dropping what that cannot hold. cp1252
+// stands in for the code page; it keeps what Latin-1 has, which is enough to
+// tell a title that came through whole from one that did not.
+func encodeLikeYTDLP(s string, args []string) []byte {
+	enc := "cp1252"
+	if v := os.Getenv("PYTHONIOENCODING"); v != "" {
+		enc = v
+	}
+	for i, a := range args {
+		if a == "--encoding" && i+1 < len(args) {
+			enc = args[i+1]
+		}
+	}
+	if strings.EqualFold(enc, "utf-8") || strings.EqualFold(enc, "utf8") {
+		return []byte(s)
+	}
+	var b []byte
+	for _, r := range s {
+		if r < 0x100 {
+			b = append(b, byte(r))
+		}
+	}
+	return b
 }
 
 // stubBeatEnv names a file that a stand-in which goes on running adds to for
@@ -886,4 +934,61 @@ func TestFormatSelectorAsksForAHeightNotAFormatID(t *testing.T) {
 	if ytdlpFormatFor(0) != "" {
 		t.Error("no chosen height should leave the choice to yt-dlp")
 	}
+}
+
+// ---------- what yt-dlp's words are written in ----------
+
+// Through a pipe yt-dlp writes in the machine's code page, dropping what that
+// cannot hold, and godm reads UTF-8. A title in any script the code page lacks
+// then reached the task as a path to a file that was never there.
+func TestAPathInAScriptTheCodePageLacksArrivesWhole(t *testing.T) {
+	stubYTDLP(t, "ansi")
+	dir := t.TempDir()
+	path, err := RunYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: dir, Binary: "stub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, cjkTitle+".mp4"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+}
+
+func TestAnInspectionErrorInThatScriptIsReadable(t *testing.T) {
+	stubYTDLP(t, "ansi")
+	_, err := InspectYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", Binary: "stub",
+	})
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if !strings.Contains(err.Error(), cjkTitle) {
+		t.Errorf("err = %q, want it to carry %q whole", err, cjkTitle)
+	}
+}
+
+// Python reads its own variable even where an option does not reach, such as
+// before the options have been read.
+func TestYTDLPIsToldInTheEnvironmentToWriteUTF8(t *testing.T) {
+	stubYTDLP(t, "encoding")
+	got, err := RunYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: t.TempDir(), Binary: "stub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "utf-8" {
+		t.Errorf("PYTHONIOENCODING = %q, want utf-8", got)
+	}
+}
+
+func TestEveryRunAsksForUTF8(t *testing.T) {
+	args := ytdlpArgs(YTDLPOptions{URL: "https://example.test/watch?v=1", OutDir: "out"})
+	for i, a := range args {
+		if a == "--encoding" && i+1 < len(args) && args[i+1] == "utf-8" {
+			return
+		}
+	}
+	t.Errorf("--encoding utf-8 is missing from %v", args)
 }
