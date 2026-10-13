@@ -25,8 +25,16 @@ func ResolveFilename(override string, resp *http.Response) string {
 	}
 	if cd := resp.Header.Get("Content-Disposition"); cd != "" {
 		if _, params, err := mime.ParseMediaType(cd); err == nil {
-			// mime.ParseMediaType already decodes RFC 5987 filename* into "filename".
-			if n := sanitize(params["filename"]); n != "" {
+			// mime.ParseMediaType already decodes RFC 5987 filename* into
+			// "filename", and what it decoded is the name: a second pass would
+			// turn a literal "%25" in it into "%". A plain filename is where
+			// servers put escapes and encoded words that browsers decode and
+			// the standard does not allow.
+			n := params["filename"]
+			if !extendedNameRe.MatchString(cd) {
+				n = decodeDispositionName(n)
+			}
+			if n := sanitize(n); n != "" {
 				return n
 			}
 		}
@@ -51,12 +59,31 @@ func scrapeFilenameParam(cd string) string {
 		}
 		v := strings.TrimSpace(part[len("filename="):])
 		v = strings.Trim(v, `"'`)
-		if dec, err := url.PathUnescape(v); err == nil {
-			v = dec
-		}
-		return v
+		return decodeDispositionName(v)
 	}
 	return ""
+}
+
+var extendedNameRe = regexp.MustCompile(`(?i)(^|[;\s])filename\*\s*=`)
+
+// decodeDispositionName undoes the encodings browsers accept in a plain
+// filename: an RFC 2047 encoded word, or percent escapes. Whichever applies is
+// used once, and only when it gives text: a literal percent sign is not an
+// escape, and bytes that are not UTF-8 (a GBK name, escaped) stay as sent
+// rather than become something sanitize would refuse. The result is still the
+// server's word and goes through sanitize like any other name.
+func decodeDispositionName(v string) string {
+	if strings.Contains(v, "=?") {
+		if dec, err := new(mime.WordDecoder).DecodeHeader(v); err == nil && dec != v {
+			return dec
+		}
+	}
+	if strings.Contains(v, "%") {
+		if dec, err := url.PathUnescape(v); err == nil && utf8.ValidString(dec) {
+			return dec
+		}
+	}
+	return v
 }
 
 func basenameFromURL(u *url.URL) string {
