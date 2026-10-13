@@ -23,13 +23,33 @@ function load() {
   });
 }
 
+// The smallest and largest value each number field takes. Zero is a real answer
+// for the minimum size ("take over small files too"), so a value is judged by
+// being a number and not by being truthy.
+const LIMITS = { minSize: [0, Infinity], connections: [1, 32] };
+
+// numberOf reads a number field. Something that is not a number at all gets the
+// default; a number outside the field's limits gets the nearest one, except
+// that a negative size means nothing and gets the default too.
+function numberOf(f, text) {
+  const n = parseInt(text, 10);
+  if (!Number.isFinite(n)) return DEFAULTS[f];
+  const [lo, hi] = LIMITS[f];
+  if (f === "minSize" && n < lo) return DEFAULTS[f];
+  return Math.min(hi, Math.max(lo, n));
+}
+
 document.getElementById("save").addEventListener("click", () => {
   const out = {};
   for (const f of fields) {
     const el = document.getElementById(f);
     if (el.type === "checkbox") out[f] = el.checked;
-    else if (el.type === "number") out[f] = parseInt(el.value, 10) || DEFAULTS[f];
-    else out[f] = el.value.trim();
+    else if (el.type === "number") {
+      out[f] = numberOf(f, el.value);
+      // Show what was kept, so the field never says one thing while storage
+      // holds another.
+      el.value = out[f];
+    } else out[f] = el.value.trim();
   }
   chrome.storage.sync.set(out, () => {
     const s = document.getElementById("status");
