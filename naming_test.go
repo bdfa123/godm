@@ -30,6 +30,7 @@ func TestPlainDispositionNamesAreDecodedThenCleaned(t *testing.T) {
 		{"percent and a space", `attachment; filename="50% off.zip"`, "50% off.zip"},
 		{"filename* is decoded once", `attachment; filename*=UTF-8''100%2525.zip`, "100%25.zip"},
 		{"filename* beside a plain one", `attachment; filename="a%20b.zip"; filename*=UTF-8''c%2520d.zip`, "c%20d.zip"},
+		{"filename* in pieces is decoded once", `attachment; filename*0*=UTF-8''100%2525; filename*1*=%2520.zip`, "100%25%20.zip"},
 		{"bytes that are not utf-8 stay as sent", `attachment; filename=%D6%D0%CE%C4.zip`, "%D6%D0%CE%C4.zip"},
 		{"unknown charset stays as sent", `attachment; filename="=?x-unknown?B?5Lit?="`, "=_x-unknown_B_5Lit_="},
 

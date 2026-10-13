@@ -447,6 +447,9 @@ func TestTheSidecarNeverClaimsMoreThanWasFlushed(t *testing.T) {
 		mu.Lock()
 		flushed, flushes = b, flushes+1
 		mu.Unlock()
+		// A flush takes time, and the connections write on through it. What
+		// they write meanwhile is not on disk yet and must not be claimed.
+		time.Sleep(60 * time.Millisecond)
 		return err
 	}
 

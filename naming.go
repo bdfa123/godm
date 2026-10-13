@@ -64,7 +64,9 @@ func scrapeFilenameParam(cd string) string {
 	return ""
 }
 
-var extendedNameRe = regexp.MustCompile(`(?i)(^|[;\s])filename\*\s*=`)
+// extendedNameRe finds the RFC 5987 form of the name, whole (filename*=) or in
+// numbered pieces (filename*0*=), whichever ParseMediaType has already decoded.
+var extendedNameRe = regexp.MustCompile(`(?i)(^|[;\s])filename(\*[0-9]+)?\*\s*=`)
 
 // decodeDispositionName undoes the encodings browsers accept in a plain
 // filename: an RFC 2047 encoded word, or percent escapes. Whichever applies is
