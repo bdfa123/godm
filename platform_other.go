@@ -31,6 +31,33 @@ func spawnDetached(exe string, args ...string) error {
 	return cmd.Process.Release()
 }
 
+// startTree starts cmd so that cancelling its context ends everything it went
+// on to start as well, not only the one process: yt-dlp runs ffmpeg, and
+// ending yt-dlp alone leaves that going. The process is made the leader of a
+// group of its own, which its children join by being born. cmd must come from
+// exec.CommandContext. The returned function is called once cmd.Wait has
+// returned.
+func startTree(cmd *exec.Cmd) (release func(), err error) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+	cmd.Cancel = func() error {
+		// The process itself first: that says whether it had already ended
+		// by itself, in which case what it left running stays.
+		err := cmd.Process.Kill()
+		if err == nil {
+			// A negative id names the group.
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return func() {}, nil
+}
+
 // On macOS and Linux the manifest is a file in a per-browser directory rather
 // than a registry value.
 func nativeHostDirs() []string {

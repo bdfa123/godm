@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Some sites hand their video out through a protocol of their own rather than
@@ -97,6 +99,12 @@ const (
 const ytProgressTemplate = progressMarker +
 	"%(progress.status)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|" +
 	"%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s|%(info.vcodec)s"
+
+// ytdlpDrain is how long yt-dlp's output is still read after yt-dlp itself has
+// gone. Normally it ends that same instant; when something yt-dlp started and
+// did not wait for holds it open, this is how long that is allowed to keep
+// godm waiting. It is a variable so a test need not sit through it.
+var ytdlpDrain = 2 * time.Second
 
 // newYTDLPCmd is a variable so a test can point the runner at a stand-in
 // program without yt-dlp being installed.
@@ -258,16 +266,52 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		return "", err
 	}
 	cmd.Stdout, cmd.Stderr = pw, pw
-	if err := cmd.Start(); err != nil {
+	// yt-dlp is rarely one process: the released yt-dlp.exe is a launcher with
+	// the real program as its child, and ffmpeg is started for merges and for
+	// some streams. Pausing has to end all of them, or the rest carries on
+	// downloading behind a task that says it stopped.
+	release, err := startTree(cmd)
+	if err != nil {
 		pw.Close()
 		pr.Close()
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("could not start yt-dlp: %w", err)
 	}
+	defer release()
 	// The child holds its own copy; ours has to go or the read never ends.
 	pw.Close()
 	defer pr.Close()
-	// One goroutine owns all of this: the loop reads until the child closes
-	// the pipe, and only then is Wait called.
+	// The read below ends when the last process holding the other end lets
+	// go, and that is not always yt-dlp. So its exit is waited for separately,
+	// and the pipe is closed under the reader when there is no point reading
+	// on: at once when told to stop, since nothing said after that matters,
+	// and a little after yt-dlp has gone, since everything it said is in the
+	// pipe by then and anything else holding it is not ours to wait for.
+	exited, read := make(chan struct{}), make(chan struct{})
+	var waitErr error
+	go func() {
+		waitErr = cmd.Wait()
+		close(exited)
+	}()
+	go func() {
+		select {
+		case <-read:
+			return
+		case <-ctx.Done():
+		case <-exited:
+			drain := time.NewTimer(ytdlpDrain)
+			defer drain.Stop()
+			select {
+			case <-read:
+				return
+			case <-ctx.Done():
+			case <-drain.C:
+			}
+		}
+		pr.Close()
+	}()
 	var (
 		path  string
 		tail  []string
@@ -303,11 +347,13 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			tail = tail[len(tail)-12:]
 		}
 	}
-	waitErr := cmd.Wait()
+	close(read)
+	<-exited
+	if ctx.Err() != nil && (waitErr != nil || path == "") {
+		// Stopped on request, however far it had got.
+		return "", ctx.Err()
+	}
 	if waitErr != nil {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
 		return "", fmt.Errorf("yt-dlp failed: %s", ytdlpReason(tail, waitErr))
 	}
 	if path == "" {
@@ -441,17 +487,30 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 	args = append(args, "--", o.URL)
 	cmd := newYTDLPCmd(ctx, bin, args)
 	runFromOwnFolder(cmd)
-	out, err := cmd.Output()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	// The same two ways of being held up as a download has: when time is up
+	// the whole tree goes, and something left holding the output after yt-dlp
+	// has gone is not waited for beyond this.
+	cmd.WaitDelay = ytdlpDrain
+	release, err := startTree(cmd)
 	if err != nil {
+		return nil, err
+	}
+	err = cmd.Wait()
+	release()
+	// Cut loose from a leftover, yt-dlp having ended well: what it printed is
+	// all there.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return nil, fmt.Errorf("yt-dlp could not read that page: %s",
-				ytdlpReason(strings.Split(string(ee.Stderr), "\n"), err))
+				ytdlpReason(strings.Split(stderr.String(), "\n"), err))
 		}
 		return nil, err
 	}
 	var doc ytdlpJSON
-	if err := json.Unmarshal(out, &doc); err != nil {
+	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
 		return nil, fmt.Errorf("yt-dlp returned something unreadable: %w", err)
 	}
 	info := &StreamInfo{Kind: "yt-dlp", Duration: doc.Duration, Best: -1, Title: doc.Title}

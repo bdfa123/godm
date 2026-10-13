@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // yt-dlp is not installed on every machine that runs these tests, and the ones
@@ -45,6 +48,41 @@ func playYTDLP(scene string, args []string) int {
 	}
 
 	switch scene {
+	case "tree":
+		// yt-dlp.exe is a launcher that runs the real program as its child,
+		// and ffmpeg is a child of that: what does the work is never the
+		// process godm started.
+		worker, err := startStandIn("worker")
+		if err != nil {
+			say("ERROR: %v", err)
+			return 1
+		}
+		worker.Wait()
+	case "worker":
+		return standInLingers(func(i int) {
+			progress("downloading", int64(i)*1000, 200000, 1000, 9, "avc1.4d401f")
+		})
+	case "idler":
+		return standInLingers(nil)
+	case "godm":
+		// Not yt-dlp this time but godm with a download under way, for the
+		// test that wants to see what becomes of the download when godm dies.
+		newYTDLPCmd = func(ctx context.Context, bin string, args []string) *exec.Cmd {
+			c := exec.CommandContext(ctx, os.Args[0], args...)
+			c.Env = append(os.Environ(), stubEnv+"=tree")
+			return c
+		}
+		RunYTDLP(context.Background(), YTDLPOptions{
+			URL: "https://example.test/watch?v=1", OutDir: filepath.Dir(os.Getenv(stubBeatEnv)), Binary: "stub",
+		})
+	case "leftover":
+		// Something started and not waited for, a player from the user's own
+		// --exec say. It holds the output open without ever writing to it.
+		if _, err := startStandIn("idler"); err != nil {
+			say("ERROR: %v", err)
+			return 1
+		}
+		fallthrough
 	case "ok":
 		if contains(args, "-J") {
 			say(`{"title": %q, "duration": 60, "formats": [`+
@@ -72,6 +110,85 @@ func playYTDLP(scene string, args []string) int {
 		say("%s%s", fileMarker, wd)
 	}
 	return 0
+}
+
+// stubBeatEnv names a file that a stand-in which goes on running adds to for
+// as long as it lives, which is how a test tells whether it was stopped.
+const stubBeatEnv = "GODM_YTDLP_STUB_BEAT"
+
+// startStandIn starts the stand-in again as a child that shares its output,
+// the way yt-dlp's own children share yt-dlp's.
+func startStandIn(scene string) (*exec.Cmd, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	c := exec.Command(exe)
+	c.Env = append(os.Environ(), stubEnv+"="+scene)
+	c.Stdout, c.Stderr = os.Stdout, os.Stderr
+	return c, c.Start()
+}
+
+// standInLingers keeps the stand-in alive for eight seconds, long enough to
+// tell from one that was stopped and short enough that one nobody stops does
+// not stay for good. A test that is finished with it leaves a .stop file.
+func standInLingers(each func(i int)) int {
+	beat := os.Getenv(stubBeatEnv)
+	for i := 1; i <= 160; i++ {
+		if _, err := os.Stat(beat + ".stop"); err == nil {
+			break
+		}
+		if f, err := os.OpenFile(beat, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			f.WriteString(".")
+			f.Close()
+		}
+		if each != nil {
+			each(i)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return 0
+}
+
+// beatFile gives the stand-ins of one test their file, and sees them off when
+// the test is over so that none is left running or holding the folder.
+func beatFile(t *testing.T) string {
+	t.Helper()
+	beat := filepath.Join(t.TempDir(), "beat")
+	t.Setenv(stubBeatEnv, beat)
+	t.Cleanup(func() {
+		os.WriteFile(beat+".stop", nil, 0o600)
+		for i := 0; i < 8 && beating(beat); i++ {
+		}
+	})
+	return beat
+}
+
+func beats(beat string) int64 {
+	fi, err := os.Stat(beat)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+// beating reports whether a stand-in added to the file while we watched, for
+// several times as long as it leaves between two additions.
+func beating(beat string) bool {
+	before := beats(beat)
+	time.Sleep(300 * time.Millisecond)
+	return beats(beat) != before
+}
+
+// goneQuiet reports whether the stand-ins have stopped, allowing a moment for
+// a stop that was asked for only just now.
+func goneQuiet(beat string) bool {
+	for i := 0; i < 3; i++ {
+		if !beating(beat) {
+			return true
+		}
+	}
+	return false
 }
 
 // standInOptions is what the stand-in makes of its command line and of the
@@ -557,6 +674,194 @@ func TestRunYTDLPWillNotClaimSuccessWithoutAFile(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("it exited zero without saying where the file went; that is not a success")
+	}
+}
+
+// ---------- stopping it ----------
+
+func TestPausingYTDLPStopsEverythingItStarted(t *testing.T) {
+	stubYTDLP(t, "tree")
+	beat := beatFile(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// The pause comes with the first progress, which only the child prints:
+	// by then it is running and has the output open.
+	var mu sync.Mutex
+	var paused time.Time
+	late := 0
+	done := make(chan error, 1)
+	go func() {
+		_, err := RunYTDLP(ctx, YTDLPOptions{
+			URL: "https://example.test/watch?v=1", OutDir: t.TempDir(), Binary: "stub",
+			OnUpdate: func(YTProgress) {
+				mu.Lock()
+				defer mu.Unlock()
+				if paused.IsZero() {
+					paused = time.Now()
+					cancel()
+					return
+				}
+				late++
+			},
+		})
+		done <- err
+	}()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("RunYTDLP never came back")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if paused.IsZero() {
+		t.Fatalf("it ended before any progress arrived: %v", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the cancellation", err)
+	}
+	if took := time.Since(paused); took > 3*time.Second {
+		t.Errorf("RunYTDLP came back %v after the pause, having read %d more updates from a child "+
+			"that went on downloading; the task stays running, and in the queue, for all that time",
+			took.Round(100*time.Millisecond), late)
+	}
+	if !goneQuiet(beat) {
+		t.Error("what yt-dlp started is still running after the pause")
+	}
+}
+
+func TestInspectingStopsEverythingItStartedWhenTimeIsUp(t *testing.T) {
+	stubYTDLP(t, "tree")
+	beat := beatFile(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := InspectYTDLP(ctx, YTDLPOptions{URL: "https://example.test/watch?v=1", Binary: "stub"})
+		done <- err
+	}()
+	waitFor(t, 30*time.Second, "the child to be running", func() bool { return beats(beat) > 0 })
+	stopped := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("an inspection that was cut short reported success")
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("InspectYTDLP never came back")
+	}
+	if took := time.Since(stopped); took > 3*time.Second {
+		t.Errorf("InspectYTDLP came back %v after its time was up, held by a child that had the output open",
+			took.Round(100*time.Millisecond))
+	}
+	if !goneQuiet(beat) {
+		t.Error("what yt-dlp started is still running after the inspection was given up")
+	}
+}
+
+// Seen through the list, which is where it showed: the task stayed running,
+// kept its place in the queue and could not be resumed.
+func TestAPausedYTDLPTaskIsPausedAtOnce(t *testing.T) {
+	stubYTDLP(t, "tree")
+	beat := beatFile(t)
+	t.Setenv("GODM_YTDLP", os.Args[0])
+	m := NewManager(t.TempDir(), 2)
+	id, err := m.Add(jobRequest{URL: "https://example.test/watch?v=1", Kind: "yt-dlp", Variant: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the first progress", func() bool {
+		v, _ := findTask(m, id)
+		return v.Received > 0
+	})
+	m.Pause(id)
+	waitFor(t, 3*time.Second, "the task to be paused", stateIs(m, id, StatePaused))
+	if !goneQuiet(beat) {
+		t.Error("the download is still going after the task was paused")
+	}
+	if !m.Resume(id) {
+		t.Fatal("a paused task would not resume")
+	}
+	waitFor(t, 30*time.Second, "progress after resuming", func() bool {
+		v, _ := findTask(m, id)
+		return v.State == StateRunning && beating(beat)
+	})
+	m.Remove(id, false)
+	if !goneQuiet(beat) {
+		t.Error("the download is still going after the task was removed")
+	}
+}
+
+// A godm that dies cancels nothing, and a download nobody can see or stop
+// should not carry on without it.
+func TestYTDLPDoesNotOutliveGodm(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only a Windows job ends with the process that holds it")
+	}
+	emptyProfile(t)
+	beat := beatFile(t)
+	godm := exec.Command(os.Args[0])
+	godm.Env = append(os.Environ(), stubEnv+"=godm")
+	if err := godm.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stop := func() {
+		godm.Process.Kill()
+		godm.Wait()
+	}
+	defer stop()
+	waitFor(t, 30*time.Second, "the download to be under way", func() bool { return beats(beat) > 0 })
+	stop()
+	if !goneQuiet(beat) {
+		t.Error("yt-dlp and what it started are still running after godm died")
+	}
+}
+
+// The other way to be held up by a child: yt-dlp is finished and gone, and
+// something it started and did not wait for still has the output open. The
+// download is done all the same, and what was started on purpose is left be.
+func TestYTDLPIsDoneWhenItExitsWhateverItLeftRunning(t *testing.T) {
+	stubYTDLP(t, "leftover")
+	beat := beatFile(t)
+	restore := ytdlpDrain
+	ytdlpDrain = 300 * time.Millisecond
+	t.Cleanup(func() { ytdlpDrain = restore })
+
+	dir := t.TempDir()
+	began := time.Now()
+	path, err := RunYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: dir, Binary: "stub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(dir, "A Video Title.mp4"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
+	}
+	if took := time.Since(began); took > 4*time.Second {
+		t.Errorf("RunYTDLP took %v: it waited for what yt-dlp left running, not for yt-dlp",
+			took.Round(100*time.Millisecond))
+	}
+	waitFor(t, 5*time.Second, "what it left running to show itself", func() bool { return beats(beat) > 0 })
+	if !beating(beat) {
+		t.Error("what yt-dlp left running was stopped, which only a pause or a removal should do")
+	}
+
+	began = time.Now()
+	info, err := InspectYTDLP(context.Background(), YTDLPOptions{
+		URL: "https://example.test/watch?v=1", Binary: "stub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != "A Video Title" {
+		t.Errorf("title = %q", info.Title)
+	}
+	if took := time.Since(began); took > 4*time.Second {
+		t.Errorf("InspectYTDLP took %v: it waited for what yt-dlp left running, not for yt-dlp",
+			took.Round(100*time.Millisecond))
 	}
 }
 

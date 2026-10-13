@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -45,6 +46,134 @@ func spawnDetached(exe string, args ...string) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+var (
+	ntdll                        = syscall.NewLazyDLL("ntdll.dll")
+	procCreateJobObject          = kernel32.NewProc("CreateJobObjectW")
+	procSetInformationJobObject  = kernel32.NewProc("SetInformationJobObject")
+	procAssignProcessToJobObject = kernel32.NewProc("AssignProcessToJobObject")
+	procTerminateJobObject       = kernel32.NewProc("TerminateJobObject")
+	procNtResumeProcess          = ntdll.NewProc("NtResumeProcess")
+)
+
+const (
+	createSuspended         = 0x00000004
+	processTerminate        = 0x0001
+	processSetQuota         = 0x0100
+	processSuspendResume    = 0x0800
+	jobExtendedLimitInfo    = 9      // JobObjectExtendedLimitInformation
+	jobLimitKillOnJobClose  = 0x2000 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	jobTerminatedExitStatus = 1
+)
+
+// jobLimits is JOBOBJECT_EXTENDED_LIMIT_INFORMATION. Only the flags are ever
+// set; the rest is there because Windows checks the size.
+type jobLimits struct {
+	PerProcessUserTimeLimit int64
+	PerJobUserTimeLimit     int64
+	LimitFlags              uint32
+	MinimumWorkingSetSize   uintptr
+	MaximumWorkingSetSize   uintptr
+	ActiveProcessLimit      uint32
+	Affinity                uintptr
+	PriorityClass           uint32
+	SchedulingClass         uint32
+	// The C structure is laid out to eight bytes, which on a 32-bit build
+	// leaves a gap here that Go would not.
+	_                     [8 - unsafe.Sizeof(uintptr(0))]byte
+	IoInfo                [6]uint64
+	ProcessMemoryLimit    uintptr
+	JobMemoryLimit        uintptr
+	PeakProcessMemoryUsed uintptr
+	PeakJobMemoryUsed     uintptr
+}
+
+func setJobLimitFlags(job syscall.Handle, flags uint32) bool {
+	info := jobLimits{LimitFlags: flags}
+	r, _, _ := procSetInformationJobObject.Call(uintptr(job), jobExtendedLimitInfo,
+		uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info))
+	return int32(r) != 0 // a BOOL: the upper half of the register is not part of it
+}
+
+// startTree starts cmd so that cancelling its context ends everything it went
+// on to start as well, not only the one process. A program like yt-dlp.exe is
+// a launcher whose child does the work, with ffmpeg as a child of that, and
+// ending the launcher alone leaves the rest downloading. Windows has no notion
+// of a process and its descendants except a job: whatever a process in a job
+// starts is in the job too. cmd must come from exec.CommandContext. The
+// returned function is called once cmd.Wait has returned.
+//
+// The job is also set to end with its last handle, which is ours, so the tree
+// does not outlive a godm that died without cancelling anything.
+func startTree(cmd *exec.Cmd) (release func(), err error) {
+	h, _, _ := procCreateJobObject.Call(0, 0)
+	job := syscall.Handle(h)
+	if job == 0 || !setJobLimitFlags(job, jobLimitKillOnJobClose) {
+		// No job, no tree: stop the one process as before rather than refuse
+		// to run it at all.
+		if job != 0 {
+			syscall.CloseHandle(job)
+		}
+		return func() {}, cmd.Start()
+	}
+	// The process has to be in the job before it can start anything, so it is
+	// created with its only thread held back and let go once it is in.
+	suspend := procNtResumeProcess.Find() == nil
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	if suspend {
+		cmd.SysProcAttr.CreationFlags |= createSuspended
+	}
+	cmd.Cancel = func() error {
+		// The process itself first: that says whether it had already ended
+		// by itself, and it is all there is to do for one that never made it
+		// into the job.
+		err := cmd.Process.Kill()
+		if errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+		if r, _, _ := procTerminateJobObject.Call(uintptr(job), jobTerminatedExitStatus); int32(r) != 0 {
+			return nil
+		}
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		syscall.CloseHandle(job)
+		return nil, err
+	}
+	resumed := !suspend
+	proc, err := syscall.OpenProcess(processSetQuota|processTerminate|processSuspendResume,
+		false, uint32(cmd.Process.Pid))
+	if err == nil {
+		// A refusal leaves it outside the job, where cancelling still ends
+		// the process itself.
+		procAssignProcessToJobObject.Call(uintptr(job), uintptr(proc))
+		if suspend {
+			if status, _, _ := procNtResumeProcess.Call(uintptr(proc)); uint32(status) == 0 {
+				resumed = true
+			} else {
+				err = fmt.Errorf("NtResumeProcess: status %#x", uint32(status))
+			}
+		}
+		syscall.CloseHandle(proc)
+	}
+	if !resumed {
+		// Nothing will ever wake it, so it is no use to anyone.
+		cmd.Process.Kill()
+		cmd.Wait()
+		syscall.CloseHandle(job)
+		return nil, fmt.Errorf("it was created but could not be set running: %v", err)
+	}
+	return func() {
+		// After a cancel the job is empty. Otherwise the process ended by
+		// itself, and anything it left running it left on purpose (a player
+		// started by the user's own configuration, say), which only a cancel
+		// is meant to end.
+		setJobLimitFlags(job, 0)
+		syscall.CloseHandle(job)
+	}, nil
 }
 
 // spawnApp starts the manager window. Unlike spawnDetached it must not ask for
