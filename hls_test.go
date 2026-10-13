@@ -767,6 +767,64 @@ func TestProgressIsReportedWhileASegmentIsStillArriving(t *testing.T) {
 	}
 }
 
+// ---------- naming ----------
+
+// The extension sends the page title as the file name. A dot in a title is
+// punctuation, not an extension, and a slash in one is part of the title, not
+// the end of a folder.
+func TestHLSNameKeepsTheWholeTitleAndAddsTheContainer(t *testing.T) {
+	ts, mp4 := &hlsMedia{}, &hlsMedia{Init: &hlsSegment{}}
+	for _, c := range []struct {
+		title string
+		media *hlsMedia
+		want  string
+	}{
+		{"plain title", ts, "plain title.ts"},
+		{"Mr. Robot S01E01", ts, "Mr. Robot S01E01.ts"},
+		{"Node.js Crash Course - YouTube", ts, "Node.js Crash Course - YouTube.ts"},
+		{"Episode 1.5", mp4, "Episode 1.5.mp4"},
+		{"What happened next...", ts, "What happened next.ts"},
+		{"AC/DC - Thunderstruck (Live)", ts, "AC_DC - Thunderstruck (Live).ts"},
+		{"Fate/stay night 01", ts, "Fate_stay night 01.ts"},
+		{`back\slash`, ts, "back_slash.ts"},
+		{"../../etc/passwd", ts, "_.._etc_passwd.ts"},
+		{"clip.ts", ts, "clip.ts"},
+		{"clip.MP4", ts, "clip.MP4"},
+		{"clip.mkv", mp4, "clip.mkv"},
+		{"clip", mp4, "clip.mp4"},
+		{"clip.mp4", mp4, "clip.mp4"},
+		{"...", ts, "video.ts"},
+		{"/", mp4, "_.mp4"},
+		{"notes.godm", ts, "notes.godm.ts"},
+		{"CON", ts, "_CON.ts"},
+	} {
+		o := HLSOptions{URL: "https://x.test/a/index.m3u8", Filename: c.title}
+		got := hlsName(o, c.media)
+		if got != c.want {
+			t.Errorf("title %q -> %q, want %q", c.title, got, c.want)
+		}
+		if filepath.Base(filepath.Join("dir", got)) != got || isStateName(got) {
+			t.Errorf("title %q -> %q escapes the folder or reads as a sidecar", c.title, got)
+		}
+		// A resumed task is handed its file's name back and must get it back.
+		o.Filename = got
+		if again := hlsName(o, c.media); again != got {
+			t.Errorf("title %q: name %q came out as %q the second time", c.title, got, again)
+		}
+	}
+
+	long := strings.Repeat("long title. ", 30)
+	o := HLSOptions{URL: "https://x.test/a/index.m3u8", Filename: long}
+	got := hlsName(o, ts)
+	if !strings.HasSuffix(got, ".ts") || len(got) > 180 {
+		t.Errorf("a long title came out as %d bytes, %q", len(got), got)
+	}
+	o.Filename = got
+	if again := hlsName(o, ts); again != got {
+		t.Errorf("a long name came out as %q the second time", again)
+	}
+}
+
 // ---------- redirects ----------
 
 // A playlist that was redirected is read from where it ended up: that is the

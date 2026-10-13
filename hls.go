@@ -90,6 +90,10 @@ type hlsMedia struct {
 	Complete       bool        // saw EXT-X-ENDLIST
 }
 
+// fragmented reports whether the segments are fragmented MP4, which is what an
+// EXT-X-MAP says they are.
+func (m *hlsMedia) fragmented() bool { return m.Init != nil }
+
 type hlsVariant struct {
 	URI        string
 	Bandwidth  int
@@ -629,10 +633,21 @@ func hlsName(o HLSOptions, media *hlsMedia) string {
 		}
 	}
 	ext := ".ts"
-	if media.Init != nil {
+	if media.fragmented() {
 		ext = ".mp4"
 	}
-	if filepath.Ext(name) == "" {
+	// The name is usually a page title, and a title is not a path: the slash in
+	// "AC/DC" is part of it, where sanitize would take it for a folder and keep
+	// only what follows. Nothing here may separate a folder either, so both
+	// kinds become a plain character.
+	name = strings.NewReplacer("/", "_", `\`, "_").Replace(name)
+	name = strings.TrimRight(name, " .")
+	if name == "" {
+		return "video" + ext
+	}
+	// Nor is a dot in a title an extension ("Node.js Crash Course", "Episode
+	// 1.5"). Only a name that already ends in a media extension is left as it is.
+	if !hasMediaExt(name) {
 		name += ext
 	}
 	if n := sanitize(name); n != "" {
@@ -642,6 +657,17 @@ func hlsName(o HLSOptions, media *hlsMedia) string {
 	// text). An empty one would plan the download folder itself as the target
 	// and save the stream beside it, as "<folder> (1)".
 	return "video" + ext
+}
+
+// mediaExts are the extensions that mean a name already says what the file is.
+var mediaExts = map[string]bool{
+	".ts": true, ".m2ts": true, ".mts": true, ".mp4": true, ".m4v": true, ".m4a": true,
+	".mkv": true, ".mov": true, ".webm": true, ".flv": true, ".avi": true,
+	".mp3": true, ".aac": true,
+}
+
+func hasMediaExt(name string) bool {
+	return mediaExts[strings.ToLower(filepath.Ext(name))]
 }
 
 // planHLSTarget applies the same rule as a byte-range download: pick up our own
