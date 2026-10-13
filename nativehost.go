@@ -54,6 +54,11 @@ type nativeResponse struct {
 	// Path is the folder picked in a "browse" request. It is empty with OK set
 	// when the user closed the chooser without picking anything.
 	Path string `json:"path,omitempty"`
+	// Rejected says the daemon was reached and turned the request down. The
+	// extension reads an answer without it as a host that cannot do its job, and
+	// stops handing downloads over for a while; a refusal says nothing against
+	// the host, only against the one link.
+	Rejected bool `json:"rejected,omitempty"`
 }
 
 // RunNativeHost speaks the Chrome native-messaging protocol on stdio:
@@ -119,7 +124,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	case "tasks":
 		tasks, err := c.tasks()
 		if err != nil {
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		return nativeResponse{OK: true, Tasks: tasks}
 
@@ -137,7 +142,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		id, err := c.submit(req.job(req.URL, req.Filename, req.Cookie))
 		if err != nil {
 			log.Printf("submit failed: %v", err)
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		log.Printf("accepted %s -> %s", req.URL, id)
 		return nativeResponse{OK: true, ID: id}
@@ -145,7 +150,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	case "config":
 		cfg, err := c.config()
 		if err != nil {
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		return nativeResponse{OK: true, Config: cfg}
 
@@ -155,14 +160,14 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		letDaemonTakeForeground(c)
 		path, err := c.browse(req.Current)
 		if err != nil {
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		return nativeResponse{OK: true, Path: path}
 
 	case "inspect":
 		info, err := c.inspect(req.job(req.URL, req.Filename, req.Cookie))
 		if err != nil {
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		return nativeResponse{OK: true, Info: info}
 
@@ -174,14 +179,21 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		ids, errs, err := c.submitBatch(jobs)
 		if err != nil {
 			log.Printf("batch submit failed: %v", err)
-			return nativeResponse{Error: err.Error()}
+			return failed(err)
 		}
 		log.Printf("accepted batch of %d from %s", len(ids), req.Referrer)
-		return nativeResponse{OK: len(ids) > 0, IDs: ids, Errors: errs}
+		// A batch with nothing in it the daemon would take has been answered, and
+		// the reasons are in Errors.
+		return nativeResponse{OK: len(ids) > 0, IDs: ids, Errors: errs, Rejected: len(ids) == 0}
 
 	default:
 		return nativeResponse{Error: "unknown message type: " + req.Type}
 	}
+}
+
+// failed is the answer for a request the daemon did not carry out.
+func failed(err error) nativeResponse {
+	return nativeResponse{Error: err.Error(), Rejected: refusedByDaemon(err)}
 }
 
 // allowForeground is a variable so a test can see it called without changing

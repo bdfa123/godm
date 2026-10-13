@@ -297,6 +297,55 @@ func TestNativeRequestsOtherThanOpenLeaveTheManagerAlone(t *testing.T) {
 	}
 }
 
+// The extension takes a host it cannot reach to be down and keeps its hands off
+// downloads for a minute. A daemon that was reached and said no to one job is
+// not that, so the host marks those answers for it to tell them apart.
+func TestNativeMarksWhatTheDaemonRefusedAndNothingElse(t *testing.T) {
+	refuse := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) { http.Error(w, body, status) }
+	}
+	tests := []struct {
+		name     string
+		req      nativeRequest
+		daemon   http.HandlerFunc
+		rejected bool
+	}{
+		{"a job it will not take", nativeRequest{Type: "download", URL: "blob:x"}, refuse(400, "only http and https URLs are supported"), true},
+		{"a job that is in conflict", nativeRequest{Type: "download", URL: "https://example.test/a"}, refuse(409, "already there"), true},
+		{"a stream it cannot read", nativeRequest{Type: "inspect", URL: "https://example.test/a.m3u8"}, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]any{"ok": false, "error": "this stream is protected"})
+		}, true},
+		{"a chooser it cannot show", nativeRequest{Type: "browse"}, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]any{"ok": false, "error": "a folder chooser is already open"})
+		}, true},
+		{"a batch with nothing it accepts", nativeRequest{Type: "batch", Items: []batchItem{{URL: "ftp://x"}}}, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, map[string]any{"ok": false, "ids": []string{}, "errors": []string{"ftp://x: only http and https URLs are supported"}})
+		}, true},
+		{"a daemon that fails", nativeRequest{Type: "download", URL: "https://example.test/a"}, refuse(500, "boom"), false},
+		{"a token it does not know", nativeRequest{Type: "download", URL: "https://example.test/a"}, refuse(401, "unauthorized"), false},
+		{"an address it does not serve", nativeRequest{Type: "tasks"}, refuse(404, "not found"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := fakeDaemon(t, tt.daemon)
+			resp := forwardNative(c, tt.req)
+			if resp.OK || (resp.Error == "" && len(resp.Errors) == 0) {
+				t.Fatalf("got %+v", resp)
+			}
+			if resp.Rejected != tt.rejected {
+				t.Errorf("rejected = %v, want %v (%+v)", resp.Rejected, tt.rejected, resp)
+			}
+		})
+	}
+
+	// A daemon that cannot be reached at all is not a refusal either.
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {})
+	c.base = "http://127.0.0.1:1"
+	if resp := forwardNative(c, nativeRequest{Type: "download", URL: "https://example.test/a"}); resp.OK || resp.Rejected {
+		t.Errorf("an unreachable daemon was reported as a refusal: %+v", resp)
+	}
+}
+
 func TestNativeConfigPassesTheDefaultsThrough(t *testing.T) {
 	c, last := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "out_dir": `C:\Users\x\Downloads`, "max_connections": 32})

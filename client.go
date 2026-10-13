@@ -34,6 +34,30 @@ func newDaemonClient() (*daemonClient, error) {
 	}, nil
 }
 
+// daemonRefusal is the daemon answering and saying no to this request, as
+// against not being reachable or not understanding the question. The native
+// host passes the difference on, because the extension treats an unreachable
+// host as a reason to leave downloads to the browser and a refusal is not one.
+type daemonRefusal struct{ msg string }
+
+func (e *daemonRefusal) Error() string { return e.msg }
+
+// refusedByDaemon reports whether the daemon was reached and declined the
+// request. A 401, 403, 404 or 405 is the host and the daemon not agreeing about
+// the token or the API, which is a fault in the setup, not a verdict on a job.
+func refusedByDaemon(err error) bool {
+	var r *daemonRefusal
+	return errors.As(err, &r)
+}
+
+func refusalStatus(code int) bool {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
+		return false
+	}
+	return code >= 400 && code < 500
+}
+
 func (c *daemonClient) do(method, path string, body any, out any) error {
 	var rdr *bytes.Reader
 	if body != nil {
@@ -57,7 +81,11 @@ func (c *daemonClient) do(method, path string, body any, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("daemon returned %s", resp.Status)
+		err := fmt.Errorf("daemon returned %s", resp.Status)
+		if refusalStatus(resp.StatusCode) {
+			return &daemonRefusal{err.Error()}
+		}
+		return err
 	}
 	if out == nil {
 		return nil
@@ -127,7 +155,7 @@ func (c *daemonClient) browse(current string) (string, error) {
 		return "", err
 	}
 	if !out.OK {
-		return "", errors.New(out.Error)
+		return "", &daemonRefusal{out.Error}
 	}
 	return out.Path, nil
 }
@@ -142,7 +170,7 @@ func (c *daemonClient) inspect(req jobRequest) (*StreamInfo, error) {
 		return nil, err
 	}
 	if !out.OK {
-		return nil, errors.New(out.Error)
+		return nil, &daemonRefusal{out.Error}
 	}
 	return out.Info, nil
 }

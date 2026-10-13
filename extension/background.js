@@ -96,6 +96,17 @@ async function setHostState(ok, error) {
   return st;
 }
 
+// noteHost records what an answer from the host says about the host. The host
+// marks a job the daemon turned down (a link it cannot fetch, a magnet it cannot
+// read) with rejected: that is the daemon talking, so the path to it works, and
+// calling it unreachable would switch takeover off for a minute because of one
+// bad link. Only a host that could not be asked, did not answer or could not
+// reach the daemon counts as down.
+async function noteHost(resp) {
+  if (resp.ok || resp.rejected) return setHostState(true, "");
+  return setHostState(false, resp.error);
+}
+
 // takeoverDisabled reports whether a recent failure means we should keep our
 // hands off. Cancelling a download we cannot actually take over is strictly
 // worse than doing nothing.
@@ -365,7 +376,9 @@ async function handOff(held, job, stillWanted) {
   }
 
   // The host answered the ping but failed the job. Hand the download back and
-  // remember the link so the replacement is not intercepted in turn.
+  // remember the link so the replacement is not intercepted in turn. A job the
+  // daemon itself refused says nothing against the host, so it does not stop
+  // the next download from being taken over.
   //
   // What Chrome gets is the link the person clicked, which is also what godm was
   // given, and not the address it redirected to. That one is usually a signed
@@ -373,7 +386,7 @@ async function handOff(held, job, stillWanted) {
   // since it was issued. Asking the original again gets a fresh signature, which
   // may be a different address, so both are remembered.
   const url = held.url;
-  await setHostState(false, resp.error);
+  await noteHost(resp);
   await markHandedBack(url, held.backUrl);
   console.error("godm: handoff failed -", resp.error);
   await notifyThrottled(
@@ -598,11 +611,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     userAgent: navigator.userAgent,
     connections: cfg.connections
   });
+  await noteHost(resp);
   if (resp.ok) {
-    await setHostState(true, "");
     bumpBadge(1);
   } else {
-    await setHostState(false, resp.error);
     // An explicit right-click deserves an immediate answer, not a throttled one.
     chrome.notifications.create({
       type: "basic",
@@ -703,7 +715,7 @@ async function submitPicked(msg) {
     userAgent: navigator.userAgent,
     connections: msg.connections || cfg.connections
   });
-  await setHostState(!!resp.ok, resp.error);
+  await noteHost(resp);
   if (resp.ok) bumpBadge(1);
   return resp;
 }
@@ -749,7 +761,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   callHost(msg).then(async (resp) => {
     if (msg && (msg.type === "ping" || msg.type === "tasks")) {
-      await setHostState(!!resp.ok, resp.error);
+      await noteHost(resp);
     }
     sendResponse(resp);
   });
@@ -848,7 +860,7 @@ async function listMedia() {
 
 async function daemonConfig() {
   const resp = await callHost({ type: "config" });
-  await setHostState(!!resp.ok, resp.error);
+  await noteHost(resp);
   return resp;
 }
 
@@ -861,7 +873,7 @@ async function inspectStream(msg) {
     referrer: msg.page || "",
     userAgent: navigator.userAgent
   });
-  await setHostState(!!resp.ok, resp.error);
+  await noteHost(resp);
   return resp;
 }
 
@@ -878,7 +890,7 @@ async function submitStream(msg) {
     userAgent: navigator.userAgent,
     connections: msg.connections || cfg.connections
   });
-  await setHostState(!!resp.ok, resp.error);
+  await noteHost(resp);
   if (resp.ok) bumpBadge(1);
   return resp;
 }

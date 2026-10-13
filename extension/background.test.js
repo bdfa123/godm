@@ -62,7 +62,8 @@ function start(options) {
   const events = {
     determining: event(),
     removed: event(),
-    message: event()
+    message: event(),
+    menu: event()
   };
   let nextWindow = 100;
 
@@ -98,7 +99,7 @@ function start(options) {
     action: { setTitle() {}, setBadgeText() {}, setBadgeBackgroundColor() {} },
     tabs: { query: async () => [], get: async () => ({}), onUpdated: event(), onRemoved: event(), onActivated: event() },
     webRequest: { onHeadersReceived: event() },
-    contextMenus: { removeAll: (cb) => cb && cb(), create() {}, onClicked: event() },
+    contextMenus: { removeAll: (cb) => cb && cb(), create() {}, onClicked: events.menu },
     cookies: { getAll: async (q) => opts.cookies(q) },
     notifications: { create: (n) => seen.notices.push(n) },
     scripting: {}
@@ -128,6 +129,8 @@ function start(options) {
     download: (item) => context.handleDownload(item),
     // A page of the extension sends the worker a message and waits for the reply.
     message: (msg) => new Promise((resolve) => events.message.fns[0](msg, {}, resolve)),
+    // The person chose an item of the right-click menu.
+    menu: (info, tab) => events.menu.fns[0](info, tab),
     // The window with this id was closed.
     close: (id) => Promise.all(events.removed.fns.map((fn) => fn(id))),
     heldKey: () => Object.keys(data.session).find((k) => k.startsWith("confirm:"))
@@ -256,4 +259,64 @@ test("Don't ask again is kept when Start goes through, and not when it was cance
   jar.resolve([]);
   assert.equal((await reply).expired, true);
   assert.equal(dropped.data.sync.confirmDownload, undefined, "the person cancelled, so the dialog stays on");
+});
+
+// ---------- a refusal is an answer, not an unreachable host ----------
+
+// What the native host says when the daemon was reached and said no to the job.
+const refusal = (error) => ({ ok: false, error, rejected: true });
+const daemonSays = (error) => (m) => (m.type === "ping" ? { ok: true } : refusal(error));
+
+test("a right-click job the daemon refuses does not switch takeover off", async () => {
+  const w = start({
+    host: (m) => (m.type === "download" && m.url.startsWith("blob:")
+      ? refusal("only http and https URLs are supported")
+      : { ok: true }),
+    settings: { confirmDownload: false }
+  });
+  await w.menu({ menuItemId: "godm-link", srcUrl: "blob:https://video.test/1234", pageUrl: "https://video.test/" }, { url: "https://video.test/" });
+  assert.equal(w.seen.notices.length, 1, "the person is told");
+  assert.equal(w.seen.notices[0].message, "only http and https URLs are supported", "in the daemon's words");
+
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [ITEM.id], "the next real download still goes to godm");
+});
+
+test("a host that cannot be reached on a right-click still switches takeover off", async () => {
+  const w = start({
+    host: (m) => (m.type === "download" ? { ok: false, error: "Specified native messaging host not found." } : { ok: true }),
+    settings: { confirmDownload: false }
+  });
+  await w.menu({ menuItemId: "godm-link", linkUrl: "https://example.test/a.zip" }, { url: "https://example.test/" });
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [], "a host that is down leaves downloads to Chrome");
+});
+
+test("a job the daemon refuses on the way from Chrome is handed back without switching takeover off", async () => {
+  const w = start({ host: (m) => (m.type === "download" ? refusal("disk full") : { ok: true }), settings: { confirmDownload: false } });
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.downloaded, [ITEM.url], "Chrome gets it back");
+
+  await w.download(Object.assign({}, ITEM, { id: 6, url: "https://example.test/get/other.exe", finalUrl: "https://cdn.test/other.exe" }));
+  assert.deepEqual(w.seen.cancelled, [ITEM.id, 6], "the next one is still taken over");
+});
+
+test("a refusal of a picked batch, a stream or an inspection leaves takeover on", async () => {
+  const w = start({ host: daemonSays("nothing there"), settings: { confirmDownload: false } });
+  const batch = await w.message({ type: "godm-batch", items: [{ url: "https://example.test/a.zip" }] });
+  assert.equal(batch.ok, false);
+  const inspected = await w.message({ type: "godm-media-inspect", url: "https://example.test/a.m3u8", kind: "hls" });
+  assert.equal(inspected.error, "nothing there");
+  const stream = await w.message({ type: "godm-media-download", url: "https://example.test/a.m3u8", kind: "hls" });
+  assert.equal(stream.ok, false);
+
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [ITEM.id]);
+});
+
+test("a host that is down on a stream or an inspection still switches takeover off", async () => {
+  const w = start({ host: (m) => (m.type === "ping" ? { ok: true } : { ok: false, error: "host gone" }) });
+  await w.message({ type: "godm-media-inspect", url: "https://example.test/a.m3u8", kind: "hls" });
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, []);
 });
