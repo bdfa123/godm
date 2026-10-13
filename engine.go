@@ -258,7 +258,7 @@ type Progress struct {
 	Received int64
 	Total    int64
 	Active   int // connections currently receiving bytes
-	Limit    int // connections allowed right now
+	Limit    int // connections allowed right now, not counting a try at the server's cap
 	Segments []SegmentView
 }
 
@@ -622,7 +622,17 @@ type task struct {
 }
 
 // limit is how many connections may run right now.
-func (t *task) limit() int {
+func (t *task) limit() int { return t.limitUnder(t.serverAllows()) }
+
+// standingLimit is the limit without the one connection a try at the server's
+// cap lets through. It is the number to show: the manager keeps it as the
+// task's connection count, which would otherwise rise by one at every try and
+// fall back when the try is turned away.
+func (t *task) standingLimit() int { return t.limitUnder(int(t.serverCap.Load())) }
+
+// limitUnder is the connections wanted, held to c when the server allows that
+// few (c is 0 when it has no cap).
+func (t *task) limitUnder(c int) int {
 	if !t.probe.Resumable || t.probe.Size <= 0 {
 		return 1
 	}
@@ -630,7 +640,7 @@ func (t *task) limit() int {
 	if t.opts.ConnLimit != nil {
 		n = t.opts.ConnLimit()
 	}
-	if c := t.serverAllows(); c > 0 && n > c {
+	if c > 0 && n > c {
 		n = c
 	}
 	return clampConnections(n)
@@ -711,7 +721,7 @@ func (t *task) snapshot() Progress {
 	segs := append([]*Segment(nil), t.segs...)
 	t.segMu.Unlock()
 
-	p := Progress{Received: t.received.Load(), Total: t.probe.Size, Limit: t.limit()}
+	p := Progress{Received: t.received.Load(), Total: t.probe.Size, Limit: t.standingLimit()}
 	for _, s := range segs {
 		st := SegmentState(s.state.Load())
 		if s.complete() {

@@ -459,6 +459,49 @@ func TestAServerThatKeepsItsLimitIsOnlyAskedNowAndThen(t *testing.T) {
 	}
 }
 
+// The limit a download reports is the one the server holds it to. The extra
+// connection let through to find out whether the cap still stands is not part
+// of it: the manager shows the number and saves it as the task's setting, and
+// it would flicker up by one at every try.
+func TestTheLimitReportedDuringACapTryIsTheCap(t *testing.T) {
+	payload := makePayload(20 << 20)
+	h := &refusingServer{slowServer: slowServer{payload: payload, chunk: 16 << 10, delay: 10 * time.Millisecond}, max: 3}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var limits []int
+	res, err := Download(context.Background(), Options{
+		URL: srv.URL + "/big.bin", OutDir: t.TempDir(),
+		Connections: 8, MinSplit: 64 << 10, MaxRetries: 1, CapProbe: 300 * time.Millisecond,
+		OnProgress: func(p Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			if n := len(limits); n == 0 || limits[n-1] != p.Limit {
+				limits = append(limits, p.Limit)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	checkFile(t, res.Path, payload)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(h.refusals()) < 5 {
+		t.Fatalf("only %d connections were turned away, the cap was hardly tried", len(h.refusals()))
+	}
+	for i, n := range limits {
+		if i > 0 && n != 3 {
+			t.Fatalf("limit reported over time: %v; once the cap was learned it is 3, never %d", limits, n)
+		}
+	}
+	if len(limits) < 2 {
+		t.Fatalf("limit reported over time: %v; the cap was never learned", limits)
+	}
+}
+
 func checkFile(t *testing.T, path string, want []byte) {
 	t.Helper()
 	got, err := os.ReadFile(path)
