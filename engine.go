@@ -329,6 +329,7 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return nil, err
 	}
+	sweepTemps(o.OutDir)
 
 	var plan *targetPlan
 	var f *os.File

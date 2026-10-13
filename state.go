@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
 const stateVersion = 1
@@ -90,7 +92,39 @@ func writeFileAtomic(p string, b []byte) error {
 		os.Remove(name)
 		return err
 	}
-	return os.Rename(name, p)
+	if err := os.Rename(name, p); err != nil {
+		// On Windows this is what happens while anything has the target open
+		// without sharing deletes, a scanner or an indexer, and a sidecar is
+		// rewritten every 400 ms. The callers carry on without the write, so
+		// nothing else would ever remove what is left here.
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
+var tempNameRe = regexp.MustCompile(`^\.godm-[0-9]+$`)
+
+// staleTempAge is how old a temp file of writeFileAtomic must be to be taken
+// for one left behind: a live one exists for the instant between its creation
+// and its rename.
+const staleTempAge = time.Hour
+
+// sweepTemps removes the temp files writeFileAtomic left in dir when the
+// process was killed between creating one and renaming it.
+func sweepTemps(dir string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if e.IsDir() || !tempNameRe.MatchString(e.Name()) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) >= staleTempAge {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func clearState(target string) { os.Remove(statePath(target)) }
