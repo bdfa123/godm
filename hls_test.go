@@ -996,7 +996,7 @@ func TestDownloadHLSWritesEachInitSegmentWhereItApplies(t *testing.T) {
 	got, _ := os.ReadFile(target)
 	if !bytes.Equal(got, want) {
 		t.Errorf("file is %d bytes, want %d: each init segment belongs in front of the segments it "+
-			"applies to\n got %q...\nwant %q...", len(got), len(want), clip(got), clip(want))
+			"applies to\n got %q...\nwant %q...", len(got), len(want), firstBytes(got), firstBytes(want))
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -1005,7 +1005,7 @@ func TestDownloadHLSWritesEachInitSegmentWhereItApplies(t *testing.T) {
 	}
 }
 
-func clip(b []byte) string {
+func firstBytes(b []byte) string {
 	if len(b) > 40 {
 		b = b[:40]
 	}
