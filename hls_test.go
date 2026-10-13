@@ -60,6 +60,13 @@ func (s *hlsServer) peakConcurrency() int {
 	return s.peak
 }
 
+// resetPeak starts the peak over from what is open right now.
+func (s *hlsServer) resetPeak() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peak = s.inFlight
+}
+
 func (s *hlsServer) hitCount(path string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -807,6 +814,63 @@ func TestRaisingTheConnectionCountAddsConnections(t *testing.T) {
 	if peak := s.peakConcurrency(); peak < 5 {
 		t.Errorf("peak concurrency was %d; the connection count was raised to 8 part way "+
 			"through and nothing picked it up", peak)
+	}
+}
+
+// Lowering the count is as much a request as raising it: a server that is
+// refusing connections is not helped by a client that keeps twice as many open
+// as it was told to.
+func TestLoweringTheConnectionCountBringsConnectionsDown(t *testing.T) {
+	for _, c := range []struct{ from, to, segments int }{{8, 2, 170}, {8, 4, 260}, {4, 1, 90}} {
+		t.Run(fmt.Sprintf("%d to %d", c.from, c.to), func(t *testing.T) {
+			segs := makeSegments(c.segments)
+			s := newHLSServer(t, segs)
+			for i := range segs {
+				s.delay[i] = 50 * time.Millisecond
+			}
+			var limit atomic.Int32
+			limit.Store(int32(c.from))
+
+			var mu sync.Mutex
+			var late []int // Active as reported once the new limit has had time to take hold
+			var settled atomic.Bool
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				limit.Store(int32(c.to))
+				time.Sleep(700 * time.Millisecond)
+				s.resetPeak()
+				settled.Store(true)
+			}()
+
+			_, err := DownloadHLS(context.Background(), HLSOptions{
+				URL: s.URL + "/media.m3u8", OutDir: t.TempDir(), Filename: "clip.ts",
+				Connections: c.from, ConnLimit: func() int { return int(limit.Load()) },
+				OnProgress: func(p HLSProgress) {
+					if settled.Load() {
+						mu.Lock()
+						late = append(late, p.Active)
+						mu.Unlock()
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !settled.Load() {
+				t.Fatal("the download ended before the new limit could be measured")
+			}
+			if peak := s.peakConcurrency(); peak > c.to {
+				t.Errorf("peak concurrency was %d after the limit went from %d to %d", peak, c.from, c.to)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, a := range late {
+				if a > c.to {
+					t.Errorf("progress reported %d active connections against a limit of %d", a, c.to)
+					break
+				}
+			}
+		})
 	}
 }
 

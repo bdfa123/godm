@@ -783,8 +783,9 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 		r.workers.Add(1)
 		go func() {
 			defer wg.Done()
-			defer r.workers.Add(-1)
-			r.worker(ctx)
+			if !r.worker(ctx) {
+				r.workers.Add(-1)
+			}
 		}()
 	}
 	for i := 0; i < r.limit(); i++ {
@@ -793,8 +794,10 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 
 	// Reporting from the write loop alone is not enough: it waits for the next
 	// segment in playlist order, so one slow segment freezes the display for as
-	// long as it takes. The same tick tops up connections, because the claim
-	// window throttles downwards by itself but can never add anyone.
+	// long as it takes. The same tick tops up connections when the limit went
+	// up, and wakes the idle ones to see whether it went down: workers retire
+	// themselves, but only when they look, and nothing else announces a change
+	// of limit.
 	ticked := make(chan struct{})
 	go func() {
 		defer close(ticked)
@@ -810,6 +813,7 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 				r.mu.Lock()
 				short := r.limit() - int(r.workers.Load())
 				work := r.next < len(r.media.Segments)
+				r.cond.Broadcast()
 				r.mu.Unlock()
 				for i := 0; work && i < short; i++ {
 					spawn()
@@ -894,22 +898,35 @@ func (r *hlsRun) writeLoop(ctx context.Context, f *os.File) error {
 	}
 }
 
-func (r *hlsRun) worker(ctx context.Context) {
+// worker claims and fetches segments until there are none left to claim. It
+// reports whether it left because the connection limit dropped, in which case
+// it has already taken itself off the count: that has to happen under the same
+// lock as the check, or two workers looking at the same excess would both go.
+func (r *hlsRun) worker(ctx context.Context) (retired bool) {
 	for {
 		r.mu.Lock()
-		for r.failed == nil && ctx.Err() == nil &&
-			(r.next >= len(r.media.Segments) ||
-				r.next >= r.want+r.limit()*2 ||
-				(r.held >= maxBufferedBytes && r.next > r.want)) {
+		for r.failed == nil && ctx.Err() == nil {
 			if r.next >= len(r.media.Segments) {
 				r.mu.Unlock()
-				return
+				return false
+			}
+			// Between segments is the only place a connection can be given up
+			// without throwing a half-fetched one away. The read-ahead window
+			// below follows the limit down too, but on its own it only caps
+			// the connections at twice what was asked for.
+			if int(r.workers.Load()) > r.limit() {
+				r.workers.Add(-1)
+				r.mu.Unlock()
+				return true
+			}
+			if r.next < r.want+r.limit()*2 && !(r.held >= maxBufferedBytes && r.next > r.want) {
+				break
 			}
 			r.cond.Wait()
 		}
 		if r.failed != nil || ctx.Err() != nil {
 			r.mu.Unlock()
-			return
+			return false
 		}
 		i := r.next
 		r.next++
@@ -926,7 +943,7 @@ func (r *hlsRun) worker(ctx context.Context) {
 			}
 			r.cond.Broadcast()
 			r.mu.Unlock()
-			return
+			return false
 		}
 		r.ready[i] = data
 		r.held += int64(len(data))
