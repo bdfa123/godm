@@ -48,3 +48,13 @@ func RunApp() error {
 }
 
 func guiAvailable() bool { return true }
+
+// showManager brings the manager up for a caller that must not be given its
+// address, which is the browser extension asking through the native host. It
+// is what a click on the tray icon does: a window that is already open comes
+// to the front, and otherwise "godm app" is started on its own. A failure is
+// in the log, as it is for the tray.
+func showManager() error {
+	openAppWindow()
+	return nil
+}

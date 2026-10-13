@@ -258,8 +258,10 @@ download:
   loopback (DNS rebinding) gets nothing.
 - Requests carrying a browser `Origin` from anywhere except the extension or
   loopback are rejected outright, so a random web page cannot queue downloads.
-- The extension never sees the token; the native host injects it into the
-  manager URL when the popup asks for it.
+- The extension never sees the token. The native host keeps it and speaks to
+  the daemon for the extension, and nothing it answers carries the token or an
+  address with the token in it. When the popup asks for the manager, the host
+  opens the manager itself, the same way the tray icon does.
 
 ## Known limits
 

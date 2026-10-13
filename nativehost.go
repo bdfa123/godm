@@ -14,7 +14,7 @@ import (
 const maxNativeMessage = 8 << 20
 
 type nativeRequest struct {
-	Type        string            `json:"type"` // download | batch | inspect | config | browse | tasks | ping
+	Type        string            `json:"type"` // download | batch | inspect | config | browse | tasks | open | ping
 	URL         string            `json:"url"`
 	Filename    string            `json:"filename"`
 	Referrer    string            `json:"referrer"`
@@ -51,9 +51,6 @@ type nativeResponse struct {
 	// Config lets the popup ask what the daemon can do — whether yt-dlp is
 	// installed, where downloads land — without holding the daemon token.
 	Config map[string]any `json:"config,omitempty"`
-	// UI carries the authenticated manager URL so the popup can open it
-	// without the extension ever storing the daemon token.
-	UI string `json:"ui,omitempty"`
 	// Path is the folder picked in a "browse" request. It is empty with OK set
 	// when the user closed the chooser without picking anything.
 	Path string `json:"path,omitempty"`
@@ -110,19 +107,31 @@ func handleNative(req nativeRequest) nativeResponse {
 
 // forwardNative is the part of handleNative that needs a daemon to talk to,
 // split out so it can be tested against a stand-in for one.
+//
+// Nothing it answers carries the daemon token. Whatever the extension is told
+// it can pass on, and an address it opens in a tab is there for every other
+// extension to read, so the token stays on this side of the pipe.
 func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
-	uiURL := c.base + "/?token=" + c.token
-
 	switch req.Type {
 	case "ping":
-		return nativeResponse{OK: true, UI: uiURL}
+		return nativeResponse{OK: true}
 
 	case "tasks":
 		tasks, err := c.tasks()
 		if err != nil {
 			return nativeResponse{Error: err.Error()}
 		}
-		return nativeResponse{OK: true, Tasks: tasks, UI: uiURL}
+		return nativeResponse{OK: true, Tasks: tasks}
+
+	case "open":
+		// The popup's link to the manager. The address of the page has the
+		// token in it, so it is opened from here and not handed back to be
+		// opened as a tab.
+		if err := openManager(); err != nil {
+			log.Printf("could not open the manager: %v", err)
+			return nativeResponse{Error: err.Error()}
+		}
+		return nativeResponse{OK: true}
 
 	case "download", "":
 		id, err := c.submit(req.job(req.URL, req.Filename, req.Cookie))
@@ -138,7 +147,7 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		if err != nil {
 			return nativeResponse{Error: err.Error()}
 		}
-		return nativeResponse{OK: true, Config: cfg, UI: uiURL}
+		return nativeResponse{OK: true, Config: cfg}
 
 	case "browse":
 		// The native folder chooser belongs to the daemon's tray thread, so the
@@ -178,6 +187,10 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 // allowForeground is a variable so a test can see it called without changing
 // what is in front on the machine running the tests.
 var allowForeground = allowSetForegroundWindow
+
+// openManager is a variable for the same reason: a test must not put a window
+// on the screen of the machine it runs on.
+var openManager = showManager
 
 // letDaemonTakeForeground lets the daemon bring its folder chooser in front of
 // the browser. Windows refuses that to a process that is not in front itself,

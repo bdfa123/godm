@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -194,6 +195,105 @@ func TestNativeDownloadCarriesTheDialogsChoices(t *testing.T) {
 	}
 	if job.Filename != "renamed.zip" || job.OutDir != `E:\Stuff` || job.Connections != 16 {
 		t.Errorf("job lost the dialog's choices: %+v", job)
+	}
+}
+
+// The token is what stands between the browser and the daemon's API. The host
+// holds it so that the extension does not have to: nothing the host answers
+// may carry it, in an address or anywhere else, because whatever the extension
+// is told, the rest of the browser can come by.
+func TestNothingTheHostAnswersCarriesTheToken(t *testing.T) {
+	const secret = "SECRET-DAEMON-TOKEN"
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"ok": true, "id": "t1", "ids": []string{"t1"}, "pid": 4242, "path": `E:\Movies`,
+			"tasks": []any{map[string]any{"id": "t1", "filename": "a.zip"}},
+			"info":  map[string]any{"title": "a"}, "out_dir": `C:\Users\x\Downloads`,
+		})
+	})
+	c.token = secret
+	var events []string
+	watchForeground(t, &events, nil)
+
+	watchManager(t, &events, nil)
+
+	for _, typ := range []string{"ping", "tasks", "download", "", "config", "browse", "inspect", "batch", "open", "no-such-type"} {
+		resp := forwardNative(c, nativeRequest{
+			Type: typ, URL: "https://example.test/a.zip",
+			Items: []batchItem{{URL: "https://example.test/b.zip"}},
+		})
+		wire, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(wire), secret) {
+			t.Errorf("the answer to %q hands the extension the token: %s", typ, wire)
+		}
+	}
+}
+
+// watchManager replaces the step that opens the manager with one that only
+// records being asked.
+func watchManager(t *testing.T, events *[]string, err error) {
+	t.Helper()
+	saved := openManager
+	openManager = func() error {
+		*events = append(*events, "open the manager")
+		return err
+	}
+	t.Cleanup(func() { openManager = saved })
+}
+
+// The popup's link to the manager used to be given the page's address, token
+// and all, to open as a tab. The host opens the manager itself now, and the
+// daemon is not asked for anything on the way.
+func TestNativeOpenShowsTheManagerItself(t *testing.T) {
+	var events []string
+	watchManager(t, &events, nil)
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to %s", r.URL.Path)
+	})
+
+	resp := forwardNative(c, nativeRequest{Type: "open"})
+
+	if !resp.OK || resp.Error != "" {
+		t.Fatalf("got %+v", resp)
+	}
+	if want := []string{"open the manager"}; !reflect.DeepEqual(events, want) {
+		t.Errorf("events = %v, want %v", events, want)
+	}
+	if wire, _ := json.Marshal(resp); string(wire) != `{"ok":true}` {
+		t.Errorf("the answer is %s, want only that it worked", wire)
+	}
+}
+
+// When the manager cannot be opened the popup has to hear why, so that the
+// link does not just do nothing.
+func TestNativeOpenReportsWhyTheManagerDidNotOpen(t *testing.T) {
+	var events []string
+	watchManager(t, &events, errors.New("the executable is gone"))
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {})
+
+	resp := forwardNative(c, nativeRequest{Type: "open"})
+
+	if resp.OK || resp.Error != "the executable is gone" {
+		t.Fatalf("got %+v", resp)
+	}
+}
+
+// Nothing but the popup's link opens the manager.
+func TestNativeRequestsOtherThanOpenLeaveTheManagerAlone(t *testing.T) {
+	var events []string
+	watchManager(t, &events, nil)
+	watchForeground(t, &events, nil)
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": true, "id": "t1", "tasks": []any{}})
+	})
+	for _, typ := range []string{"ping", "tasks", "download", "config", "inspect", "batch", "no-such-type"} {
+		forwardNative(c, nativeRequest{Type: typ, URL: "https://example.test/a.zip"})
+	}
+	if len(events) != 0 {
+		t.Errorf("the manager was opened by a request that did not ask for it: %v", events)
 	}
 }
 

@@ -1,7 +1,5 @@
 "use strict";
 
-let uiURL = "";
-
 function human(n) {
   if (n === null || n === undefined || n < 0) return "?";
   const u = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -48,13 +46,18 @@ function refresh() {
         + "<small>" + tr("popup_run_install", esc(chrome.runtime.id)) + "</small></div>";
       return;
     }
-    uiURL = resp.ui || "";
     render(resp.tasks || []);
   });
 }
 
-document.getElementById("open").addEventListener("click", () => {
-  if (uiURL) chrome.tabs.create({ url: uiURL });
+// The manager's address has the daemon's token in it, and a tab's address is
+// there for any other extension to read. So the popup is never given one: it
+// asks godm to open the manager itself.
+document.getElementById("open").addEventListener("click", (e) => {
+  chrome.runtime.sendMessage({ type: "open" }, (resp) => {
+    if (resp && resp.ok) window.close();
+    else e.target.title = (resp && resp.error) || tr("popup_no_response");
+  });
 });
 document.getElementById("opts").addEventListener("click", () => {
   chrome.runtime.openOptionsPage();
