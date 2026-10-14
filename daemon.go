@@ -854,6 +854,12 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	mt.view.State = st
 	mt.view.Error = errMsg
 	mt.view.Speed, mt.view.Active = 0, 0
+	if mt.view.Kind == "bt" && st != StateDone {
+		// A torrent's Conns is its seeds, and a run that stops short takes
+		// them with it as it does the peers. One that finished may seed on;
+		// its counts are torrentStage's from then.
+		mt.view.Conns = 0
+	}
 	if path != "" {
 		mt.view.Path = path
 		mt.view.Filename = filepath.Base(path)
@@ -1690,6 +1696,11 @@ func (m *Manager) restore(list savedList) {
 		}
 		st.Req.Connections = requestedConnections(st.Req.Connections)
 		v.Conns = st.Req.Connections
+		if v.Kind == "bt" || isBTJob(st.Req) {
+			// For a torrent this is the seeds it is connected to, as in Add,
+			// and nothing restored from the list is connected to anybody.
+			v.Conns = 0
+		}
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit
 		mt := &managedTask{
