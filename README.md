@@ -131,7 +131,10 @@ type, and queue them in one go.
 - **HLS**: godm reads master and media playlists, fetches segments in
   parallel, decrypts AES-128, honours `EXT-X-BYTERANGE` and `EXT-X-MAP`, and
   writes segments strictly in playlist order. A quality whose audio is a
-  separate rendition is refused rather than saved silent.
+  separate rendition is refused rather than saved silent. A master playlist
+  added without a quality choice (through Add links, say) downloads the best
+  one, as the extension does. A playlist behind a redirect is read from where
+  it ended up.
 - **yt-dlp**: for sites that guard their video behind their own protocol, godm
   can hand the page to [yt-dlp](https://github.com/yt-dlp/yt-dlp) if it is
   installed, and still shows progress and pausing in the same list. It reads
@@ -181,7 +184,8 @@ in the queue, and Resume tries again.
   UPnP or NAT-PMP). The first torrent makes Windows Firewall ask whether godm
   may use the network; refusing still lets torrents download, from fewer peers.
 - File names inside a torrent are cleaned so none can land outside the download
-  folder, and names that would collide on Windows get numbered.
+  folder, and names that would collide on Windows get numbered. A torrent of a
+  single file is saved as that file, not in a folder of its own.
 
 ## Settings
 
@@ -248,10 +252,24 @@ download:
   settings, including its bypass list. Loopback is never proxied.
 - **Expired links**: a `401/403/404/410`, or a web page where the file should be,
   keeps the progress and waits for a fresh link to the same file. Click the
-  download again in the browser and the waiting task adopts it.
+  download again in the browser and the waiting task adopts it. A new address
+  given to a download that was paused, queued or never got going still
+  continues from the saved progress, and a stream (HLS) continues from its
+  saved segments. A different stream, or another quality, is refused rather than
+  saved under `name (1).ts`.
 - **Sidecar invalidation**: a changed `ETag` or size discards the old state
   rather than stitching new bytes into a stale file.
 - **Never overwrites**: an existing file gets a numbered name, `name (1).ext`.
+- **Removing with the file**: if another program has the file open, godm keeps
+  trying for 15 seconds and keeps the `.godm` sidecar until the file is gone. An
+  unfinished yt-dlp download is cleaned up too, with its `.part` and fragment
+  files.
+- **Durability**: the data is flushed to disk before the sidecar that says it is
+  there, about every 2 seconds. After a crash or power cut a resume may fetch up
+  to that much again, and never trusts bytes that did not reach the disk.
+- A server that answers `416` to the probe still gets its file (an empty file
+  included), and a plain `Content-Disposition` name with percent escapes or
+  encoded words is saved decoded.
 - Servers that ignore `Range` fall back to a single stream with no resume.
 
 ## Security notes
