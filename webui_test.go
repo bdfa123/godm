@@ -58,6 +58,12 @@ func TestThePageDoesNotRewriteTheListUnderASelection(t *testing.T) {
 	runPage(t, "selection", "en")
 }
 
+func TestAddLinksKeepsAndExplainsWhatTheDaemonRejects(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "rejected", lang) })
+	}
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -299,6 +305,48 @@ scenarios.selection = async function () {
   tasks = [task("a", { received: 500 })];
   await poll();
   assert(list.writes > w2, "an old selection froze the list");
+};
+
+scenarios.rejected = async function () {
+  tasks = [];
+  await boot();
+  const text = els.addText;
+  routes["/api/batch"] = (body) => {
+    const bad = body.items.filter((i) => /^magnet:/.test(i.url));
+    return { ok: true, ids: body.items.filter((i) => !/^magnet:/.test(i.url)).map((i, n) => "id" + n),
+      errors: bad.map((i) => i.url + ": this magnet link has no BitTorrent v1 info hash (urn:btih)") };
+  };
+
+  // Some links are taken and one is not.
+  dispatch(els.addBtn, "click");
+  text.value = "HTTP://h/upper.zip\nmagnet:?xt=urn:btih:zzzz\nhttp://h/ok.zip";
+  dispatch(text, "input");
+  dispatch(els.addGo, "click");
+  await tick();
+  const sent = calls.filter((c) => c.path === "/api/batch")[0].body.items.map((i) => i.url);
+  assert(sent.indexOf("http://h/upper.zip") >= 0, "a link in capitals should reach the daemon in the form it takes: " + sent);
+  same(text.value, "magnet:?xt=urn:btih:zzzz", "only the rejected link should stay in the box");
+  same(els.addDlg.hidden, false, "the dialog should stay open over what was rejected");
+  assert(/ err/.test(toast().className), "a rejection should be shown as an error, not as news");
+  assert(toast().textContent.indexOf("urn:btih") >= 0, "the reason should be shown: " + toast().textContent);
+  assert(/^[^\n]*1/.test(els.addCount.textContent), "the count should be of what is left: " + els.addCount.textContent);
+
+  // Everything taken: the box is emptied and the dialog goes away.
+  text.value = "http://h/a.zip\nhttp://h/b.zip";
+  dispatch(text, "input");
+  dispatch(els.addGo, "click");
+  await tick();
+  same(text.value, "", "a box of accepted links should be emptied");
+  same(els.addDlg.hidden, true, "the dialog should close once everything was accepted");
+  assert(!/ err/.test(toast().className), "an accepted batch is not an error");
+
+  // Nothing taken: the reason is shown even though no download was added.
+  text.value = "magnet:?xt=urn:btih:nope";
+  dispatch(text, "input");
+  dispatch(els.addGo, "click");
+  await tick();
+  same(text.value, "magnet:?xt=urn:btih:nope", "a link nobody took should stay");
+  assert(toast().textContent.indexOf("urn:btih") >= 0 && /err/.test(toast().className), "the reason for a total rejection should be shown");
 };
 
 const run = scenarios[which];

@@ -438,7 +438,7 @@ I18N.en = {
   "toast.torrent.one": "Added {n} torrent",
   "toast.torrent.other": "Added {n} torrents",
   "toast.torrent.some": "Added {n}.",
-  "toast.rejected": "({n} rejected)",
+  "toast.rejected": "{n} rejected: {why}",
   "toast.saved": "Settings saved.",
   "toast.after.sleep": "godm will put this PC to sleep when all downloads finish.",
   "toast.after.shutdown": "godm will shut this PC down when all downloads finish.",
@@ -612,7 +612,7 @@ I18N.zh = {
   "toast.torrent.one": "已添加 {n} 个种子",
   "toast.torrent.other": "已添加 {n} 个种子",
   "toast.torrent.some": "已添加 {n} 个。",
-  "toast.rejected": "（{n} 个被拒绝）",
+  "toast.rejected": "{n} 个被拒绝：{why}",
   "toast.saved": "设置已保存。",
   "toast.after.sleep": "所有下载完成后，godm 会让这台电脑进入睡眠。",
   "toast.after.shutdown": "所有下载完成后，godm 会让这台电脑关机。",
@@ -1293,7 +1293,8 @@ document.getElementById("resumeAll").addEventListener("click", function () { pos
 function parseLinks(text) {
   var seen = {}, out = [];
   (text || "").split(/[\s]+/).forEach(function (s) {
-    s = s.trim();
+    // A scheme is not case-sensitive, but the daemon only takes it in lower case.
+    s = s.trim().replace(/^(https?):\/\//i, function (m, p) { return p.toLowerCase() + "://"; });
     if ((/^https?:\/\/\S+$/i.test(s) || /^magnet:\?\S+$/i.test(s)) && !seen[s]) { seen[s] = 1; out.push(s); }
   });
   return out;
@@ -1323,9 +1324,19 @@ document.getElementById("addGo").addEventListener("click", function () {
   if (!links.length) return;
   hide("addDlg");
   post("/api/batch", { items: links.map(function (u) { return { url: u, connections: conns }; }) }).then(function (r) {
-    var n = (r.ids || []).length;
-    toast(trn("toast.added", n) + ((r.errors || []).length ? " " + tr("toast.rejected", { n: r.errors.length }) : ""));
-    document.getElementById("addText").value = "";
+    var n = (r.ids || []).length, errors = r.errors || [];
+    // Each reason starts with the link it is about. Those links stay in the
+    // box, in the dialog, to be corrected; the rest were taken.
+    var kept = links.filter(function (u) {
+      return errors.some(function (m) { return m.indexOf(u + ": ") === 0; });
+    });
+    document.getElementById("addText").value = kept.join("\n");
+    if (errors.length) {
+      toast((n ? trn("toast.added", n) + " · " : "") + tr("toast.rejected", { n: errors.length, why: errors.join("; ") }), "err");
+      openAdd("");
+    } else {
+      toast(trn("toast.added", n));
+    }
     S.tab = "all";
     poll();
   }).catch(fail);
