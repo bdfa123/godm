@@ -1150,8 +1150,15 @@ func (w *flushWatch) install(t *testing.T, every time.Duration) {
 		w.flushed, w.flushes = b, w.flushes+1
 		w.mu.Unlock()
 		// A flush takes time, and the segments are written on through it. What
-		// goes in meanwhile is not on disk yet and must not be claimed.
-		time.Sleep(40 * time.Millisecond)
+		// goes in meanwhile is not on disk yet and must not be claimed. The
+		// flush lasts until the file has grown, so that this happens on every
+		// flush and not by luck of where the segments fall.
+		for i := 0; i < 60; i++ {
+			time.Sleep(5 * time.Millisecond)
+			if fi, e := os.Stat(f.Name()); e == nil && fi.Size() > int64(len(b)) {
+				break
+			}
+		}
 		return err
 	}
 }
