@@ -199,6 +199,10 @@ and frees its place in the queue, and Resume tries again.
 - File names inside a torrent are cleaned so none can land outside the download
   folder, and names that would collide on Windows get numbered. A torrent of a
   single file is saved as that file, not in a folder of its own.
+- **Disk**: on Windows a torrent's files are sparse while it downloads, as other
+  downloads are, since its pieces arrive in any order, and ordinary once it is
+  complete. A torrent that would not fit on the disk stops with an error as
+  soon as its file list is known.
 
 ## Settings
 

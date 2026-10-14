@@ -232,3 +232,88 @@ func TestADownloadThatDoesNotFitIsRefused(t *testing.T) {
 	checkFile(t, res.Path, payload)
 }
 
+// A torrent's pieces arrive in any order, so its files are sparse too, from
+// before the first piece is written to them until the torrent is complete.
+func TestTorrentFilesAreSparseUntilTheTorrentIsDone(t *testing.T) {
+	src := t.TempDir()
+	a, b := makePayload(1<<20+12345), makePayload(1<<20+777)
+	mi := makeTorrent(t, src, "Show", 64<<10, tfile{"e01.mkv", a}, tfile{"extras/e02.mkv", b})
+	// Slow enough to be seen in the middle.
+	seed := newSeeder(t, src, mi, 1<<20)
+
+	m := newBTManager(t)
+	needSparseFiles(t, m.OutDir())
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "Show", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tor := waitLoaded(t, m, id)
+	root := filepath.Join(m.OutDir(), "Show")
+	files := []string{filepath.Join(root, "e01.mkv"), filepath.Join(root, "extras", "e02.mkv")}
+	seen := map[string]bool{}
+	waitFor(t, 60*time.Second, "the torrent to finish", func() bool {
+		for _, p := range files {
+			if seen[p] {
+				continue
+			}
+			fi, err := os.Stat(p)
+			if err != nil || fi.Size() == 0 {
+				continue
+			}
+			sparse := isSparse(t, p)
+			if tor.Complete().Bool() {
+				// The look may have come after the files were made ordinary.
+				continue
+			}
+			seen[p] = true
+			if !sparse {
+				t.Errorf("%s was written to without being made sparse first", filepath.Base(p))
+			}
+		}
+		v, _ := findTask(m, id)
+		return v.State == StateDone
+	})
+	for _, p := range files {
+		if !seen[p] {
+			t.Logf("%s finished before it could be looked at", filepath.Base(p))
+		}
+		if isSparse(t, p) {
+			t.Errorf("%s is still sparse once the torrent is done", filepath.Base(p))
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("no file was seen while the torrent downloaded")
+	}
+	for p, want := range map[string][]byte{files[0]: a, files[1]: b} {
+		checkFile(t, p, want)
+	}
+}
+
+// A torrent whose files would not fit is stopped once its size is known,
+// before any of it is written.
+func TestATorrentThatDoesNotFitIsRefused(t *testing.T) {
+	src := t.TempDir()
+	payload := makePayload(2 << 20)
+	mi := makeTorrent(t, src, "film.bin", 64<<10, tfile{data: payload})
+	old := freeSpace
+	freeSpace = func(string) (int64, bool) { return 1 << 20, true }
+	defer func() { freeSpace = old }()
+
+	m := newBTManager(t)
+	var body bytes.Buffer
+	if err := mi.Write(&body); err != nil {
+		t.Fatal(err)
+	}
+	id, err := m.AddTorrentFile(body.Bytes(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the torrent to be refused", stateIs(m, id, StateError))
+	v, _ := findTask(m, id)
+	if !strings.Contains(v.Error, "not enough free space") {
+		t.Errorf("the torrent stopped with %q, want it refused for want of space", v.Error)
+	}
+	if fi, err := os.Stat(v.Path); err == nil && fi.Size() != 0 {
+		t.Errorf("%d bytes of a torrent refused for want of space were written", fi.Size())
+	}
+}

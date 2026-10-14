@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	g "github.com/anacrolix/generics"
@@ -982,6 +983,22 @@ type btStorage struct {
 	gate    sync.RWMutex
 	stopped bool
 	info    *metainfo.Info // once the storage is open
+
+	// files are the torrent's files on disk, once the storage is open, in the
+	// order their bytes come in the torrent.
+	filesMu sync.Mutex
+	files   []*btFile
+	dir     string // the download folder they are in
+	// sparseMu is held while a file is made sparse, so that no write to it
+	// can go ahead of that.
+	sparseMu sync.Mutex
+}
+
+// btFile is one of a torrent's files on disk.
+type btFile struct {
+	path        string
+	off, length int64       // where its bytes are in the torrent
+	sparse      atomic.Bool // made sparse in this run, before anything was written to it
 }
 
 // errStorageStopped is what a write gets once its torrent has let go.
@@ -1051,13 +1068,23 @@ func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih met
 		return impl, err
 	}
 	s.info = info // stop reads it only once this has let go of the gate
+	var placed []*btFile
+	for i, fi := range info.UpvertedFiles() {
+		placed = append(placed, &btFile{
+			path: filepath.Join(append([]string{root}, paths[i]...)...),
+			off:  fi.TorrentOffset, length: fi.Length,
+		})
+	}
+	s.filesMu.Lock()
+	s.files, s.dir = placed, filepath.Dir(root)
+	s.filesMu.Unlock()
 	out := impl
 	out.Piece = func(p metainfo.Piece) storage.PieceImpl {
-		return btPiece{PieceImpl: impl.Piece(p), s: s, length: p.Length()}
+		return btPiece{PieceImpl: impl.Piece(p), s: s, off: p.Offset(), length: p.Length()}
 	}
 	if impl.PieceWithHash != nil {
 		out.PieceWithHash = func(p metainfo.Piece, h g.Option[[]byte]) storage.PieceImpl {
-			return btPiece{PieceImpl: impl.PieceWithHash(p, h), s: s, length: p.Length()}
+			return btPiece{PieceImpl: impl.PieceWithHash(p, h), s: s, off: p.Offset(), length: p.Length()}
 		}
 	}
 	// The client closes the storage once it has dropped the torrent and the
@@ -1073,11 +1100,93 @@ func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih met
 	return out, nil
 }
 
+// fileList is the torrent's files, nil until the storage is open.
+func (s *btStorage) fileList() ([]*btFile, string) {
+	s.filesMu.Lock()
+	defer s.filesMu.Unlock()
+	return s.files, s.dir
+}
+
+// makeSparse sees that every file the n bytes at off in the torrent land in
+// is sparse before the first of them is written, the way the HTTP engine has
+// its files (see setSparse). Pieces come in any order, and the first one near
+// the end of a big file would otherwise wait for it to be filled with zeros
+// all the way there. The file is made where the file storage would make it
+// for the write that follows, so files still appear only once something is
+// written to them; one already there, from an earlier run, is only marked,
+// which leaves its contents as they are. It runs inside the gate.
+func (s *btStorage) makeSparse(off, n int64) {
+	files, _ := s.fileList()
+	i := sort.Search(len(files), func(i int) bool { return files[i].off+files[i].length > off })
+	for ; i < len(files) && files[i].off < off+n; i++ {
+		f := files[i]
+		if f.length == 0 || f.sparse.Load() {
+			continue
+		}
+		s.sparseMu.Lock()
+		if !f.sparse.Load() {
+			if os.MkdirAll(filepath.Dir(f.path), 0o755) == nil {
+				if fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE, 0o644); err == nil {
+					setSparse(fh, true)
+					fh.Close()
+				}
+			}
+			// Tried once is enough. A file system without sparse files says
+			// no every time, and whatever stopped the file being made, the
+			// write that follows reports better.
+			f.sparse.Store(true)
+		}
+		s.sparseMu.Unlock()
+	}
+}
+
+// settle makes the files ordinary again once the torrent is complete. Every
+// byte is in, so there are no holes left, and the change costs nothing.
+func (s *btStorage) settle() {
+	if !s.enter() {
+		return
+	}
+	defer s.gate.RUnlock()
+	files, _ := s.fileList()
+	for _, f := range files {
+		if f.length == 0 {
+			continue
+		}
+		if fh, err := os.OpenFile(f.path, os.O_WRONLY, 0); err == nil {
+			setSparse(fh, false)
+			fh.Close()
+		}
+	}
+}
+
+// room checks that the disk has room for what the torrent's files do not take
+// up yet. Sparse, they take their space only as they are written, so a disk
+// too small would only show once it was full.
+func (s *btStorage) room() error {
+	if !s.enter() {
+		return nil
+	}
+	defer s.gate.RUnlock()
+	files, dir := s.fileList()
+	var need int64
+	for _, f := range files {
+		need += f.length
+		if fh, err := os.Open(f.path); err == nil {
+			if have, ok := allocated(fh); ok {
+				need -= min(have, f.length)
+			}
+			fh.Close()
+		}
+	}
+	return roomFor(dir, need)
+}
+
 // btPiece passes one piece through to the file storage, but only while its
 // torrent's storage has not stopped.
 type btPiece struct {
 	storage.PieceImpl
 	s      *btStorage
+	off    int64 // where the piece starts in the torrent
 	length int64
 }
 
@@ -1086,6 +1195,7 @@ func (p btPiece) WriteAt(b []byte, off int64) (int, error) {
 		return 0, errStorageStopped
 	}
 	defer p.s.gate.RUnlock()
+	p.s.makeSparse(p.off+off, int64(len(b)))
 	return p.PieceImpl.WriteAt(b, off)
 }
 
@@ -1609,6 +1719,9 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 		}
 	}
 	mt.torrentDetails(info, tor.Length())
+	if err := st.room(); err != nil {
+		return "", err
+	}
 
 	writeErr := make(chan error, 1)
 	tor.SetOnWriteChunkError(func(err error) {
@@ -1634,6 +1747,7 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 	}
 	report("")
 	finished = true
+	st.settle()
 	m.afterTorrentCompletes(mt, gen, tor, base)
 	return mt.snapshot().Path, nil
 }
