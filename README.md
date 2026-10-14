@@ -242,7 +242,15 @@ download:
   CDNs 405 it, and some report `Accept-Ranges` on HEAD then ignore `Range` on GET.
   Only a real `206` plus a parseable `Content-Range` total enables segmentation.
 - **Segments** are written with positional writes into a preallocated file, so
-  there is no merge step and no `.part` files.
+  there is no merge step and no `.part` files. On Windows the file is sparse
+  until it is finished: in an ordinary file NTFS fills in zeros up to a write
+  before the write completes, and the connections write all over the file from
+  the start, so on a hard disk the first write near the end of a big file held
+  every connection for minutes. Each connection gathers what it reads and
+  writes it a megabyte at a time, or at once while a player waits on it.
+- **Disk space**: a sparse file takes its space only as it is written, so a
+  download that would not fit is refused before it starts, counting what a
+  partial file already holds, rather than found out at 90 percent.
 - **Dynamic splitting**: when a connection runs out of work, it takes the back
   half of the largest range still in progress, so one slow connection is never
   left alone with the end of the file. The connection count can be changed while

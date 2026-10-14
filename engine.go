@@ -372,21 +372,28 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 	}
-	defer plan.release()
-	defer f.Close()
-
-	// Preallocate so parallel WriteAt calls never race to extend the file, and
-	// so a full disk fails here instead of at 90 percent.
+	// A file whose ranges arrive in any order is given its whole length at
+	// once, so parallel WriteAt calls never race to extend it. See prepareFile.
 	//
 	// Only do this when the source is genuinely resumable. Without Range
 	// support the probe's Content-Length is just a hint from a *different*
 	// request: dynamic endpoints happily return a different body length each
 	// time, and preallocating to the stale number leaves the file zero-padded.
-	if pr.Size > 0 && pr.Resumable && !plan.resumed {
-		if err := f.Truncate(pr.Size); err != nil {
-			return nil, fmt.Errorf("preallocate %d bytes: %w", pr.Size, err)
+	if pr.Size > 0 && pr.Resumable {
+		if err := prepareFile(f, o.OutDir, pr.Size, !plan.resumed); err != nil {
+			f.Close()
+			if !plan.resumed && !plan.overwrite {
+				// The empty file just made for this attempt, which nothing
+				// else knows of. Left behind, it would push the next attempt
+				// to a numbered name.
+				os.Remove(plan.path)
+			}
+			plan.release()
+			return nil, err
 		}
 	}
+	defer plan.release()
+	defer f.Close()
 
 	t := &task{
 		opts: o, probe: pr, segs: plan.segs, file: f, target: plan.path, client: client,
@@ -413,6 +420,10 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 		return nil, classifyLinkError(err)
 	}
 
+	// Every byte is written, so a sparse file has no holes left and nothing
+	// to gain from staying one, and making it ordinary costs nothing. It is
+	// handed over as the plain file any other download is.
+	setSparse(f, false)
 	clearState(plan.path)
 	t.segMu.Lock()
 	nsegs := len(t.segs)
@@ -425,6 +436,34 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 		Resumable: pr.Resumable,
 		Resumed:   plan.resumed,
 	}, nil
+}
+
+// prepareFile readies f, a download of size bytes in dir, for its ranges to
+// be written in any order: it makes it sparse and, when fresh, gives it its
+// whole length.
+//
+// Sparse, because the connections write all over the file from the start,
+// and in an ordinary one the first write near its end waits for zeros all the
+// way there (see setSparse). A file resumed from an earlier run is made
+// sparse too, which spares one that an older godm left ordinary the zeros
+// it has not reached yet. Where the file system has no sparse files the file
+// is written as it always was.
+//
+// A sparse file no longer takes its space the moment it is made, so a disk
+// too full for it would only show at 90 percent. What the file does not
+// take up yet is checked against the free space here instead.
+func prepareFile(f *os.File, dir string, size int64, fresh bool) error {
+	have, _ := allocated(f)
+	if err := roomFor(dir, size-min(have, size)); err != nil {
+		return err
+	}
+	setSparse(f, true)
+	if fresh {
+		if err := f.Truncate(size); err != nil {
+			return fmt.Errorf("preallocate %d bytes: %w", size, err)
+		}
+	}
+	return nil
 }
 
 // ---------- choosing the file on disk ----------
