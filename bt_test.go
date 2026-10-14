@@ -1184,12 +1184,41 @@ func TestTorrentsKeepToTheOverallSpeedLimit(t *testing.T) {
 		t.Errorf("under a limit of %d bytes/s, %d bytes arrived in %s; want about %d", limit, got, time.Since(start).Round(time.Millisecond), want)
 	}
 
-	// Lifting the limit reaches the torrent that is already running.
+	// Lifting the limit reaches the torrent that is already running. How long
+	// the rest takes says little, as the connection can stand still for a few
+	// seconds at a time (see btPeerWake); how fast it comes while it comes
+	// says it all. Each half second is sampled, as under the limit a single
+	// read can bring a tenth of a second's worth at once.
 	m.SetSpeedLimit(0)
 	lifted := time.Now()
-	waitFor(t, 10*time.Second, "the rest without a limit", stateIs(m, id, StateDone))
-	if d := time.Since(lifted); d > 5*time.Second {
-		t.Errorf("the last %d bytes took %s with the limit lifted", int64(len(payload))-got-before, d.Round(time.Millisecond))
+	size := tor.Length()
+	last, lastAt := tor.BytesCompleted(), lifted
+	var fastest float64
+	var trace strings.Builder
+	done := stateIs(m, id, StateDone)
+	for {
+		now, finished := time.Now(), done()
+		if d := now.Sub(lastAt); d >= 500*time.Millisecond || finished {
+			have := tor.BytesCompleted()
+			if finished {
+				have = size // the torrent has left the client by now
+			}
+			fastest = max(fastest, float64(have-last)/max(d, 500*time.Millisecond).Seconds())
+			v, _ := findTask(m, id)
+			s := tor.Stats()
+			fmt.Fprintf(&trace, "\n  %5.1fs: %d of %d bytes, %d peers, %d chunks read, task %s", now.Sub(lifted).Seconds(), have, size, s.ActivePeers, s.ChunksReadUseful.Int64(), v.State)
+			last, lastAt = have, now
+		}
+		if finished {
+			break
+		}
+		if now.Sub(lifted) > 30*time.Second {
+			t.Fatalf("the rest had not arrived %s after the limit was lifted:%s", now.Sub(lifted).Round(time.Millisecond), trace.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if fastest < 3*limit {
+		t.Errorf("with the limit lifted the rest came at %.0f bytes/s at most, as if still under %d:%s", fastest, limit, trace.String())
 	}
 	v, _ := findTask(m, id)
 	if b, _ := os.ReadFile(v.Path); sum(b) != sum(payload) {
