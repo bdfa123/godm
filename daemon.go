@@ -97,8 +97,30 @@ type jobRequest struct {
 	// Kind lets the caller say outright that this is a stream playlist. When
 	// it is empty the URL decides, which covers links pasted by hand.
 	Kind string `json:"kind,omitempty"`
-	// Variant picks a quality from a master playlist; -1 takes the best.
-	Variant int `json:"variant,omitempty"`
+	// Variant picks a quality from a master playlist; -1 takes the best. It is
+	// written out whatever it is, 0 too, which is the first one listed: a
+	// request with no variant in it asks for the best, see addRequest. A list
+	// saved before that has none for 0, and still reads as 0.
+	Variant int `json:"variant"`
+}
+
+// addRequest is a jobRequest as a caller hands one in. The one difference is
+// a quality that was not named. Inside godm that cannot be told from the
+// first one listed, both being 0, so it is settled here, on the way in: a
+// caller that says nothing about quality gets the best, as the browser
+// extension's does. The manager's Add links dialog is such a caller.
+type addRequest struct {
+	jobRequest
+	Variant *int `json:"variant"` // takes the place of jobRequest's when read
+}
+
+func (r addRequest) job() jobRequest {
+	req := r.jobRequest
+	req.Variant = -1
+	if r.Variant != nil {
+		req.Variant = *r.Variant
+	}
+	return req
 }
 
 // isYTDLPJob is true only when the caller asks for it by name. A site needing
@@ -1781,12 +1803,12 @@ func (s *server) handleInspect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	var req jobRequest
+	var req addRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	id, err := s.mgr.Add(req)
+	id, err := s.mgr.Add(req.job())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1796,13 +1818,17 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Items []jobRequest `json:"items"`
+		Items []addRequest `json:"items"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	ids, errs := s.mgr.AddBatch(body.Items)
+	jobs := make([]jobRequest, 0, len(body.Items))
+	for _, it := range body.Items {
+		jobs = append(jobs, it.job())
+	}
+	ids, errs := s.mgr.AddBatch(jobs)
 	writeJSON(w, map[string]any{"ok": len(ids) > 0, "ids": ids, "errors": errs})
 }
 
