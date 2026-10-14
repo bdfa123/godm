@@ -1046,7 +1046,12 @@ function listHeld() {
 }
 function showHeld() { if (HOLD.pending && !listHeld()) render(); }
 document.addEventListener("mousedown", function (e) {
-  if (e.target.closest && e.target.closest("#list, #tabs")) { HOLD.down = true; HOLD.downAt = performance.now(); }
+  if (e.target.closest && e.target.closest("#list, #tabs")) { HOLD.down = true; HOLD.downAt = performance.now(); return; }
+  // A press on something else, a button in the top bar say, leaves the
+  // selection where it was, but the user has turned away from it: what that
+  // button does has to show, not wait for the selection to time out. (The
+  // page's own scroll bar is not something else.)
+  if (e.target !== document.documentElement) { HOLD.selAt = -Infinity; showHeld(); }
 }, true);
 // The click that goes with a release is delivered after it, so what was held
 // back is shown a moment later, not in the release itself.
@@ -1337,7 +1342,10 @@ document.getElementById("addGo").addEventListener("click", function () {
     });
     document.getElementById("addText").value = kept.join("\n");
     if (errors.length) {
-      toast((n ? trn("toast.added", n) + " · " : "") + tr("toast.rejected", { n: errors.length, why: errors.join("; ") }), "err");
+      // A pasted list can be long; the box holds every link that was refused,
+      // and the toast only has to say what kind of trouble it was.
+      var why = errors.slice(0, 3).join("; ") + (errors.length > 3 ? " …" : "");
+      toast((n ? trn("toast.added", n) + " · " : "") + tr("toast.rejected", { n: errors.length, why: why }), "err");
       openAdd("");
     } else {
       toast(trn("toast.added", n));

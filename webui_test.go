@@ -310,6 +310,22 @@ scenarios.selection = async function () {
   assert(list.writes > w, "a selection outside the list held the list back");
   sel.removeAllRanges();
 
+  // A press on a button outside the list leaves the selection in place, but
+  // what the button does has to show: the list is no longer held for it.
+  select(text);
+  const held = list.writes;
+  tasks = [task("a", { received: 450 })];
+  await poll();
+  same(list.writes, held, "the list was rewritten under selected text");
+  dispatch(child(doc.getElementById("pauseAll"), "button"), "mousedown");
+  runTimers();
+  await tick();
+  assert(list.writes > held && list.innerHTML.indexOf("450 B") >= 0, "a press outside the list should end the hold the selection puts on it");
+  tasks = [task("a", { received: 460 })];
+  await poll();
+  assert(list.innerHTML.indexOf("460 B") >= 0, "the selection held the list again after a press elsewhere");
+  sel.removeAllRanges();
+
   // A selection that is left alone does not freeze the list for good.
   select(text);
   clock += 120000;
@@ -359,6 +375,18 @@ scenarios.rejected = async function () {
   await tick();
   same(text.value, "magnet:?xt=urn:btih:nope", "a link nobody took should stay");
   assert(toast().textContent.indexOf("urn:btih") >= 0 && /err/.test(toast().className), "the reason for a total rejection should be shown");
+
+  // A long list of refused links does not turn the toast into a wall, and
+  // every one of them is still in the box.
+  const many = [];
+  for (let i = 0; i < 40; i++) many.push("magnet:?xt=urn:btih:bad" + i);
+  text.value = many.join("\n");
+  dispatch(text, "input");
+  dispatch(els.addGo, "click");
+  await tick();
+  assert(toast().textContent.length < 600, "the toast for 40 rejections is " + toast().textContent.length + " characters long");
+  assert(toast().textContent.indexOf("40") >= 0, "the toast should say how many: " + toast().textContent);
+  same(text.value.split("\n").length, 40, "every refused link should stay in the box");
 };
 
 scenarios.slow = async function () {
