@@ -700,6 +700,8 @@ function q(id) { return encodeURIComponent(id); }
 
 function human(n) {
   if (n === null || n === undefined || n < 0) return "?";
+  // Speeds and averages arrive as floats; a byte is as fine as anything gets.
+  n = Math.round(n);
   var u = ["B", "KB", "MB", "GB", "TB"], i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
   return (i === 0 ? n : n.toFixed(n >= 100 ? 0 : 1)) + " " + u[i];
@@ -807,7 +809,9 @@ function connTable(t) {
       "<td>" + range + "</td>" +
       '<td><div class="mini"><i style="width:' + pct.toFixed(1) + '%"></i></div></td>' +
       "<td>" + (len > 0 ? pct.toFixed(0) + "%" : human(s.done)) + "</td>" +
-      "<td>" + (sp[i] ? human(sp[i]) + "/s" : "") + "</td>" +
+      // The speed is a halving average, so a connection that has stopped
+      // walks down towards zero without ever reaching it.
+      "<td>" + (sp[i] >= 1 ? human(sp[i]) + "/s" : "") + "</td>" +
       '<td class="st ' + s.state + '">' + esc(word(SEG_LABEL, s.state)) + "</td>" +
       '<td class="note">' + esc(s.note || "") + "</td></tr>";
   });

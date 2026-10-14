@@ -64,6 +64,10 @@ func TestAddLinksKeepsAndExplainsWhatTheDaemonRejects(t *testing.T) {
 	}
 }
 
+func TestSpeedsUnderOneKilobyteAreWholeNumbers(t *testing.T) {
+	runPage(t, "slow", "en")
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -347,6 +351,28 @@ scenarios.rejected = async function () {
   await tick();
   same(text.value, "magnet:?xt=urn:btih:nope", "a link nobody took should stay");
   assert(toast().textContent.indexOf("urn:btih") >= 0 && /err/.test(toast().className), "the reason for a total rejection should be shown");
+};
+
+scenarios.slow = async function () {
+  await boot();
+  const want = { "0": "0 B", "666.4550936210727": "666 B", "813.4765625": "813 B", "3.814697265625e-6": "0 B", "1023": "1023 B", "1023.6": "1.0 KB", "1536": "1.5 KB", "1048576": "1.0 MB" };
+  Object.keys(want).forEach((k) => same(page("human(" + k + ")"), want[k], "human(" + k + ")"));
+
+  // The average of a finished download is a float.
+  const done = task("d", { state: "done", size: 2100, received: 2100, started_at: "2026-01-01T00:00:00Z", ended_at: "2026-01-01T00:00:03.151Z", path: "C:\\d.zip" });
+  const html = page("card(" + JSON.stringify(done) + ")");
+  assert(html.indexOf("666 B/s") >= 0, "the average of a finished download should be whole bytes: " + html.replace(/<[^>]*>/g, " "));
+  assert(!/\d\.\d{3,}/.test(html), "a number with a long fraction is on the card");
+
+  // So is the speed of a connection, and one that has all but stopped shows nothing.
+  const slow = task("s", { size: 4000, segments: [
+    { start: 0, end: 999, done: 10, state: "active" }, { start: 1000, end: 1999, done: 10, state: "active" } ] });
+  page("S.open.s = true; S.prev.s = { at: 0, n: 2, done: [0, 0], speed: [959.0267951815679, 3.814697265625e-6] };");
+  clock += 1000;
+  const conn = page("connTable(" + JSON.stringify(slow) + ")");
+  const cells = conn.replace(/<\/td>/g, "\n").replace(/<[^>]*>/g, "").split("\n").filter((c) => /B\/s/.test(c));
+  assert(cells.length > 0 && cells.every((c) => !/\d\.\d{3,}/.test(c)), "a connection speed with a long fraction: " + cells);
+  assert(cells.every((c) => !/^0 B/.test(c)), "a connection that sends nothing should not read 0 B/s: " + cells);
 };
 
 const run = scenarios[which];
