@@ -813,7 +813,7 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 			// anything can go wrong: the caller counts the new address as
 			// taken up once the plan is made, and a run that fails to open
 			// the file would otherwise leave a sidecar that names the old one.
-			r.persist()
+			r.saveState(r.want, r.bytes)
 		}
 	}
 	// The init segment is fetched before the file exists. One that cannot be had
@@ -1287,6 +1287,13 @@ func (r *hlsRun) persist(f *os.File, force bool) {
 		return
 	}
 	r.syncedAt = time.Now()
+	r.saveState(done, written)
+}
+
+// saveState writes the sidecar as it stands. It does no flushing: persist does
+// that first, and a caller that has written nothing yet (a run that has only
+// taken up a new address) has nothing new to flush.
+func (r *hlsRun) saveState(done int, written int64) {
 	saveHLSState(r.target, &hlsState{
 		Version:  stateVersion,
 		Kind:     "hls",
