@@ -141,6 +141,13 @@ type managedTask struct {
 	inFlight    bool // Download holds the file open
 	deleteAfter bool // remove the file once the run lets go of it
 	removed     bool
+	// relinked says the address has changed since the partial file's sidecar
+	// was last written, so the next run to get as far as the file has to be
+	// let continue it from a URL the sidecar does not name. It belongs to the
+	// task and not to one run, and is saved with it: a run that is paused
+	// while it waits in the queue, or whose first request fails, never gets
+	// that far, and the run after it has to know all the same.
+	relinked bool
 
 	lastRecv int64
 	lastAt   time.Time
@@ -478,7 +485,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	m.mu.Unlock()
 	m.dirty.Store(true)
 
-	go m.start(mt, true, false)
+	go m.start(mt, true)
 	return id, nil
 }
 
@@ -496,9 +503,10 @@ func (m *Manager) AddBatch(reqs []jobRequest) (ids []string, errs []string) {
 }
 
 // start runs one attempt of a task. allowMatch lets a brand-new download be
-// absorbed by a task that is waiting for a refreshed link; refresh tells the
-// engine to continue existing progress from a URL that differs from before.
-func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
+// absorbed by a task that is waiting for a refreshed link. A task whose
+// address has changed tells the engine to continue existing progress from a
+// URL that differs from before; see relinked.
+func (m *Manager) start(mt *managedTask, allowMatch bool) {
 	mt.mu.Lock()
 	// Resume, refresh and address changes reserve StateQueued before starting
 	// their goroutine. If Pause won the race in between, do not resurrect it.
@@ -516,7 +524,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 	mt.view.Speed, mt.view.Active = 0, 0
 	mt.view.RefreshUntil = time.Time{}
 	mt.lastAt, mt.lastRecv, mt.speedEMA = time.Time{}, 0, 0
-	req, outDir := mt.req, mt.outDir
+	req, outDir, refresh := mt.req, mt.outDir, mt.relinked
 	filename := req.Filename
 	if mt.view.Path != "" {
 		// Later runs must land on the same partial file, whatever name the
@@ -542,6 +550,8 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 
 	var donePath string
 	var err error
+	// planned is set once the engine has settled which file it writes to.
+	planned := false
 	switch {
 	case isBTJob(req):
 		donePath, err = m.runTorrent(ctx, mt, gen)
@@ -601,6 +611,7 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 			Playback:    &mt.play,
 			StreamPiece: m.streamPiece,
 			OnStart: func(si StartInfo) {
+				planned = true
 				mt.onStart(gen, si)
 				m.dirty.Store(true)
 			},
@@ -617,6 +628,18 @@ func (m *Manager) start(mt *managedTask, allowMatch, refresh bool) {
 
 	var expired *LinkExpiredError
 	var mismatch *RefreshMismatchError
+	if refresh && (planned || errors.As(err, &mismatch)) {
+		// The engine got as far as the partial file. Either it took it up, and
+		// has by now written the new address into the sidecar or finished the
+		// file, or it refused the address and said why. Both ways the change
+		// of address has been dealt with. A run that ended before this, at
+		// its first request or still in the queue, leaves it for the next.
+		mt.mu.Lock()
+		if mt.gen == gen {
+			mt.relinked = false
+		}
+		mt.mu.Unlock()
+	}
 	switch {
 	case err == nil:
 		m.finishRun(mt, gen, StateDone, "", donePath)
@@ -813,7 +836,7 @@ func (m *Manager) Resume(id string) bool {
 		m.mu.Lock()
 		m.broadcastLocked()
 		m.mu.Unlock()
-		go m.start(mt, false, false)
+		go m.start(mt, false)
 		return true
 	}
 	mt.mu.Unlock()
@@ -1005,6 +1028,7 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 	target.view.URL = req.URL
 	target.view.State = StateQueued
 	target.view.RefreshUntil = time.Time{}
+	target.relinked = true
 	name := target.view.Filename
 	target.mu.Unlock()
 
@@ -1014,7 +1038,7 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 	m.dirty.Store(true)
 
 	log.Printf("refreshed link for %s (%d bytes)", name, pr.Size)
-	go m.start(target, false, true)
+	go m.start(target, false)
 	return true
 }
 
@@ -1065,7 +1089,10 @@ func (m *Manager) ChangeAddress(id, url string) error {
 		return fmt.Errorf("pause the download before changing its address")
 	}
 	mt.req.URL, mt.view.URL = url, url
-	hasProgress := mt.view.Path != "" && mt.view.Received > 0 && mt.view.State != StateDone
+	if mt.view.Path != "" && mt.view.Received > 0 && mt.view.State != StateDone {
+		// There is progress to keep, and it is saved under the old address.
+		mt.relinked = true
+	}
 	mt.view.State = StateQueued
 	mt.view.Error = ""
 	mt.mu.Unlock()
@@ -1073,7 +1100,7 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	m.mu.Lock()
 	m.broadcastLocked()
 	m.mu.Unlock()
-	go m.start(mt, false, hasProgress)
+	go m.start(mt, false)
 	return nil
 }
 
@@ -1187,6 +1214,9 @@ type savedTask struct {
 	View   TaskView   `json:"view"`
 	Req    jobRequest `json:"req"`
 	OutDir string     `json:"out_dir"`
+	// Relinked is the task's relinked: an address changed while godm was
+	// closed, or just before it, is still a changed address afterwards.
+	Relinked bool `json:"relinked,omitempty"`
 }
 
 type savedList struct {
@@ -1230,7 +1260,7 @@ func (m *Manager) save() error {
 		t.mu.Lock()
 		v := t.view
 		v.Segments, v.Speed, v.Active = nil, 0, 0
-		list.Tasks = append(list.Tasks, savedTask{View: v, Req: t.req, OutDir: t.outDir})
+		list.Tasks = append(list.Tasks, savedTask{View: v, Req: t.req, OutDir: t.outDir, Relinked: t.relinked})
 		t.mu.Unlock()
 	}
 	m.mu.Unlock()
@@ -1442,7 +1472,7 @@ func (m *Manager) restore(list savedList) {
 		v.Conns = st.Req.Connections
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit
-		mt := &managedTask{view: v, req: st.Req, outDir: st.OutDir}
+		mt := &managedTask{view: v, req: st.Req, outDir: st.OutDir, relinked: st.Relinked}
 		mt.connLimit.Store(int32(st.Req.Connections))
 		mt.speed.SetRate(st.Req.SpeedLimit)
 		m.tasks[v.ID] = mt

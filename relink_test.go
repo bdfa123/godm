@@ -1,0 +1,279 @@
+package main
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// A download that gets a new address keeps what it has saved, whichever way
+// the address arrived and however long the run that first uses it takes to
+// get going. These tests give a paused download with progress a second link
+// to the same bytes and then keep that first run from reaching the file: it
+// waits in the queue and is paused there, its first request is turned away,
+// or godm is restarted while it waits.
+
+// twoLinks serves one file slowly under any path, the way a signed link serves
+// the same bytes under a new address each time it is clicked. It can turn the
+// "/b/" links away for a while, or answer them with another file.
+type twoLinks struct {
+	file   *slowServer
+	other  *slowServer // what "/b/" serves when it is not the same file
+	refuse atomic.Bool
+	wrong  atomic.Bool
+}
+
+func (h *twoLinks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/b/") {
+		if h.refuse.Load() {
+			http.Error(w, "not now", http.StatusBadRequest)
+			return
+		}
+		if h.wrong.Load() {
+			h.other.ServeHTTP(w, r)
+			return
+		}
+	}
+	h.file.ServeHTTP(w, r)
+}
+
+func newTwoLinks(t *testing.T) (*twoLinks, *httptest.Server) {
+	t.Helper()
+	h := &twoLinks{
+		// About a megabyte a second over two connections: slow enough to be
+		// paused part way, quick enough to finish.
+		file:  &slowServer{payload: makePayload(2 << 20), chunk: 16 << 10, delay: 30 * time.Millisecond},
+		other: &slowServer{payload: makePayload(3 << 20), chunk: 64 << 10, delay: time.Millisecond},
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return h, srv
+}
+
+// pausedPartway downloads some of film.bin from the "/a/" link and pauses it.
+func pausedPartway(t *testing.T, m *Manager, src string) (string, TaskView) {
+	t.Helper()
+	id, err := m.Add(jobRequest{URL: src + "/a/film.bin", Connections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "some of the file to arrive", func() bool {
+		v, _ := findTask(m, id)
+		return v.Received > 128<<10
+	})
+	m.Pause(id)
+	waitFor(t, 10*time.Second, "the pause", stateIs(m, id, StatePaused))
+	v, _ := findTask(m, id)
+	if _, ok := loadState(v.Path); !ok || v.Received >= v.Size {
+		t.Fatalf("paused with %d of %d bytes and no sidecar to continue from", v.Received, v.Size)
+	}
+	return id, v
+}
+
+// holdTheQueue fills the manager's one slot with a download that will not
+// finish during the test, saved somewhere else so the folder under test holds
+// only the file in question.
+func holdTheQueue(t *testing.T, m *Manager) string {
+	t.Helper()
+	slow := httptest.NewServer(&slowServer{payload: makePayload(8 << 20), chunk: 8 << 10, delay: 50 * time.Millisecond})
+	t.Cleanup(slow.Close)
+	id, err := m.Add(jobRequest{URL: slow.URL + "/blocker.bin", Connections: 1, OutDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 10*time.Second, "the other download to take the slot", stateIs(m, id, StateRunning))
+	return id
+}
+
+func namesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
+}
+
+// continued checks that the download finished in the file it had been paused
+// in, and that nothing else was left beside it.
+func continued(t *testing.T, m *Manager, id string, before TaskView, h *twoLinks, dir string) {
+	t.Helper()
+	waitFor(t, 30*time.Second, "the download to finish", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+	if v.Path != before.Path {
+		t.Errorf("it had %d of %d bytes in %s and finished in %s instead: the download started over",
+			before.Received, before.Size, filepath.Base(before.Path), filepath.Base(v.Path))
+	}
+	if got := namesIn(t, dir); len(got) != 1 || got[0] != "film.bin" {
+		t.Errorf("the folder holds %v, want film.bin alone", got)
+	}
+	got, err := os.ReadFile(before.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum(got) != sum(h.file.payload) {
+		t.Error("the file put together from two links does not match the source")
+	}
+	if !strings.Contains(v.URL, "/b/") {
+		t.Errorf("the task's address is %s, want the new one", v.URL)
+	}
+}
+
+func TestANewAddressStillContinuesAfterWaitingInTheQueue(t *testing.T) {
+	h, src := newTwoLinks(t)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedPartway(t, m, src.URL)
+	blocker := holdTheQueue(t, m)
+
+	if err := m.ChangeAddress(id, src.URL+"/b/film.bin"); err != nil {
+		t.Fatal(err)
+	}
+	// It waits behind the other download, and is paused before its turn.
+	m.Pause(id)
+	m.Pause(blocker)
+	waitFor(t, 10*time.Second, "the other download to stop", stateIs(m, blocker, StatePaused))
+	if !m.Resume(id) {
+		t.Fatal("resume refused")
+	}
+	continued(t, m, id, before, h, dir)
+}
+
+func TestANewAddressStillContinuesAfterItsFirstTryFails(t *testing.T) {
+	h, src := newTwoLinks(t)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedPartway(t, m, src.URL)
+
+	h.refuse.Store(true)
+	if err := m.ChangeAddress(id, src.URL+"/b/film.bin"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the first try to fail", stateIs(m, id, StateError))
+	h.refuse.Store(false)
+	if !m.Resume(id) {
+		t.Fatal("retry refused")
+	}
+	continued(t, m, id, before, h, dir)
+}
+
+func TestANewAddressStillContinuesAfterARestart(t *testing.T) {
+	h, src := newTwoLinks(t)
+	dir := t.TempDir()
+	store := filepath.Join(t.TempDir(), "tasks.json")
+	m := NewManager(dir, 1)
+	m.announce = nil
+	m.store = store
+	id, before := pausedPartway(t, m, src.URL)
+	blocker := holdTheQueue(t, m)
+
+	if err := m.ChangeAddress(id, src.URL+"/b/film.bin"); err != nil {
+		t.Fatal(err)
+	}
+	// Quitting pauses everything and saves the list; a download that was
+	// waiting comes back paused.
+	m.PauseAll()
+	waitFor(t, 10*time.Second, "everything to stop", func() bool {
+		return stateIs(m, id, StatePaused)() && stateIs(m, blocker, StatePaused)()
+	})
+	if err := m.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	m2 := NewManager(dir, 1)
+	m2.announce = nil
+	m2.store = store
+	if err := m2.load(); err != nil {
+		t.Fatal(err)
+	}
+	if !m2.Resume(id) {
+		t.Fatal("resume refused after the restart")
+	}
+	continued(t, m2, id, before, h, dir)
+}
+
+// The other way a download gets a new address: the user clicks the link again
+// in the browser and the new download is matched to the one that waits for it.
+func TestARefreshedLinkStillContinuesAfterWaitingInTheQueue(t *testing.T) {
+	h, src := newTwoLinks(t)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	m.openURL = func(string) error { return nil }
+	id, before := pausedPartway(t, m, src.URL)
+	blocker := holdTheQueue(t, m)
+
+	if _, err := m.RequestRefresh(id); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := m.Add(jobRequest{URL: src.URL + "/b/film.bin", Connections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the new download to be taken for the fresh link", func() bool {
+		_, listed := findTask(m, fresh)
+		return !listed && stateIs(m, id, StateQueued)()
+	})
+	m.Pause(id)
+	m.Pause(blocker)
+	waitFor(t, 10*time.Second, "the other download to stop", stateIs(m, blocker, StatePaused))
+	if !m.Resume(id) {
+		t.Fatal("resume refused")
+	}
+	continued(t, m, id, before, h, dir)
+}
+
+// The promise that goes with it holds as long: an address that turns out to be
+// another file is refused, not downloaded beside the partial one, however late
+// the run that finds out.
+func TestAWrongAddressIsStillRefusedAfterWaitingInTheQueue(t *testing.T) {
+	h, src := newTwoLinks(t)
+	h.wrong.Store(true)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedPartway(t, m, src.URL)
+	blocker := holdTheQueue(t, m)
+	partial, err := os.ReadFile(before.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ChangeAddress(id, src.URL+"/b/film.bin"); err != nil {
+		t.Fatal(err)
+	}
+	m.Pause(id)
+	m.Pause(blocker)
+	waitFor(t, 10*time.Second, "the other download to stop", stateIs(m, blocker, StatePaused))
+	if !m.Resume(id) {
+		t.Fatal("resume refused")
+	}
+	waitFor(t, 30*time.Second, "the download to stop one way or another", func() bool {
+		v, _ := findTask(m, id)
+		return v.State == StateNeedsRefresh || v.State == StateDone || v.State == StateError
+	})
+	v, _ := findTask(m, id)
+	if v.State != StateNeedsRefresh || !strings.Contains(v.Error, "different file") {
+		t.Errorf("ended %s (%q) in %s, want the address refused as another file",
+			v.State, v.Error, filepath.Base(v.Path))
+	}
+	if got := namesIn(t, dir); len(got) != 2 || got[0] != "film.bin" || got[1] != "film.bin.godm" {
+		t.Errorf("the folder holds %v, want the partial file and its sidecar and nothing else", got)
+	}
+	if after, _ := os.ReadFile(before.Path); sum(after) != sum(partial) {
+		t.Error("the partial file was written to")
+	}
+}
