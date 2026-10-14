@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +38,37 @@ func TestFirstMissingFollowsEachSegmentsRun(t *testing.T) {
 	for _, c := range cases {
 		if got := tk.firstMissingLocked(c.off); got != c.want {
 			t.Errorf("firstMissing(%d) = %d, want %d", c.off, got, c.want)
+		}
+	}
+}
+
+// A connection that has read to the end of its range, or to one byte short of
+// it, still owns the range while it writes what it holds. Work handed out for
+// a player must never be that range itself: a second connection would fetch
+// the held bytes again, both would write them, and the download would end
+// with more bytes counted than the file has.
+func TestAPlayerNeverGetsARangeAnotherConnectionIsReading(t *testing.T) {
+	const piece = 64 << 10
+	for _, c := range []struct {
+		name       string
+		done, held int64
+	}{
+		{"all of it read, the last of it held", 496 << 10, 16 << 10},
+		{"one byte left to read", 496 << 10, 16<<10 - 1},
+	} {
+		s := newSegment(1<<20, 1<<20+512<<10-1)
+		s.done.Store(c.done)
+		s.held.Store(c.held)
+		s.busy = true
+		tk := &task{opts: Options{MinSplit: piece, StreamPiece: 2 * piece}, segs: []*Segment{s}}
+		// The player reads right where the bytes on disk end, and waits on
+		// the next, which this connection holds or is about to read.
+		g := s.Start + c.done
+		if got, found := tk.streamClaimLocked(g, g, math.MaxInt64, false); got != nil || found {
+			t.Errorf("%s: handed out %v (found %v), want nothing", c.name, got, found)
+		}
+		if _, found := tk.streamClaimLocked(g, g, math.MaxInt64, true); found {
+			t.Errorf("%s: reported work to move a connection to", c.name)
 		}
 	}
 }

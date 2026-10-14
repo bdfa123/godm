@@ -1116,6 +1116,11 @@ func (t *task) streamClaimLocked(f, g, limit int64, dry bool) (*Segment, bool) {
 			continue
 		}
 		cur := s.readTo()
+		if cur > e {
+			// Its connection has read the whole range and has only the last of
+			// it to write. Nothing here is left to hand out.
+			continue
+		}
 		var at int64
 		// A piece is normally worth a connection only from MinSplit up, but
 		// not when the player is waiting on exactly these bytes: the index of
@@ -1134,6 +1139,12 @@ func (t *task) streamClaimLocked(f, g, limit int64, dry bool) (*Segment, bool) {
 				// to need it: share what is left, the way the end of a file
 				// is shared, rather than leave one connection to it.
 				at = cur + (e-cur+1)/2
+			}
+			if at <= cur {
+				// A single byte left, too little to share. Handing out the
+				// range itself would give it a second connection, and the
+				// bytes the first one holds would be written twice.
+				continue
 			}
 		default:
 			at = cur
