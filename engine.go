@@ -405,11 +405,21 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	// An earlier attempt at this link that cannot be continued is let go of
+	// only now that this one starts. One refused for want of room leaves it as
+	// it was, so the next try starts it over in the same place, with the space
+	// it already takes, rather than beside it under a numbered name with that
+	// space held by a partial file nothing knows of any more.
+	if plan.overwrite {
+		clearState(plan.path)
+	}
 	if sized {
 		if err := prepareFile(f, pr.Size, !plan.resumed); err != nil {
 			unclaim()
 			f.Close()
-			if !plan.resumed && !plan.overwrite {
+			if !plan.resumed {
+				// Made for this attempt, or an earlier one just let go of:
+				// nothing will continue from it.
 				os.Remove(plan.path)
 			}
 			plan.release()
@@ -496,10 +506,12 @@ func (t *task) unwritten() int64 {
 // ---------- choosing the file on disk ----------
 
 type targetPlan struct {
-	path      string
-	segs      []*Segment
-	resumed   bool
-	overwrite bool // our own earlier, unresumable attempt at this same link
+	path    string
+	segs    []*Segment
+	resumed bool
+	// overwrite is our own earlier, unresumable attempt at this same link. Its
+	// sidecar is still there until Download starts it over.
+	overwrite bool
 	release   func()
 }
 
@@ -539,7 +551,6 @@ func planTarget(pr *ProbeResult, o Options) (*targetPlan, error) {
 	// over in place rather than leaving a dead partial file behind.
 	if hasState && st.URL == o.URL {
 		if release, ok := reserveTarget(base); ok {
-			clearState(base)
 			return &targetPlan{path: base, segs: freshSegments(pr, o), overwrite: true, release: release}, nil
 		}
 	}
@@ -585,7 +596,6 @@ func ownNumbered(cand string, pr *ProbeResult, o Options) *targetPlan {
 	}
 	// It can no longer be continued: start it over in place, as the plain name
 	// is.
-	clearState(cand)
 	return &targetPlan{path: cand, segs: freshSegments(pr, o), overwrite: true, release: release}
 }
 

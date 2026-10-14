@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -201,6 +202,53 @@ func TestASecondDownloadIsRefusedTheRoomTheFirstStillNeeds(t *testing.T) {
 		t.Fatalf("4 MB of 6 MB free once the other download has stopped: %v", err)
 	}
 	checkFile(t, res.Path, payload)
+}
+
+// An earlier attempt at the same link that can no longer be continued is
+// started over in place. Refused for want of room, the attempt must leave it
+// as it was, so that the next one still starts it over there, rather than
+// leave a partial file nothing knows of and move on to a numbered name.
+func TestARefusedStartOverLeavesTheEarlierAttemptToTheNext(t *testing.T) {
+	dir := t.TempDir()
+	payload := makePayload(4 << 20)
+	srv := httptest.NewServer(&slowServer{payload: payload, chunk: 256 << 10})
+	defer srv.Close()
+	url := srv.URL + "/film.mkv"
+	path := filepath.Join(dir, "film.mkv")
+	// The file on the server has changed size since.
+	if err := os.WriteFile(path, payload[:1<<20], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := &State{Version: stateVersion, URL: url, FinalURL: url, Size: 3 << 20, Filename: "film.mkv",
+		Segments: []SegSnap{{Start: 0, End: 3<<20 - 1, Done: 1 << 20}}}
+	if err := saveState(path, old); err != nil {
+		t.Fatal(err)
+	}
+	var free atomic.Int64
+	diskOfItsOwn(t, func(string) int64 { return free.Load() })
+	o := Options{URL: url, OutDir: dir, Connections: 2, MinSplit: 64 << 10}
+
+	free.Store(2 << 20)
+	_, err := Download(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "not enough free space") {
+		t.Fatalf("4 MB over a 1 MB attempt with 2 MB free: %v, want it refused for want of space", err)
+	}
+	if _, ok := loadState(path); !ok {
+		t.Error("the refused attempt dropped the sidecar of the one before it")
+	}
+
+	free.Store(4 << 20)
+	res, err := Download(context.Background(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Path != path {
+		t.Errorf("the download went to %s, want it started over in %s", filepath.Base(res.Path), filepath.Base(path))
+	}
+	checkFile(t, res.Path, payload)
+	if names := dirNames(t, dir); len(names) != 1 {
+		t.Errorf("the folder holds %v, want only the download", names)
+	}
 }
 
 // A torrent's files are sparse too, so it holds the room it still needs while
