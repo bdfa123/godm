@@ -86,6 +86,20 @@
   "notify_error_title": {
     "message": "godm 错误"
   },
+  "notify_torrent_added_title": {
+    "message": "已将种子添加到 godm"
+  },
+  "notify_torrent_added_body": {
+    "message": "$NAME$\n来自 $SITE$",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      },
+      "site": {
+        "content": "$2"
+      }
+    }
+  },
   "notify_page_blocked": {
     "message": "此页面不允许读取其中的链接。"
   },
@@ -317,6 +331,12 @@
   },
   "options_confirm_hint": {
     "message": "会弹出窗口，可修改文件名、保存文件夹和连接数，也可以取消；取消后不会下载。从页面中选取的链接会直接添加，不再询问。"
+  },
+  "options_take_torrents": {
+    "message": "接管磁力链接和 .torrent 文件"
+  },
+  "options_take_torrents_hint": {
+    "message": "点击磁力链接时，直接作为种子任务交给 godm，不询问，并弹出通知说明添加了什么。浏览器开始下载的 .torrent 文件不受大小和文件类型限制，作为种子任务交给 godm；开启了上面的询问时，会先弹出确认窗口。点击时按住 Ctrl 或 Shift，磁力链接就留给浏览器处理。扩展加载之前已打开的页面需要先刷新。"
   },
   "options_types": {
     "message": "文件类型"

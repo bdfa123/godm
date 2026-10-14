@@ -1,9 +1,10 @@
 "use strict";
 
-// The rules for spotting video, and for checking what the download dialog
-// sends back, live in their own files so they can be tested without a browser.
-// i18n.js comes first because handoff.js speaks through it.
-importScripts("sniff.js", "i18n.js", "handoff.js");
+// The rules for spotting video, for checking what the download dialog sends
+// back, and for what counts as a magnet link a page may send, live in their
+// own files so they can be tested without a browser. i18n.js comes first
+// because handoff.js speaks through it.
+importScripts("sniff.js", "i18n.js", "handoff.js", "magnet.js");
 
 const HOST_NAME = "com.godm.host";
 
@@ -35,7 +36,10 @@ const DEFAULTS = {
   connections: 8,
   extensions:
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst",
-  blocklist: ""
+  blocklist: "",
+  // Send a clicked magnet link, or a .torrent the browser starts to download,
+  // to godm as a torrent. magnet.js keeps its own copy of this default.
+  takeTorrents: true
 };
 
 async function getConfig() {
@@ -174,6 +178,11 @@ function shouldTakeOver(item, cfg) {
     .filter(Boolean);
   if (blocked.some((b) => host === b || host.endsWith("." + b))) return "host blocked";
 
+  // A .torrent is a few kilobytes and seldom on the type list, but what it
+  // stands for is usually large, so with the torrent switch on it goes to godm
+  // whatever its size or type.
+  if (cfg.takeTorrents && isTorrentFile(item)) return null;
+
   // totalBytes is often 0 at creation time; only filter when it is real.
   if (item.totalBytes > 0 && item.totalBytes < cfg.minSize) return "below size floor";
 
@@ -189,6 +198,19 @@ function shouldTakeOver(item, cfg) {
   if (!allowed.has(ext)) return "extension not in list (" + (ext || "none") + ")";
 
   return null; // take it
+}
+
+// isTorrentFile is true for a download that is a .torrent: by the name Chrome
+// settled on, the link's path, or the type the server sent. A tracker's
+// download.php?id=1 often has only the last of these.
+function isTorrentFile(item) {
+  const type = String(item.mime || "").split(";")[0].trim().toLowerCase();
+  if (type === "application/x-bittorrent") return true;
+  const ext =
+    extensionOf(item.filename) ||
+    extensionOf(pathOf(item.url)) ||
+    extensionOf(pathOf(item.finalUrl));
+  return ext === "torrent";
 }
 
 async function cookieHeader(url) {
@@ -215,6 +237,26 @@ async function notifyThrottled(key, title, message) {
     iconUrl: "icons/128.png",
     title: title,
     message: message
+  });
+}
+
+// noteTorrentAdded says that a torrent went to godm without a dialog: a clicked
+// magnet link, or a .torrent with asking switched off. A torrent starts to
+// share with strangers at once, and a page can lay a link under a click meant
+// for something else, so each one is named, with the site it came from. It is
+// not throttled: every one is a torrent the person may not have meant.
+function noteTorrentAdded(name, from) {
+  let site = "";
+  try {
+    site = new URL(from).hostname;
+  } catch (e) {
+    // No page to name; the torrent's name still says what was added.
+  }
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icons/128.png",
+    title: tr("notify_torrent_added_title"),
+    message: site ? tr("notify_torrent_added_body", [name, site]) : name
   });
 }
 
@@ -265,6 +307,18 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   // Answer straight away without overriding anything. Chrome holds the
   // download until every listener has suggested, and we must not stall it
   // while we talk to the native host.
+  //
+  // A .torrent is the exception. It is so small that it has usually arrived in
+  // full before the host has answered the ping, and a finished download can no
+  // longer be cancelled: Chrome would keep its copy, with the row that shows it
+  // erased, while godm fetched another. A download cannot finish before every
+  // listener has answered, so a torrent is answered only once it is settled:
+  // cancelled, or left to the browser, which takes no longer than the host
+  // takes to answer the ping.
+  if (isTorrentFile(item)) {
+    handleDownload(item).finally(() => suggest());
+    return true; // suggest is called later
+  }
   suggest();
   handleDownload(item);
 });
@@ -274,6 +328,9 @@ async function handleDownload(item) {
   if (!cfg.enabled) return;
 
   const url = item.finalUrl || item.url;
+  // A torrent is fetched and read by the daemon, which needs telling: a
+  // tracker's link seldom ends in .torrent.
+  const torrent = cfg.takeTorrents && isTorrentFile(item);
 
   // Two gates before we touch anything. Both exist because a cancelled
   // download we cannot take over is a download the user has lost.
@@ -333,9 +390,14 @@ async function handleDownload(item) {
     referrer: item.referrer || "",
     filename: suggestName(item),
     size: pickSize(item),
-    connections: cfg.connections
+    connections: cfg.connections,
+    kind: torrent ? "bt" : ""
   };
 
+  // A torrent is asked about like any other download, unlike a clicked magnet
+  // link. A page can start a download without any click at all, and a .torrent
+  // that went to godm unasked would join a swarm, and show the person's address
+  // to it, on the page's say-so.
   if (cfg.confirmDownload) {
     // The dialog owns the download from here: Start hands it to godm, Cancel or
     // closing the window drops it, which is what the person asked for by
@@ -351,14 +413,16 @@ async function handleDownload(item) {
     // nothing would lose the file; carry on as if the dialog were switched off.
     console.warn("godm: could not open the confirmation dialog, handing over directly");
   }
-  await handOff(held, {
+  const result = await handOff(held, {
     type: "download",
     url: held.url,
+    kind: held.kind,
     filename: item.filename ? item.filename.split(/[\\/]/).pop() : "",
     referrer: held.referrer,
     connections: held.connections,
     outDir: ""
   });
+  if (torrent && result.ok) noteTorrentAdded(held.filename, held.referrer || held.url);
 }
 
 // handOff sends one job to godm and, if that fails, gives the download back to
@@ -725,9 +789,106 @@ async function submitPicked(msg) {
   return resp;
 }
 
+// ---------- a magnet link clicked in a page ----------
+
+// takeMagnet hands a magnet link that magnet.js caught to godm. The page was
+// told not to follow it, so every way this can fail ends with the link going
+// back to the browser, which passes it on to an installed client as it would
+// have without godm. Like a magnet from the right-click menu it is not asked
+// about and carries no cookies: it is not fetched over HTTP. Unlike one from
+// the menu, a notice says what was added.
+async function takeMagnet(msg, sender) {
+  const link = typeof msg.url === "string" ? msg.url.trim() : "";
+  // Only a magnet is ever handed back: anything else is not what the content
+  // script sends, and opening it in the tab is not this message's business.
+  if (!/^magnet:/i.test(link)) return { ok: false, error: tr("err_unknown_request") };
+  try {
+    return await sendMagnet(link, sender);
+  } catch (e) {
+    console.error("godm: could not take the magnet link -", e);
+    return giveMagnetBack(link, sender);
+  }
+}
+
+async function sendMagnet(link, sender) {
+  const cfg = await getConfig();
+  const url = magnetLink(link);
+  if (!url || !cfg.enabled || !cfg.takeTorrents || (await takeoverDisabled())) {
+    return giveMagnetBack(link, sender);
+  }
+
+  const resp = await callHost({
+    type: "download",
+    url: url,
+    kind: "bt",
+    referrer: (sender.tab && sender.tab.url) || sender.url || "",
+    userAgent: navigator.userAgent,
+    connections: cfg.connections
+  });
+  await noteHost(resp);
+  if (resp.ok) {
+    bumpBadge(1);
+    // The frame the link was in, which may be an advert's and not the page's.
+    noteTorrentAdded(magnetName(url), sender.url || (sender.tab && sender.tab.url) || "");
+    return { ok: true };
+  }
+  if (resp.rejected) {
+    // The daemon looked at the link and said no; a click deserves to hear why
+    // straight away, as a right-click does.
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/128.png",
+      title: tr("notify_error_title"),
+      message: resp.error || tr("err_unknown")
+    });
+    return { ok: false, error: resp.error || tr("err_unknown") };
+  }
+  await notifyThrottled(
+    "host-down",
+    tr("notify_host_down_title"),
+    tr("notify_host_down_body", resp.error || tr("err_host_unreachable"))
+  );
+  return giveMagnetBack(url, sender);
+}
+
+// A magnet: address never loads as a page, so sending the tab to it leaves the
+// page where it is and only asks the browser to open the link.
+async function giveMagnetBack(url, sender) {
+  try {
+    await chrome.tabs.update(sender.tab.id, { url: url });
+  } catch (e) {
+    console.warn("godm: could not hand the magnet link back to the browser", e);
+  }
+  return { ok: false, handedBack: true };
+}
+
 // ---------- popup / options / picker bridge ----------
 
+// fromOwnPage is true for the extension's own pages: the popup, the options
+// page, the dialog and the picker. Anything else that sends a message is
+// magnet.js running inside some web page, whose process is not to be trusted
+// with more than reporting a click.
+function fromOwnPage(sender) {
+  return (
+    !!sender &&
+    sender.id === chrome.runtime.id &&
+    typeof sender.url === "string" &&
+    sender.url.startsWith(chrome.runtime.getURL(""))
+  );
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!fromOwnPage(sender)) {
+    // The bridge below passes anything it does not know on to the native
+    // host, so a page must not get that far: a clicked magnet is all it may
+    // send.
+    if (msg && msg.type === "godm-magnet" && sender && sender.tab && sender.id === chrome.runtime.id) {
+      takeMagnet(msg, sender).then(sendResponse);
+      return true;
+    }
+    sendResponse({ ok: false, error: tr("err_unknown_request") });
+    return false;
+  }
   if (msg && msg.type === "godm-grab-active") {
     chrome.tabs.query({ active: true, lastFocusedWindow: true })
       .then((tabs) => pickLinksFromTab(tabs[0], false))
@@ -777,8 +938,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 //
 // A page that plays video always fetches either a playlist (HLS .m3u8, DASH
 // .mpd) or one long media response. Watching responses go by is enough to find
-// it: nothing is blocked, nothing is injected into the page, and a page that
-// plays nothing costs a regex per response.
+// it: nothing is blocked, sniffing puts no script in the page (the only one
+// there is magnet.js, for clicks), and a page that plays nothing costs a regex
+// per response.
 
 const MEDIA_TTL_MS = 30 * 60 * 1000;
 const MEDIA_MAX_PER_TAB = 40;

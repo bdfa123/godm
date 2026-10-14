@@ -122,7 +122,9 @@ function firstProblem(form) {
 // buildJob turns what was held back when the download was cancelled in the
 // browser, plus what the person chose, into the message for the host. Cookies
 // and the user agent are added by the caller, which is the only place that can
-// read them. Returns {error} or {job}.
+// read them. Returns {error} or {job}. A .torrent was marked as one by the
+// worker when it was held, and the daemon has to be told: a tracker's link
+// seldom ends in .torrent.
 function buildJob(pending, form) {
   const problem = firstProblem(form || {});
   if (problem) return { error: problem };
@@ -130,6 +132,7 @@ function buildJob(pending, form) {
     job: {
       type: "download",
       url: pending.url,
+      kind: pending.kind === "bt" ? "bt" : "",
       filename: String(form.filename).trim(),
       referrer: pending.referrer || "",
       connections: parseConnections(form.connections).value,

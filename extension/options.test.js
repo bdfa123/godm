@@ -12,15 +12,15 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install } = require("./fakechrome.test.js");
 
-const FIELDS = ["enabled", "takeAll", "confirmDownload", "minSize", "connections", "extensions", "blocklist"];
+const FIELDS = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist"];
+const BOXES = ["enabled", "takeAll", "confirmDownload", "takeTorrents"];
 const NUMBERS = ["minSize", "connections"];
 const OTHERS = ["save", "status", "extid", "cmd", "probe", "lastping"];
 
 class FakeElement {
   constructor(id) {
     this.id = id;
-    this.type = id === "enabled" || id === "takeAll" || id === "confirmDownload" ? "checkbox"
-      : NUMBERS.includes(id) ? "number" : "text";
+    this.type = BOXES.includes(id) ? "checkbox" : NUMBERS.includes(id) ? "number" : "text";
     this.value = "";
     this.checked = false;
     this.textContent = "";
@@ -95,6 +95,26 @@ test("the number of connections stays between 1 and 32", () => {
     assert.strictEqual(p.saved.connections, stored, "typed '" + typed + "'");
     assert.strictEqual(String(p.ui.connections.value), String(stored), "the field says what was stored");
   }
+});
+
+test("magnet links and .torrent files are taken over until the box is cleared", () => {
+  const fresh = open({});
+  assert.strictEqual(fresh.ui.takeTorrents.checked, true, "on when nothing has been saved");
+  fresh.ui.takeTorrents.checked = false;
+  fresh.ui.save.fire("click");
+  assert.strictEqual(fresh.saved.takeTorrents, false, "Save keeps the cleared box");
+
+  const off = open({ takeTorrents: false });
+  assert.strictEqual(off.ui.takeTorrents.checked, false, "the page shows what was saved");
+  off.ui.takeTorrents.checked = true;
+  off.ui.save.fire("click");
+  assert.strictEqual(off.saved.takeTorrents, true);
+});
+
+test("the options page has a box for every setting it saves", () => {
+  const html = fs.readFileSync(path.join(__dirname, "options.html"), "utf8");
+  for (const id of FIELDS) assert.match(html, new RegExp(`id="${id}"`), id);
+  assert.match(html, /<input type="checkbox" id="takeTorrents">/);
 });
 
 test("saving leaves the text and tick-box fields as they were", () => {

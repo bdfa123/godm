@@ -86,6 +86,20 @@
   "notify_error_title": {
     "message": "godm error"
   },
+  "notify_torrent_added_title": {
+    "message": "Torrent added to godm"
+  },
+  "notify_torrent_added_body": {
+    "message": "$NAME$\nfrom $SITE$",
+    "placeholders": {
+      "name": {
+        "content": "$1"
+      },
+      "site": {
+        "content": "$2"
+      }
+    }
+  },
   "notify_page_blocked": {
     "message": "This page does not allow reading its links."
   },
@@ -317,6 +331,12 @@
   },
   "options_confirm_hint": {
     "message": "Shows a window to change the file name, save folder and connections, or to cancel. Cancelling downloads nothing. Links picked from a page are added without asking."
+  },
+  "options_take_torrents": {
+    "message": "Take over magnet links and .torrent files"
+  },
+  "options_take_torrents_hint": {
+    "message": "A click on a magnet link goes straight to godm as a torrent, without asking, and a notice says what was added. A .torrent the browser starts to download goes to godm as a torrent whatever its size or type, through the window above when asking is on. Hold Ctrl or Shift while clicking to leave a magnet link to the browser. Pages that were open before the extension was loaded need reloading first."
   },
   "options_types": {
     "message": "File types"

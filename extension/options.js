@@ -8,10 +8,11 @@ const DEFAULTS = {
   connections: 8,
   extensions:
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst",
-  blocklist: ""
+  blocklist: "",
+  takeTorrents: true
 };
 
-const fields = ["enabled", "takeAll", "confirmDownload", "minSize", "connections", "extensions", "blocklist"];
+const fields = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist"];
 
 function load() {
   chrome.storage.sync.get(DEFAULTS, (cfg) => {

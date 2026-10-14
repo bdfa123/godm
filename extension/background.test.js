@@ -53,12 +53,22 @@ function event() {
   return { fns, addListener: (fn) => fns.push(fn) };
 }
 
+// Who a message comes from, as Chrome describes the sender: one of the
+// extension's own pages, or the content script in a tab showing a web page.
+const OWN_PAGE = { id: "godm-extension-id", url: "chrome-extension://godm-extension-id/popup.html" };
+const WEB_PAGE = {
+  id: "godm-extension-id",
+  url: "https://tracker.test/t/42",
+  tab: { id: 7, url: "https://tracker.test/t/42" },
+  frameId: 0
+};
+
 // start loads background.js into a fresh worker. options.host answers what the
 // native host is asked, and options.cookies what the cookie jar holds.
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {} }, options);
   const data = { session: {}, sync: Object.assign({}, opts.settings), local: {} };
-  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [] };
+  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [] };
   const events = {
     determining: event(),
     removed: event(),
@@ -96,8 +106,16 @@ function start(options) {
         return win;
       }
     },
-    action: { setTitle() {}, setBadgeText() {}, setBadgeBackgroundColor() {} },
-    tabs: { query: async () => [], get: async () => ({}), onUpdated: event(), onRemoved: event(), onActivated: event() },
+    action: { setTitle() {}, setBadgeText: (o) => seen.badges.push(o.text), setBadgeBackgroundColor() {} },
+    tabs: {
+      query: async () => [],
+      get: async () => ({}),
+      // A tab sent to an address: how a magnet goes back to the browser.
+      update: async (id, o) => seen.opened.push({ tab: id, url: o.url }),
+      onUpdated: event(),
+      onRemoved: event(),
+      onActivated: event()
+    },
     webRequest: { onHeadersReceived: event() },
     contextMenus: { removeAll: (cb) => cb && cb(), create() {}, onClicked: events.menu },
     cookies: { getAll: async (q) => opts.cookies(q) },
@@ -129,10 +147,16 @@ function start(options) {
     data,
     seen,
     events,
+    context,
     // The browser has started a download and asks the worker what to do.
     download: (item) => context.handleDownload(item),
+    // The browser asks the worker to confirm a download's name, as it does for
+    // every download; returns what the listener returned.
+    determine: (item, suggest) => events.determining.fns[0](item, suggest),
     // A page of the extension sends the worker a message and waits for the reply.
-    message: (msg) => new Promise((resolve) => events.message.fns[0](msg, {}, resolve)),
+    message: (msg, sender) => new Promise((resolve) => events.message.fns[0](msg, sender || OWN_PAGE, resolve)),
+    // The content script in a web page sends the worker a message.
+    fromPage: (msg, sender) => new Promise((resolve) => events.message.fns[0](msg, sender || WEB_PAGE, resolve)),
     // The person chose an item of the right-click menu.
     menu: (info, tab) => events.menu.fns[0](info, tab),
     // The window with this id was closed.
@@ -152,6 +176,12 @@ const ITEM = {
 };
 
 const downloads = (w) => w.seen.host.filter((m) => m.type === "download");
+
+// What the toolbar badge says once the worker has finished painting it.
+async function badge(w) {
+  for (let i = 0; i < 10; i++) await settle();
+  return w.seen.badges[w.seen.badges.length - 1];
+}
 const refuse = (m) => (m.type === "download" ? { ok: false, error: "disk full" } : { ok: true });
 const form = (key) => ({ type: "godm-confirm-start", key, filename: "setup.exe", outDir: "", connections: "8", dontAsk: false });
 
@@ -337,4 +367,279 @@ test("a host that is down on a stream or an inspection still switches takeover o
   await w.message({ type: "godm-media-inspect", url: "https://example.test/a.m3u8", kind: "hls" });
   await w.download(ITEM);
   assert.deepEqual(w.seen.cancelled, []);
+});
+
+// ---------- a magnet link clicked in a page ----------
+
+const MAGNET = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Some+Film";
+const clicked = (w, url, sender) => w.fromPage({ type: "godm-magnet", url: url === undefined ? MAGNET : url }, sender);
+const handedBack = (url) => [{ tab: WEB_PAGE.tab.id, url: url || MAGNET }];
+
+test("a magnet clicked in a page goes to godm as a torrent, without the dialog", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }] });
+  assert.deepEqual(await clicked(w), { ok: true });
+  const sent = downloads(w);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, MAGNET);
+  assert.equal(sent[0].kind, "bt", "the daemon is told it is a torrent");
+  assert.equal(sent[0].referrer, WEB_PAGE.tab.url);
+  assert.equal(sent[0].userAgent, "test-agent");
+  assert.equal(sent[0].connections, 8);
+  assert.ok(!sent[0].cookie, "a magnet is not fetched over HTTP, so it carries no cookies");
+  assert.equal(w.seen.windows.length, 0, "no dialog, even with asking switched on");
+  assert.deepEqual(w.seen.opened, [], "and the browser was not given it as well");
+  assert.equal(await badge(w), "1", "the badge counts it");
+  // Nobody was asked, and a click can be had by a link laid over something
+  // else, so the person is told what was added and from where.
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0].message, /Some Film/);
+  assert.match(w.seen.notices[0].message, /tracker\.test/);
+});
+
+test("a clicked magnet with no name is named by its hash, and the frame it was in is the site", async () => {
+  const w = start();
+  const bare = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+  const advert = Object.assign({}, WEB_PAGE, { url: "https://ads.test/frame.html", frameId: 3 });
+  await clicked(w, bare, advert);
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0].message, /0123456789abcdef0123456789abcdef01234567/);
+  assert.match(w.seen.notices[0].message, /ads\.test/);
+});
+
+test("with torrents or takeover switched off, a clicked magnet goes back to the browser", async () => {
+  for (const settings of [{ takeTorrents: false }, { enabled: false }]) {
+    const w = start({ settings });
+    const resp = await clicked(w);
+    assert.equal(resp.handedBack, true, JSON.stringify(settings));
+    assert.equal(downloads(w).length, 0, "godm was not asked");
+    assert.deepEqual(w.seen.opened, handedBack(), "the tab was sent to the link, which opens it as the click would have");
+  }
+});
+
+test("a magnet the daemon could not read goes back to the browser without asking godm", async () => {
+  for (const link of ["magnet:?dn=no-hash", "magnet:?xt=urn:btmh:1220" + "ab".repeat(32), "magnet:?xt=urn:btih:abc"]) {
+    const w = start();
+    assert.equal((await clicked(w, link)).handedBack, true, link);
+    assert.deepEqual(w.seen.host, [], link);
+    assert.deepEqual(w.seen.opened, handedBack(link), link);
+  }
+});
+
+test("a page cannot have anything but a magnet opened or downloaded", async () => {
+  for (const link of ["https://evil.test/a.exe", "javascript:alert(1)", "", null, 42]) {
+    const w = start();
+    const resp = await clicked(w, link);
+    assert.equal(resp.ok, false, String(link));
+    assert.deepEqual(w.seen.host, [], String(link));
+    assert.deepEqual(w.seen.opened, [], String(link));
+  }
+});
+
+test("a host known to be down hands a clicked magnet straight back", async () => {
+  const w = start();
+  w.data.session.hostState = { ok: false, at: Date.now(), error: "host gone" };
+  assert.equal((await clicked(w)).handedBack, true);
+  assert.deepEqual(w.seen.host, [], "the host was not asked again");
+  assert.deepEqual(w.seen.opened, handedBack());
+});
+
+test("a host that cannot be reached hands the magnet back, says so, and switches takeover off", async () => {
+  const w = start({
+    host: (m) => (m.type === "download" ? { ok: false, error: "Specified native messaging host not found." } : { ok: true }),
+    settings: { confirmDownload: false }
+  });
+  assert.equal((await clicked(w)).handedBack, true);
+  assert.deepEqual(w.seen.opened, handedBack());
+  assert.equal(w.seen.notices.length, 1, "the person is told");
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [], "downloads are left to Chrome for a while");
+});
+
+test("a magnet the daemon refuses is reported in its words and leaves takeover on", async () => {
+  const w = start({ host: (m) => (m.type === "download" ? refusal("disk full") : { ok: true }), settings: { confirmDownload: false } });
+  const resp = await clicked(w);
+  assert.equal(resp.ok, false);
+  assert.equal(w.seen.notices.length, 1);
+  assert.equal(w.seen.notices[0].message, "disk full");
+  assert.deepEqual(w.seen.opened, [], "godm has seen it, so the browser is not given it too");
+  assert.notEqual(await badge(w), "1", "and the badge does not count it");
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [ITEM.id], "the next download still goes to godm");
+});
+
+test("a web page may send nothing but a clicked magnet", async () => {
+  const asks = [
+    { type: "ping" },
+    { type: "tasks" },
+    { type: "open" },
+    { type: "download", url: "https://example.test/a.zip" },
+    { type: "godm-batch", items: [{ url: "https://example.test/a.zip" }] },
+    { type: "godm-media-download", url: "https://example.test/a.m3u8", kind: "hls" },
+    { type: "godm-confirm-start", key: "confirm:1" },
+    { type: "godm-browse" },
+    { type: "godm-grab-active" },
+    null
+  ];
+  const w = start();
+  for (const msg of asks) {
+    const resp = await w.fromPage(msg);
+    assert.equal(resp.ok, false, JSON.stringify(msg));
+  }
+  // A magnet from something that is not a tab, or not this extension, is not a click.
+  for (const sender of [{ id: "godm-extension-id", url: "https://tracker.test/" }, Object.assign({}, WEB_PAGE, { id: "other" })]) {
+    assert.equal((await clicked(w, MAGNET, sender)).ok, false);
+  }
+  assert.deepEqual(w.seen.host, [], "nothing reached the native host");
+  assert.deepEqual(w.seen.opened, []);
+  assert.deepEqual(w.seen.windows, []);
+});
+
+test("the extension's own pages still reach the host, an options page in a tab too", async () => {
+  const w = start();
+  await w.message({ type: "ping" });
+  const options = { id: "godm-extension-id", url: "chrome-extension://godm-extension-id/options.html", tab: { id: 3, url: "chrome-extension://godm-extension-id/options.html" } };
+  await w.message({ type: "tasks" }, options);
+  assert.deepEqual(w.seen.host.map((m) => m.type), ["ping", "tasks"]);
+});
+
+test("the worker and the content script start from the same settings", () => {
+  const w = start();
+  const [all, magnet] = vm.runInContext("[DEFAULTS, MAGNET_DEFAULTS]", w.context);
+  assert.equal(all.takeTorrents, true);
+  for (const key of Object.keys(magnet)) assert.strictEqual(magnet[key], all[key], key);
+});
+
+// ---------- a .torrent the browser starts to download ----------
+
+const TORRENT = {
+  id: 9,
+  url: "https://tracker.test/download.php?id=42",
+  finalUrl: "https://tracker.test/download.php?id=42",
+  filename: "C:\\Users\\me\\Downloads\\Some Film.torrent",
+  mime: "application/x-bittorrent",
+  referrer: "https://tracker.test/t/42",
+  totalBytes: 40 * 1024,
+  state: "in_progress"
+};
+
+test("a small .torrent is taken over as a torrent, with its cookies and without asking when asking is off", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }], settings: { confirmDownload: false } });
+  await w.download(TORRENT);
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id], "Chrome's copy was cancelled, below the size floor and off the type list");
+  assert.equal(w.seen.windows.length, 0, "nobody was asked");
+  const sent = downloads(w);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, TORRENT.url, "the daemon fetches the .torrent itself");
+  assert.equal(sent[0].kind, "bt", "and is told it is one, though the link does not end in .torrent");
+  assert.equal(sent[0].cookie, "uid=1");
+  assert.equal(sent[0].referrer, TORRENT.referrer);
+  assert.equal(await badge(w), "1");
+  // A page can start a download with no click, so a torrent that went to godm
+  // unasked is named, with where it came from.
+  assert.equal(w.seen.notices.length, 1);
+  assert.match(w.seen.notices[0].message, /Some Film\.torrent/);
+  assert.match(w.seen.notices[0].message, /tracker\.test/);
+});
+
+test("with asking on, a .torrent a page started waits for Start, and Start sends it as a torrent", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }] });
+  await w.download(TORRENT); // nothing says a person clicked anything
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id]);
+  assert.equal(w.seen.windows.length, 1, "the dialog opened");
+  assert.deepEqual(downloads(w), [], "and godm has been given nothing yet");
+
+  assert.deepEqual(await w.message(form(w.heldKey())), { ok: true });
+  const sent = downloads(w);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, TORRENT.url);
+  assert.equal(sent[0].kind, "bt");
+  assert.equal(sent[0].cookie, "uid=1");
+  assert.deepEqual(w.seen.notices, [], "the person pressed Start, so there is nothing to tell them");
+
+  const closed = start();
+  await closed.download(TORRENT);
+  await closed.close(closed.seen.windows[0].id);
+  assert.deepEqual(downloads(closed), [], "closing the dialog sends nothing");
+});
+
+test("a .torrent godm refuses after asking goes back to Chrome", async () => {
+  // The daemon fetches the .torrent before it answers, so a tracker that will
+  // not give it to godm comes back as a refusal, while Chrome can still fetch it.
+  const w = start({ host: daemonSays("fetching the torrent file: 403 Forbidden") });
+  await w.download(TORRENT);
+  const resp = await w.message(form(w.heldKey()));
+  assert.equal(resp.handedBack, true);
+  assert.deepEqual(w.seen.downloaded, [TORRENT.url]);
+  w.data.session.hostState = { ok: true, at: 0, error: "" };
+  await w.download(Object.assign({}, TORRENT, { id: 10 }));
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id], "and Chrome's new copy is left to it");
+});
+
+test("a .torrent is known by its name, its link or the type the server sent", async () => {
+  const cases = [
+    { filename: "C:\\Users\\me\\Downloads\\download", mime: "application/x-bittorrent" },
+    { filename: "", mime: "", url: "https://files.test/a/Film.torrent", finalUrl: "https://files.test/a/Film.torrent" },
+    { filename: "C:\\Users\\me\\Downloads\\Film.TORRENT", mime: "application/octet-stream" }
+  ];
+  for (const c of cases) {
+    const w = start({ settings: { confirmDownload: false } });
+    await w.download(Object.assign({}, TORRENT, c));
+    assert.equal(downloads(w).length, 1, JSON.stringify(c));
+    assert.equal(downloads(w)[0].kind, "bt", JSON.stringify(c));
+  }
+});
+
+test("with the torrent switch off a .torrent is left alone, or taken as a plain file as before", async () => {
+  const left = start({ settings: { takeTorrents: false } });
+  await left.download(TORRENT);
+  assert.deepEqual(left.seen.cancelled, []);
+  assert.deepEqual(left.seen.host, [], "not even a ping");
+  assert.deepEqual(left.seen.windows, []);
+
+  const listed = start({ settings: { takeTorrents: false, extensions: "torrent", minSize: 0, confirmDownload: false } });
+  await listed.download(TORRENT);
+  assert.equal(downloads(listed).length, 1, "the type list still takes it");
+  assert.equal(downloads(listed)[0].kind, "", "as an ordinary file");
+});
+
+test("the blocklist and the hand-back memory still keep a .torrent from godm", async () => {
+  const blocked = start({ settings: { blocklist: "tracker.test" } });
+  await blocked.download(TORRENT);
+  assert.deepEqual(blocked.seen.cancelled, []);
+
+  const w = start({ host: refuse, settings: { confirmDownload: false } });
+  await w.download(TORRENT);
+  assert.deepEqual(w.seen.downloaded, [TORRENT.url], "a refused .torrent goes back to Chrome");
+  assert.deepEqual(w.seen.notices.map((n) => n.title), ["godm could not take over"], "and is not reported as added");
+  w.data.session.hostState = { ok: true, at: 0, error: "" };
+  await w.download(Object.assign({}, TORRENT, { id: 10 }));
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id], "and the copy Chrome starts again is left to it");
+});
+
+test("Chrome is not told a .torrent's name until its own copy is cancelled", async () => {
+  const ping = later();
+  const w = start({ host: (m) => (m.type === "ping" ? ping.promise : { ok: true }) });
+  let cancelledWhenAnswered = null;
+  const returned = w.determine(TORRENT, () => (cancelledWhenAnswered = w.seen.cancelled.slice()));
+  assert.equal(returned, true, "the listener says it will answer later");
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(cancelledWhenAnswered, null, "no answer while the host is asked, so the download cannot finish");
+
+  ping.resolve({ ok: true });
+  for (let i = 0; i < 50 && cancelledWhenAnswered === null; i++) await settle();
+  assert.deepEqual(cancelledWhenAnswered, [TORRENT.id], "answered once Chrome's copy was cancelled");
+});
+
+test("other downloads, and a .torrent left to Chrome, are answered without waiting on godm", async () => {
+  const w = start({ host: () => new Promise(() => {}) }); // a host that never answers
+  let answered = 0;
+  assert.notEqual(w.determine(ITEM, () => answered++), true);
+  assert.equal(answered, 1, "an ordinary download is answered at once");
+
+  const off = start({ settings: { takeTorrents: false } });
+  let torrentAnswered = 0;
+  off.determine(TORRENT, () => torrentAnswered++);
+  for (let i = 0; i < 50 && !torrentAnswered; i++) await settle();
+  assert.equal(torrentAnswered, 1);
+  assert.deepEqual(off.seen.cancelled, []);
 });

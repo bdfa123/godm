@@ -123,6 +123,11 @@ it back on. Links picked in bulk skip the dialog.
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go.
 
+A magnet link never turns into a download the extension could see, so a small
+script in every page watches for a click on one. It acts only on a click you
+make, never on one a page's own script makes, and pages that were open before
+the extension was loaded need reloading first.
+
 ## Video
 
 - **Sniffing**: while you browse, the extension watches responses for HLS
@@ -170,10 +175,18 @@ come first, and only pieces whose hash has been checked reach the player.
 ## Torrents and magnet links
 
 Paste magnet links into **Add links**, pick `.torrent` files with
-**Open .torrent…**, or right-click a magnet link in the browser and choose
-**Download with godm**. A magnet shows "Fetching metadata" until peers send the
-file list; if nobody answers within five minutes it stops and frees its place
-in the queue, and Resume tries again.
+**Open .torrent…**, or just click a magnet link or a `.torrent` link in the
+browser: the extension hands either to godm as a torrent, whatever its size. A
+clicked magnet goes without the dialog, and a notification names what was
+added and the site it came from. A `.torrent` is a download like any other,
+which a page can start without a click, so the dialog asks first if it is on.
+godm fetches the `.torrent` before it accepts it, and one it cannot get (from a
+tracker that only lets a browser in, say) goes back to Chrome. Hold Ctrl or
+Shift while clicking to leave a magnet to the browser, or turn all this off on
+the extension's options page; right-clicking a magnet link and choosing
+**Download with godm** works either way. A magnet shows "Fetching metadata"
+until peers send the file list; if nobody answers within five minutes it stops
+and frees its place in the queue, and Resume tries again.
 
 - **Uploading**: by default a torrent stops uploading the moment it finishes.
   Settings can make it seed to a ratio of 1.0 or keep seeding. While a torrent
