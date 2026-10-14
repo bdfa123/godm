@@ -904,7 +904,8 @@ func (m *Manager) ResumeAll() {
 }
 
 // Remove drops a task. With deleteFile the partial or finished file goes too;
-// if a run or a player still has it open, deletion waits until they let go.
+// if a run or a player still has it open, deletion waits until they let go,
+// and for a while longer if some other program has it; see deleteDownload.
 func (m *Manager) Remove(id string, deleteFile bool) bool {
 	m.mu.Lock()
 	mt, ok := m.tasks[id]
@@ -961,12 +962,59 @@ func (m *Manager) detachLocked(id string) {
 	m.broadcastLocked()
 }
 
+// deleteFor is how long deleting a removed download's file keeps trying. It is
+// a variable so that a test need not sit through it.
+var deleteFor = btDeleteFor
+
+// deleteDownload deletes a download's file and then its sidecar. Callers have
+// seen to it that godm itself has let go of the file, but Windows will not
+// delete one that any program has open, and others do: the player that Play
+// started on a finished film, a virus scan, an archive tool. So a file that
+// will not go is tried again for a while in the background, as a torrent's
+// files are, and named in the log if it is still there at the end.
 func deleteDownload(path string) {
 	if path == "" {
 		return
 	}
-	os.Remove(path)
+	// The name stays reserved for as long as the file is on its way out. Its
+	// sidecar is still beside it, and a download of the same link added in
+	// that time would take the two for its own unfinished work and write into
+	// a file that is deleted under it. A name that is already taken means a
+	// download is writing there now, and the file is no longer this one's.
+	release, ok := reserveTarget(path)
+	if !ok {
+		return
+	}
+	if removeDownload(path) == nil {
+		release()
+		return
+	}
+	go func() {
+		defer release()
+		deadline := time.Now().Add(deleteFor)
+		for wait := 50 * time.Millisecond; ; wait = min(2*wait, time.Second) {
+			time.Sleep(wait)
+			err := removeDownload(path)
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Printf("removing a download: its file is still in use and was left where it is: %v", err)
+				return
+			}
+		}
+	}()
+}
+
+// removeDownload is one try at deleting a download's file. The sidecar goes
+// only once the file has: a partial file left without one could not even be
+// continued.
+func removeDownload(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	os.Remove(statePath(path))
+	return nil
 }
 
 // RequestRefresh parks a task until the user fetches a new link for it, and
