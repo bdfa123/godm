@@ -134,7 +134,8 @@ type managedTask struct {
 	// speed is this download's own limit, read live the same way.
 	speed RateLimiter
 	// gen increments on every run so a superseded run cannot overwrite the
-	// state of the one that replaced it.
+	// state of the one that replaced it. It moves when the run is queued, not
+	// when its goroutine gets going; see queueRun.
 	gen         int
 	waitingSlot bool
 	matching    bool // probing whether this new download is a refreshed link
@@ -167,6 +168,24 @@ func (t *managedTask) snapshot() TaskView {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.view
+}
+
+// queueRun marks the task as waiting to run and returns the generation of the
+// run that is to do it, which the caller then starts. Callers hold t.mu.
+//
+// The generation moves here, in the same step as the state, because the run
+// before this one may still be on its way out. A run paused while it waited
+// for a slot finds that out a moment later, and what it does then, giving up
+// its wait and writing "paused", must not land on a task that has been
+// resumed since. If the generation moved only once the new run's goroutine
+// got going, there would be a moment in which the task was queued again under
+// the old run's generation: the old run's ending would be written over the
+// resume, or the old run would take the slot itself on a context already
+// cancelled, and the new run would find the task not queued and leave.
+func (t *managedTask) queueRun() int {
+	t.view.State = StateQueued
+	t.gen++
+	return t.gen
 }
 
 func (t *managedTask) onStart(gen int, si StartInfo) {
@@ -463,6 +482,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 			SpeedLimit: req.SpeedLimit,
 		},
 	}
+	gen := mt.queueRun() // nobody else can see the task yet
 	mt.connLimit.Store(int32(req.Connections))
 	mt.speed.SetRate(req.SpeedLimit)
 	if req.Kind == "bt" {
@@ -485,7 +505,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	m.mu.Unlock()
 	m.dirty.Store(true)
 
-	go m.start(mt, true)
+	go m.start(mt, gen, true)
 	return id, nil
 }
 
@@ -502,24 +522,24 @@ func (m *Manager) AddBatch(reqs []jobRequest) (ids []string, errs []string) {
 	return ids, errs
 }
 
-// start runs one attempt of a task. allowMatch lets a brand-new download be
-// absorbed by a task that is waiting for a refreshed link. A task whose
-// address has changed tells the engine to continue existing progress from a
-// URL that differs from before; see relinked.
-func (m *Manager) start(mt *managedTask, allowMatch bool) {
+// start runs one attempt of a task: the one queueRun gave the generation gen.
+// allowMatch lets a brand-new download be absorbed by a task that is waiting
+// for a refreshed link. A task whose address has changed tells the engine to
+// continue existing progress from a URL that differs from before; see
+// relinked.
+func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	mt.mu.Lock()
 	// Resume, refresh and address changes reserve StateQueued before starting
-	// their goroutine. If Pause won the race in between, do not resurrect it.
-	if mt.removed || mt.view.State != StateQueued {
+	// their goroutine. If Pause won the race in between, do not resurrect it;
+	// and if a pause and another resume both did, that resume has a run of
+	// its own and this one is not wanted.
+	if mt.removed || mt.view.State != StateQueued || mt.gen != gen {
 		mt.mu.Unlock()
 		return
 	}
-	mt.gen++
-	gen := mt.gen
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	mt.cancel = cancel
-	mt.view.State = StateQueued
 	mt.view.Error = ""
 	mt.view.Speed, mt.view.Active = 0, 0
 	mt.view.RefreshUntil = time.Time{}
@@ -830,7 +850,7 @@ func (m *Manager) Resume(id string) bool {
 	mt.mu.Lock()
 	switch mt.view.State {
 	case StatePaused, StateError, StateNeedsRefresh, StateAwaitingRefresh:
-		mt.view.State = StateQueued
+		gen := mt.queueRun()
 		mt.view.Error = ""
 		mt.view.RefreshUntil = time.Time{}
 		mt.mu.Unlock()
@@ -838,7 +858,7 @@ func (m *Manager) Resume(id string) bool {
 		m.mu.Lock()
 		m.broadcastLocked()
 		m.mu.Unlock()
-		go m.start(mt, false)
+		go m.start(mt, gen, false)
 		return true
 	}
 	mt.mu.Unlock()
@@ -1038,7 +1058,7 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 		target.req.Referrer, target.view.Referrer = req.Referrer, req.Referrer
 	}
 	target.view.URL = req.URL
-	target.view.State = StateQueued
+	gen := target.queueRun()
 	target.view.RefreshUntil = time.Time{}
 	target.relinked = true
 	name := target.view.Filename
@@ -1048,7 +1068,7 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 	m.dirty.Store(true)
 
 	log.Printf("refreshed link for %s (%d bytes)", name, pr.Size)
-	go m.start(target, false)
+	go m.start(target, gen, false)
 	return true
 }
 
@@ -1103,14 +1123,14 @@ func (m *Manager) ChangeAddress(id, url string) error {
 		// There is progress to keep, and it is saved under the old address.
 		mt.relinked = true
 	}
-	mt.view.State = StateQueued
+	gen := mt.queueRun()
 	mt.view.Error = ""
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 	m.mu.Lock()
 	m.broadcastLocked()
 	m.mu.Unlock()
-	go m.start(mt, false)
+	go m.start(mt, gen, false)
 	return nil
 }
 
