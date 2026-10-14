@@ -1494,9 +1494,14 @@ document.getElementById("torrentFile").addEventListener("change", function (e) {
 });
 
 // Pasting links anywhere outside a text field opens the add dialog with them.
+// Not while another dialog is open: the add dialog would open underneath it,
+// out of sight, and take the focus.
 document.addEventListener("paste", function (e) {
   var a = document.activeElement;
   if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return;
+  var open = false;
+  document.querySelectorAll(".scrim").forEach(function (s) { if (!s.hidden && s.id !== "addDlg") open = true; });
+  if (open) return;
   var text = (e.clipboardData || window.clipboardData).getData("text");
   if (parseLinks(text).length) { e.preventDefault(); openAdd(text); }
 });

@@ -72,6 +72,10 @@ func TestDownloadsAtOnceShowsEveryLimitTheDaemonAllows(t *testing.T) {
 	runPage(t, "limit", "en")
 }
 
+func TestPastingALinkWithADialogOpenLeavesTheDialogAlone(t *testing.T) {
+	runPage(t, "paste", "en")
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -391,6 +395,44 @@ scenarios.limit = async function () {
   limit = 5;
   await poll();
   same(els.limit.value, "5", "the box should follow the daemon");
+};
+
+scenarios.paste = async function () {
+  await boot();
+  const clip = { clipboardData: { getData: () => "http://h/pasted.zip" } };
+
+  // With nothing open, a pasted link opens the Add dialog.
+  els.addBtn.focus();
+  let e = dispatch(els.addBtn, "paste", clip);
+  same(els.addDlg.hidden, false, "a pasted link should open the Add dialog");
+  same(els.addText.value, "http://h/pasted.zip", "the link should be in the box");
+  same(e.defaultPrevented, true, "the paste should be taken");
+  els.addDlg.hidden = true;
+  els.addText.value = "";
+
+  // With Settings open it belongs to Settings: nothing opens underneath it.
+  els.setDlg.hidden = false;
+  els.setSeed.focus();
+  e = dispatch(els.setSeed, "paste", clip);
+  same(els.addDlg.hidden, true, "the Add dialog opened underneath Settings");
+  same(els.addText.value, "", "a link went into a box nobody can see");
+  same(e.defaultPrevented, false, "a paste into Settings should be left alone");
+  els.setDlg.hidden = true;
+
+  // The same for the other dialogs.
+  for (const d of ["rmDlg", "addrDlg"]) {
+    els[d].hidden = false;
+    dispatch(els.setSeed, "paste", clip);
+    same(els.addDlg.hidden, true, "the Add dialog opened over " + d);
+    els[d].hidden = true;
+  }
+
+  // With the Add dialog itself open, a link pasted outside its box is added to it.
+  els.addDlg.hidden = false;
+  els.addText.value = "http://h/first.zip";
+  els.addBtn.focus();
+  dispatch(els.addBtn, "paste", clip);
+  same(els.addText.value, "http://h/first.zip\nhttp://h/pasted.zip", "a link pasted into the open Add dialog should join the others");
 };
 
 const run = scenarios[which];
