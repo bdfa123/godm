@@ -160,6 +160,17 @@ func loginHeader(name string) bool {
 	return false
 }
 
+// withoutLogin is a copy of headers without the ones loginHeader names.
+func withoutLogin(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if !loginHeader(k) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // loginMayGo reports whether a request to dest may carry the cookies and
 // tokens that came with the link at origin. The extension hands over the
 // browser's cookies for the page's own address, httpOnly ones included, and

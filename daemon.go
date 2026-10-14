@@ -1990,7 +1990,17 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	id, err := s.mgr.Add(req.job())
+	// One link at a time comes this way, from the extension, which can still
+	// hand a .torrent back to the browser if godm cannot get at it. So the
+	// file is fetched before the answer; a batch leaves it to the task.
+	job := req.job()
+	var id string
+	var err error
+	if isBTJob(job) && !isMagnet(job.URL) {
+		id, err = s.mgr.AddTorrentLink(r.Context(), job)
+	} else {
+		id, err = s.mgr.Add(job)
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

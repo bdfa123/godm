@@ -53,7 +53,13 @@ const (
 	// maxTorrentFile bounds a .torrent read from the network or the UI. The
 	// largest real ones are a few megabytes of piece hashes.
 	maxTorrentFile = 16 << 20
-	btTick         = 500 * time.Millisecond
+	// torrentFetchWait is how long a .torrent named by a web link may take to
+	// arrive while it is being added. The native host waits ten seconds for
+	// the daemon's answer (see newDaemonClient), and a tracker still silent by
+	// then has to be a refusal: an answer that never comes reads to the
+	// extension as a host that is down.
+	torrentFetchWait = 8 * time.Second
+	btTick           = 500 * time.Millisecond
 	// torrentReadahead is how far ahead of a player the pieces are pulled
 	// forward: enough to ride out a slow peer, not so much that it starves the
 	// spot being watched.
@@ -824,6 +830,34 @@ func (m *Manager) AddTorrentFile(data []byte, outDir string) (string, error) {
 	return id, err
 }
 
+// AddTorrentLink queues the torrent behind a web link to a .torrent, fetching
+// the file first rather than when the task runs. The browser hands such a link
+// over once it has cancelled its own copy, and a tracker that turns godm away
+// (a challenge page, a link that works once, a login cookie that does not
+// reach it) would leave a failed task and no .torrent anywhere; refused here,
+// the extension gives the link back to the browser. The task then goes by the
+// torrent itself, and keeps no login: it never fetches that link again.
+func (m *Manager) AddTorrentLink(ctx context.Context, req jobRequest) (string, error) {
+	if err := validateURL(req.URL); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, torrentFetchWait)
+	defer cancel()
+	link, err := m.fetchTorrentFile(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	req.URL, req.Kind = link, "bt"
+	req.Headers = withoutLogin(req.Headers)
+	id, err := m.Add(req)
+	if err != nil {
+		if ih, ok := magnetInfoHash(link); ok {
+			m.dropUnownedMetainfo(ih, nil)
+		}
+	}
+	return id, err
+}
+
 // dropUnownedMetainfo deletes the kept copy of a torrent's metainfo unless a
 // task other than mt holds that torrent. A copy saved for a task that is gone
 // would otherwise stay in the config folder for good: it is only ever
@@ -887,14 +921,16 @@ func (m *Manager) torrentSpec(ctx context.Context, mt *managedTask) (*torrent.To
 			return nil, err
 		}
 		// The list keeps showing the link the user gave; the job remembers
-		// the torrent, so a restart does not need that link again. Removing
-		// the task cleans up after the torrent its job names, so a removal
-		// that came while the file was arriving, when the job still named
-		// the web link, has left the copy for this to delete.
+		// the torrent, so a restart does not need that link again, nor the
+		// login that fetched it, which would otherwise stay in the saved
+		// list. Removing the task cleans up after the torrent its job names,
+		// so a removal that came while the file was arriving, when the job
+		// still named the web link, has left the copy for this to delete.
 		mt.mu.Lock()
 		removed := mt.removed
 		if !removed {
 			mt.req.URL = link
+			mt.req.Headers = withoutLogin(mt.req.Headers)
 		}
 		mt.mu.Unlock()
 		if removed {

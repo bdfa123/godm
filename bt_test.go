@@ -1105,6 +1105,121 @@ func TestTorrentLinkIsFetchedAndKept(t *testing.T) {
 	}
 }
 
+// trackerLink serves a .torrent the way a tracker does: at download.php, to
+// the logged-in cookie uid=1 only. It returns the link, and what the tracker
+// was last sent.
+func trackerLink(t *testing.T, mi *metainfo.MetaInfo) (string, func() (cookie, referer string)) {
+	var body bytes.Buffer
+	if err := mi.Write(&body); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var cookie, referer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		cookie, referer = r.Header.Get("Cookie"), r.Header.Get("Referer")
+		mu.Unlock()
+		if r.URL.Path != "/download.php" || r.Header.Get("Cookie") != "uid=1" {
+			http.Error(w, "log in first", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-bittorrent")
+		w.Write(body.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/download.php?id=42", func() (string, string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return cookie, referer
+	}
+}
+
+// jobOf is what a task will run, and save, as it stands.
+func jobOf(m *Manager, id string) jobRequest {
+	mt := taskOf(m, id)
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+	return mt.req
+}
+
+// The extension hands over a .torrent the browser started to download as the
+// link that was clicked, which on a tracker is seldom a path ending in .torrent
+// and only answers to the person's login. The kind is what makes it a torrent,
+// and the browser's cookie and referrer have to reach the fetch. The browser's
+// own copy is gone by then, so the file is fetched before the daemon answers:
+// a link godm cannot fetch is refused, and the extension gives it back to the
+// browser, rather than becoming a failed task and no .torrent anywhere.
+func TestATrackerLinkFromTheBrowserIsFetchedBeforeItIsAccepted(t *testing.T) {
+	mi := makeTorrent(t, t.TempDir(), "film.bin", 32<<10, tfile{data: makePayload(64 << 10)})
+	link, seen := trackerLink(t, mi)
+	m := newBTManager(t)
+	add := func(cookie string) *httptest.ResponseRecorder {
+		nr := nativeRequest{
+			Type: "download", URL: link, Kind: "bt",
+			Filename: "Some Film.torrent", Cookie: cookie, Referrer: "https://tracker.example/t/42",
+		}
+		b, _ := json.Marshal(nr.job(nr.URL, nr.Filename, nr.Cookie))
+		rec := httptest.NewRecorder()
+		(&server{mgr: m}).handleDownload(rec, httptest.NewRequest(http.MethodPost, "/api/download", bytes.NewReader(b)))
+		return rec
+	}
+
+	// The native host passes a 400 on as the daemon's refusal, in its words.
+	if rec := add(""); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "403") {
+		t.Fatalf("a .torrent the tracker would not give was answered %d %q", rec.Code, rec.Body.String())
+	}
+	if tasks := m.List(); len(tasks) != 0 {
+		t.Fatalf("a .torrent that could not be fetched left a task: %+v", tasks)
+	}
+
+	rec := add("uid=1")
+	var out struct {
+		OK bool   `json:"ok"`
+		ID string `json:"id"`
+	}
+	json.NewDecoder(rec.Body).Decode(&out)
+	if !out.OK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if cookie, referer := seen(); cookie != "uid=1" || referer != "https://tracker.example/t/42" {
+		t.Errorf("the tracker saw cookie %q and referer %q", cookie, referer)
+	}
+	job := jobOf(m, out.ID)
+	if !strings.HasPrefix(job.URL, "magnet:?xt=urn:btih:"+mi.HashInfoBytes().HexString()) {
+		t.Errorf("job URL %q, want the magnet link of the torrent that was fetched", job.URL)
+	}
+	if _, ok := job.Headers["Cookie"]; ok {
+		t.Errorf("the tracker login is kept with the task, which never needs it again: %v", job.Headers)
+	}
+	if v, _ := findTask(m, out.ID); v.Kind != "bt" {
+		t.Errorf("task kind %q, want bt", v.Kind)
+	}
+	// The file was kept, so the torrent loads without waiting for a peer.
+	waitLoaded(t, m, out.ID)
+}
+
+// A link to a .torrent queued with others is fetched when its task runs. Once
+// the job names the torrent itself, the login that fetched the file is dropped
+// from it, as the job is what goes into the saved list.
+func TestATorrentLinkFetchedByItsTaskKeepsNoLogin(t *testing.T) {
+	mi := makeTorrent(t, t.TempDir(), "film.bin", 32<<10, tfile{data: makePayload(64 << 10)})
+	link, _ := trackerLink(t, mi)
+	m := newBTManager(t)
+	nr := nativeRequest{Type: "download", URL: link, Kind: "bt", Cookie: "uid=1", UserAgent: "test-agent"}
+	id, err := m.Add(nr.job(nr.URL, "", nr.Cookie))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitLoaded(t, m, id)
+	job := jobOf(m, id)
+	if !strings.HasPrefix(job.URL, "magnet:") {
+		t.Fatalf("job URL %q, want the magnet link of the torrent that was fetched", job.URL)
+	}
+	if _, ok := job.Headers["Cookie"]; ok || job.Headers["User-Agent"] != "test-agent" {
+		t.Errorf("headers kept with the task: %v; want the login gone and the rest left", job.Headers)
+	}
+}
+
 func TestATorrentRemovedAsItsFileArrivesKeepsNoCopy(t *testing.T) {
 	src := t.TempDir()
 	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: makePayload(100 << 10)})
