@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -171,6 +172,12 @@ type managedTask struct {
 	// while it waits in the queue, or whose first request fails, never gets
 	// that far, and the run after it has to know all the same.
 	relinked bool
+	// ytFiles are the files yt-dlp has said it is writing for this download,
+	// one to a stream. Until the download is done they are all there is to go
+	// by when it is removed with its files: the task has no path of its own
+	// before then. Saved with the task, since yt-dlp says nothing a second
+	// time about a stream it finished in an earlier run.
+	ytFiles []string
 
 	lastRecv int64
 	lastAt   time.Time
@@ -224,15 +231,47 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 	t.view.Resumable = si.Resumable
 }
 
-func (t *managedTask) ytStart(gen int, si YTStart) {
+// ytStart names the task after what yt-dlp has begun on. file is the file it
+// announced with that, if it is one to remember; see ytOwnFile.
+func (t *managedTask) ytStart(gen int, si YTStart, file string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.gen != gen || si.Title == "" {
+	if t.gen != gen {
 		return
 	}
-	if t.view.Path == "" {
+	if si.Title != "" && t.view.Path == "" {
 		t.view.Filename = si.Title
 	}
+	if file != "" && !slices.Contains(t.ytFiles, file) {
+		t.ytFiles = append(t.ytFiles, file)
+	}
+}
+
+// ytOwnFile is file, which yt-dlp has just said it is about to write, as the
+// task remembers it for deleting later, or "" if it is not to be remembered.
+// yt-dlp's output is not all yt-dlp's own words, a title being the site's,
+// and deleting goes by this name. So it has to be inside the download's own
+// folder, and it must not be there yet: yt-dlp begins every stream under the
+// name with ".part" added, and a file already under the name itself is
+// somebody's finished file.
+func ytOwnFile(outDir, file string) string {
+	if file == "" {
+		return ""
+	}
+	dir, err := filepath.Abs(outDir)
+	if err != nil {
+		return ""
+	}
+	file = filepath.Clean(file)
+	// A name that is not spelled out in full fails here too: yt-dlp is given
+	// the folder in full and is not started in it.
+	if rel, err := filepath.Rel(dir, file); err != nil || !filepath.IsLocal(rel) {
+		return ""
+	}
+	if _, err := os.Lstat(file); err == nil {
+		return ""
+	}
+	return file
 }
 
 // ytProgress takes yt-dlp's own speed rather than working one out from the
@@ -606,7 +645,7 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 			// list of streams.
 			Format: ytdlpFormatFor(req.Variant),
 			OnStart: func(si YTStart) {
-				mt.ytStart(gen, si)
+				mt.ytStart(gen, si, ytOwnFile(outDir, si.File))
 				m.dirty.Store(true)
 			},
 			OnUpdate: func(p YTProgress) {
@@ -775,10 +814,11 @@ func (m *Manager) release() {
 func (m *Manager) afterRun(mt *managedTask) {
 	mt.mu.Lock()
 	mt.inFlight = false
-	del, path := mt.deleteAfter && len(mt.players) == 0, mt.view.Path
+	del, path, parts := mt.deleteAfter && len(mt.players) == 0, mt.view.Path, mt.ytFiles
 	mt.mu.Unlock()
 	if del {
 		deleteDownload(path)
+		deleteYTFiles(parts)
 	}
 }
 
@@ -805,6 +845,9 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		if haveFinalSize {
 			mt.view.Size = finalSize
 		}
+		// yt-dlp has put its streams together and cleared up after itself;
+		// from here on the download is the one file at its path.
+		mt.ytFiles = nil
 		mt.view.EndedAt = time.Now()
 		mt.view.Received = mt.view.Size
 		mt.view.Segments = nil
@@ -919,7 +962,7 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 
 	mt.mu.Lock()
 	mt.removed = true
-	cancel, path := mt.cancel, mt.view.Path
+	cancel, path, parts := mt.cancel, mt.view.Path, mt.ytFiles
 	busy := mt.inFlight || len(mt.players) > 0
 	bt := isBTJob(mt.req)
 	if deleteFile {
@@ -946,6 +989,7 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 		go m.forgetTorrent(mt, deleteFile)
 	} else if deleteFile && !busy {
 		deleteDownload(path)
+		deleteYTFiles(parts)
 	}
 	m.dirty.Store(true)
 	return true
@@ -985,25 +1029,7 @@ func deleteDownload(path string) {
 	if !ok {
 		return
 	}
-	if removeDownload(path) == nil {
-		release()
-		return
-	}
-	go func() {
-		defer release()
-		deadline := time.Now().Add(deleteFor)
-		for wait := 50 * time.Millisecond; ; wait = min(2*wait, time.Second) {
-			time.Sleep(wait)
-			err := removeDownload(path)
-			if err == nil {
-				return
-			}
-			if time.Now().After(deadline) {
-				log.Printf("removing a download: its file is still in use and was left where it is: %v", err)
-				return
-			}
-		}
-	}()
+	keepDeleting(func() error { return removeDownload(path) }, release)
 }
 
 // removeDownload is one try at deleting a download's file. The sidecar goes
@@ -1015,6 +1041,69 @@ func removeDownload(path string) error {
 	}
 	os.Remove(statePath(path))
 	return nil
+}
+
+// keepDeleting runs try, and if that fails runs it again and again in the
+// background for as long as deleteFor before giving up and saying so in the
+// log. after is called when it is over, either way.
+func keepDeleting(try func() error, after func()) {
+	if try() == nil {
+		after()
+		return
+	}
+	go func() {
+		defer after()
+		deadline := time.Now().Add(deleteFor)
+		for wait := 50 * time.Millisecond; ; wait = min(2*wait, time.Second) {
+			time.Sleep(wait)
+			err := try()
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Printf("removing a download: its file could not be deleted and was left where it is: %v", err)
+				return
+			}
+		}
+	}()
+}
+
+// deleteYTFiles deletes what an unfinished yt-dlp download leaves behind, given
+// the files yt-dlp said it was writing. Each is there under its own name if
+// that stream was finished and waiting to be merged, and otherwise as what
+// yt-dlp keeps while a stream arrives: the name with ".part" added, a ".ytdl"
+// of notes beside it, and one ".part-Frag" file to a piece when the stream
+// comes in fragments. The processes that wrote them have been ended by now,
+// but may not have let go of them yet, so this keeps trying as deleteDownload
+// does.
+func deleteYTFiles(files []string) {
+	if len(files) == 0 {
+		return
+	}
+	keepDeleting(func() error {
+		var failed error
+		remove := func(p string) {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && failed == nil {
+				failed = err
+			}
+		}
+		for _, f := range files {
+			remove(f)
+			remove(f + ".part")
+			remove(f + ".ytdl")
+			// The fragments are found by reading the folder, not by a
+			// pattern: a title is free to hold the characters a pattern
+			// gives a meaning to.
+			dir, name := filepath.Split(f)
+			entries, _ := os.ReadDir(dir)
+			for _, e := range entries {
+				if strings.HasPrefix(e.Name(), name+".part-Frag") {
+					remove(filepath.Join(dir, e.Name()))
+				}
+			}
+		}
+		return failed
+	}, func() {})
 }
 
 // RequestRefresh parks a task until the user fetches a new link for it, and
@@ -1317,6 +1406,8 @@ type savedTask struct {
 	// Relinked is the task's relinked: an address changed while godm was
 	// closed, or just before it, is still a changed address afterwards.
 	Relinked bool `json:"relinked,omitempty"`
+	// YTFiles is the task's ytFiles.
+	YTFiles []string `json:"yt_files,omitempty"`
 }
 
 type savedList struct {
@@ -1360,7 +1451,10 @@ func (m *Manager) save() error {
 		t.mu.Lock()
 		v := t.view
 		v.Segments, v.Speed, v.Active = nil, 0, 0
-		list.Tasks = append(list.Tasks, savedTask{View: v, Req: t.req, OutDir: t.outDir, Relinked: t.relinked})
+		list.Tasks = append(list.Tasks, savedTask{
+			View: v, Req: t.req, OutDir: t.outDir, Relinked: t.relinked,
+			YTFiles: slices.Clone(t.ytFiles),
+		})
 		t.mu.Unlock()
 	}
 	m.mu.Unlock()
@@ -1572,7 +1666,10 @@ func (m *Manager) restore(list savedList) {
 		v.Conns = st.Req.Connections
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit
-		mt := &managedTask{view: v, req: st.Req, outDir: st.OutDir, relinked: st.Relinked}
+		mt := &managedTask{
+			view: v, req: st.Req, outDir: st.OutDir,
+			relinked: st.Relinked, ytFiles: st.YTFiles,
+		}
 		mt.connLimit.Store(int32(st.Req.Connections))
 		mt.speed.SetRate(st.Req.SpeedLimit)
 		m.tasks[v.ID] = mt
