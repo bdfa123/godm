@@ -966,7 +966,7 @@ func (s *btStorage) OpenTorrent(ctx context.Context, info *metainfo.Info, ih met
 		return storage.TorrentImpl{}, err
 	}
 	name := filepath.Base(root)
-	paths := torrentFilePaths(info)
+	paths := torrentPathsAt(root, info)
 	index := map[string]int{}
 	for i, fi := range info.UpvertedFiles() {
 		if _, ok := index[torrentFileKey(&fi)]; !ok {
@@ -1082,9 +1082,10 @@ func (t *managedTask) claimTorrentRoot(info *metainfo.Info, ih metainfo.Hash) (s
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	folder := !torrentIsOneFile(info)
 	for n := 0; n < 10000; n++ {
 		cand := filepath.Join(dir, name)
-		if n > 0 && info.IsDir() {
+		if n > 0 && folder {
 			cand = fmt.Sprintf("%s (%d)", cand, n)
 		} else if n > 0 {
 			cand = numberedName(cand, n)
@@ -1097,7 +1098,7 @@ func (t *managedTask) claimTorrentRoot(info *metainfo.Info, ih metainfo.Hash) (s
 			continue
 		}
 		var err error
-		if info.IsDir() {
+		if folder {
 			err = os.Mkdir(cand, 0o755)
 		} else {
 			var f *os.File
@@ -1118,6 +1119,26 @@ func (t *managedTask) claimTorrentRoot(info *metainfo.Info, ih metainfo.Hash) (s
 		return cand, nil
 	}
 	return "", fmt.Errorf("no free name for %s in %s", name, dir)
+}
+
+// torrentIsOneFile is true for a torrent that is one file under the torrent's
+// own name, rather than a folder of files. The library's Info.IsDir is not
+// the one to ask. For a torrent with a v2 half it answers from the v2 file
+// tree, which has the same shape for one file as for a folder holding one
+// file, a single entry at the top, and it calls both a folder. The v1 half,
+// which every torrent godm takes has, tells them apart: a folder lists its
+// files there, and one file has only its length. Going by IsDir, a hybrid of
+// one file, which is what libtorrent 2 makes by default, landed in a folder
+// named after the file with the file inside it, where no other client puts
+// it.
+func torrentIsOneFile(info *metainfo.Info) bool {
+	if len(info.Files) != 0 {
+		return false
+	}
+	// The tree is what the library goes by for everything else, so it has
+	// to agree: one file, at the top.
+	files := info.UpvertedFiles()
+	return len(files) == 1 && len(files[0].BestPath()) <= 1
 }
 
 // torrentRelPath is where a file would sit inside the torrent's folder, made
@@ -1143,9 +1164,34 @@ func torrentRelPath(fi *metainfo.FileInfo) []string {
 // file on disk that each overwrites, and the torrent would still count as
 // finished. The later one gets a number, as any download does whose name is
 // taken. A folder that comes in two cases is one folder, as NTFS has it, spelt
-// as it first came. Writing, playing and deleting all go by this, so they
-// always agree on where a file is.
+// as it first came. A torrent that is one file has no folder: its file is the
+// claimed name itself, which is the empty path here. Writing, playing and
+// deleting all go by this, through torrentPathsAt, so they always agree on
+// where a file is.
 func torrentFilePaths(info *metainfo.Info) [][]string {
+	if torrentIsOneFile(info) {
+		return [][]string{{}}
+	}
+	return torrentFolderPaths(info)
+}
+
+// torrentPathsAt is torrentFilePaths for a torrent whose name is claimed at
+// root. The two differ for one kind of task only: a hybrid of one file begun
+// by godm 0.1.1 or earlier, which read it as the library does, claimed a
+// folder and put the file in it. Such a task goes on as it began, since the
+// folder is what it holds and its finished pieces are on record there.
+func torrentPathsAt(root string, info *metainfo.Info) [][]string {
+	if torrentIsOneFile(info) && info.IsDir() {
+		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
+			return torrentFolderPaths(info)
+		}
+	}
+	return torrentFilePaths(info)
+}
+
+// torrentFolderPaths places every file of a torrent inside its folder, by the
+// path the torrent gives it.
+func torrentFolderPaths(info *metainfo.Info) [][]string {
 	files := map[string]bool{}  // every file placed, by its folded path
 	dirs := map[string]string{} // every folder, by its folded path, as spelt
 	var out [][]string
@@ -1239,7 +1285,7 @@ func (t *managedTask) torrentDetails(info *metainfo.Info, size int64) {
 	t.view.Size = size
 	t.view.Media = ""
 	if i, ok := torrentMediaIndex(info); ok {
-		t.view.Media = path.Join(append([]string{filepath.Base(root)}, torrentFilePaths(info)[i]...)...)
+		t.view.Media = path.Join(append([]string{filepath.Base(root)}, torrentPathsAt(root, info)[i]...)...)
 	}
 }
 
@@ -1273,11 +1319,11 @@ func deleteTorrentFiles(root string, info *metainfo.Info) {
 		} else {
 			files = []string{root}
 		}
-	} else if !info.IsDir() {
+	} else if paths := torrentPathsAt(root, info); len(paths) == 1 && len(paths[0]) == 0 {
 		files = []string{root}
 	} else {
 		seen := map[string]bool{}
-		for _, rel := range torrentFilePaths(info) {
+		for _, rel := range paths {
 			p := filepath.Join(append([]string{root}, rel...)...)
 			files = append(files, p)
 			for d := filepath.Dir(p); len(d) > len(root); d = filepath.Dir(d) {

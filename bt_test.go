@@ -19,6 +19,7 @@ import (
 	g "github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/merkle"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"go.etcd.io/bbolt"
@@ -385,6 +386,216 @@ func TestTorrentFilesThatShareANameOnNTFSGetTheirOwn(t *testing.T) {
 		t.Fatal("remove refused")
 	}
 	waitFor(t, 10*time.Second, "the torrent's folder to go", func() bool { return !pathExists(v.Path) })
+}
+
+// hybridOf turns a single-file torrent into the v1+v2 hybrid libtorrent 2
+// makes by default: the v1 fields as they were, plus the v2 file tree, whose
+// one entry is the file under its own name, and the piece layer a .torrent
+// carries for a file of more than one piece.
+func hybridOf(t *testing.T, mi *metainfo.MetaInfo, data []byte) *metainfo.MetaInfo {
+	t.Helper()
+	info, err := mi.UnmarshalInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hashes [][32]byte
+	var layer []byte
+	for off := 0; off < len(data); off += int(info.PieceLength) {
+		h := merkle.NewHash()
+		h.Write(data[off:min(off+int(info.PieceLength), len(data))])
+		var s [32]byte
+		if len(data) > int(info.PieceLength) {
+			h.SumMinLength(s[:0], int(info.PieceLength))
+		} else {
+			h.Sum(s[:0]) // a file of one piece is hashed as it is, unpadded
+		}
+		hashes, layer = append(hashes, s), append(layer, s[:]...)
+	}
+	root := merkle.RootWithPadHash(hashes, metainfo.HashForPiecePad(info.PieceLength))
+	info.MetaVersion = 2
+	info.FileTree = metainfo.FileTree{Dir: map[string]metainfo.FileTree{
+		info.Name: {File: metainfo.FileTreeFile{Length: info.Length, PiecesRoot: string(root[:])}},
+	}}
+	out := &metainfo.MetaInfo{}
+	// By its address: the tree encodes itself, through a pointer.
+	if out.InfoBytes, err = bencode.Marshal(&info); err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) > 1 {
+		out.PieceLayers = map[string]string{string(root[:]): string(layer)}
+	}
+	return out
+}
+
+// A v2 file tree has the same shape for one file as for a folder holding one
+// file, and the library reads both as a folder. What tells them apart is the
+// v1 half of the torrent, which lists a folder's files and gives one file
+// only its length.
+func TestAHybridTorrentOfOneFileIsWrittenAsThatFile(t *testing.T) {
+	const length, pieceLen, chunk = 100 << 10, 32 << 10, 16 << 10
+	ih := metainfo.NewHashFromHex("0123456789abcdef0123456789abcdef01234567")
+	leaf := metainfo.FileTree{File: metainfo.FileTreeFile{Length: length}}
+	in := func(name string, sub metainfo.FileTree) metainfo.FileTree {
+		return metainfo.FileTree{Dir: map[string]metainfo.FileTree{name: sub}}
+	}
+	listed := func(p ...string) []metainfo.FileInfo {
+		return []metainfo.FileInfo{{Path: p, Length: length}}
+	}
+	hybridFile := metainfo.Info{Name: "film.mkv", Length: length, MetaVersion: 2, FileTree: in("film.mkv", leaf)}
+	pc, err := openBTCompletion(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	// place opens the torrent for a task, writes the start of its file, and
+	// checks that writing, playing and deleting all find it at want.
+	place := func(what string, info metainfo.Info, mt *managedTask, want string) {
+		t.Helper()
+		info.PieceLength, info.Pieces = pieceLen, make([]byte, 4*20)
+		st := &btStorage{mt: mt, pc: pc, slog: slog.New(slog.NewTextHandler(io.Discard, nil)), failed: make(chan error, 1)}
+		impl, err := st.OpenTorrent(t.Context(), &info, ih)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if _, err := impl.Piece(info.Piece(0)).WriteAt(make([]byte, chunk), 0); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		file := filepath.Join(mt.outDir, filepath.FromSlash(want))
+		if fi, err := os.Stat(file); err != nil || !fi.Mode().IsRegular() || fi.Size() != chunk {
+			t.Errorf("%s: no file of %d bytes at %s (%v); the download folder holds %q", what, chunk, want, err, treeOf(mt.outDir))
+		}
+		mt.torrentDetails(&info, length)
+		v := mt.snapshot()
+		if wantRoot := filepath.Join(mt.outDir, strings.Split(want, "/")[0]); v.Path != wantRoot || v.Filename != filepath.Base(wantRoot) {
+			t.Errorf("%s: the task shows path %q, name %q; want %q", what, v.Path, v.Filename, wantRoot)
+		}
+		if p, err := torrentMediaPath(v); v.Media != want || err != nil || p != file {
+			t.Errorf("%s: media %q plays %q (%v), want %q", what, v.Media, p, err, want)
+		}
+		if err := impl.Close(); err != nil {
+			t.Fatal(err)
+		}
+		deleteTorrentFiles(v.Path, &info)
+		if left := treeOf(mt.outDir); len(left) != 0 {
+			t.Errorf("%s: deleting it left %q", what, left)
+		}
+	}
+	for _, c := range []struct {
+		what string
+		info metainfo.Info
+		want string // where the file goes in the download folder
+	}{
+		{"a hybrid of one file", hybridFile, "film.mkv"},
+		{"a hybrid of a folder holding one file",
+			metainfo.Info{Name: "Film", Files: listed("film.mkv"), MetaVersion: 2, FileTree: in("film.mkv", leaf)}, "Film/film.mkv"},
+		{"a hybrid of a folder holding one file of its own name",
+			metainfo.Info{Name: "film.mkv", Files: listed("film.mkv"), MetaVersion: 2, FileTree: in("film.mkv", leaf)}, "film.mkv/film.mkv"},
+		{"a hybrid whose one file is in a folder of its own",
+			metainfo.Info{Name: "Film", Files: listed("Disc", "film.mkv"), MetaVersion: 2, FileTree: in("Disc", in("film.mkv", leaf))}, "Film/Disc/film.mkv"},
+		{"a v1 torrent of one file", metainfo.Info{Name: "film.mkv", Length: length}, "film.mkv"},
+		{"a v1 torrent of a folder holding one file", metainfo.Info{Name: "Film", Files: listed("film.mkv")}, "Film/film.mkv"},
+	} {
+		place(c.what, c.info, &managedTask{outDir: t.TempDir()}, c.want)
+	}
+
+	// godm 0.1.1 and earlier made a folder for such a torrent and put the
+	// file in it. One begun that way goes on that way: its pieces are on
+	// record where they are, and the folder is what the task has claimed.
+	old := &managedTask{outDir: t.TempDir()}
+	old.view.Path = filepath.Join(old.outDir, "film.mkv")
+	if err := os.Mkdir(old.view.Path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	place("a hybrid of one file begun by an earlier godm", hybridFile, old, "film.mkv/film.mkv")
+
+	// And from a swarm: the name is taken, so it gets a number as a file
+	// does, before the extension, and the player and the delete follow it.
+	var mu sync.Mutex
+	var opened []string
+	oldPlayer := launchPlayer
+	launchPlayer = func(target, title string) error {
+		mu.Lock()
+		opened = append(opened, target)
+		mu.Unlock()
+		return nil
+	}
+	defer func() { launchPlayer = oldPlayer }()
+
+	src := t.TempDir()
+	film := makePayload(600<<10 + 123)
+	// The library keeps such a torrent's file in a folder of the same name,
+	// so that is where the seeder has it.
+	mi := hybridOf(t, makeTorrent(t, filepath.Join(src, "film.mkv"), "film.mkv", pieceLen, tfile{data: film}), film)
+	if info, err := mi.UnmarshalInfo(); err != nil || !info.HasV1() || !info.HasV2() || !info.IsDir() {
+		t.Fatalf("the torrent made here is not the hybrid the library reads as a folder: %+v, %v", info, err)
+	}
+	seed := newSeeder(t, src, mi, 0)
+
+	m := newBTManager(t)
+	s, api := btAPI(t, m)
+	theirs := filepath.Join(m.OutDir(), "film.mkv")
+	if err := os.WriteFile(theirs, []byte("someone else's file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var body bytes.Buffer
+	if err := mi.Write(&body); err != nil {
+		t.Fatal(err)
+	}
+	id, err := m.AddTorrentFile(body.Bytes(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitLoaded(t, m, id).AddClientPeer(seed.cl)
+	waitFor(t, 30*time.Second, "the download", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+	if want := filepath.Join(m.OutDir(), "film (1).mkv"); v.Path != want || v.Filename != "film (1).mkv" || v.Media != "film (1).mkv" {
+		t.Errorf("path %q, name %q, media %q; want the file %q", v.Path, v.Filename, v.Media, want)
+	}
+	if got, err := os.ReadFile(v.Path); err != nil || sum(got) != sum(film) {
+		t.Fatalf("%s is not the seeded film (%v); the download folder holds %q", v.Path, err, treeOf(m.OutDir()))
+	}
+	if got, _ := os.ReadFile(theirs); string(got) != "someone else's file" {
+		t.Fatal("the torrent wrote into a file it did not create")
+	}
+	resp, err := http.DefaultClient.Do(bearer(http.MethodGet, api.URL+"/stream/"+id+"/"+url.PathEscape(v.Filename), nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamed, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || sum(streamed) != sum(film) {
+		t.Errorf("the stream of the finished film: status %d, %d bytes", resp.StatusCode, len(streamed))
+	}
+	rec := httptest.NewRecorder()
+	s.handlePlay(rec, httptest.NewRequest(http.MethodPost, "/api/play?id="+id, nil))
+	mu.Lock()
+	if len(opened) != 1 || opened[0] != v.Path {
+		t.Errorf("play opened %q (%s), want %q", opened, rec.Body.String(), v.Path)
+	}
+	mu.Unlock()
+	if !m.Remove(id, true) {
+		t.Fatal("remove refused")
+	}
+	waitFor(t, 10*time.Second, "the film to be deleted", func() bool { return !pathExists(v.Path) })
+	if left := treeOf(m.OutDir()); len(left) != 1 || left[0] != "film.mkv" {
+		t.Errorf("after the removal the download folder holds %q, want only the file that was there before", left)
+	}
+}
+
+// treeOf lists everything under dir, folders with a trailing slash.
+func treeOf(dir string) (out []string) {
+	filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || p == dir {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if rel = filepath.ToSlash(rel); d.IsDir() {
+			rel += "/"
+		}
+		out = append(out, rel)
+		return nil
+	})
+	return out
 }
 
 func TestTorrentFilesAreWrittenWithPlainFileIO(t *testing.T) {
