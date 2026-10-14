@@ -1023,7 +1023,39 @@ function card(t) {
     "</div></div>";
 }
 
+// A click is a press and a release on the same element, and a list rebuilt
+// between the two leaves nothing for the browser to click: the button the
+// pointer went down on is gone. Text being selected goes the same way. So a
+// poll that lands while the pointer is down in the list or the tabs, or while
+// text in the list is selected, only notes that there is more to show, and it
+// is shown once the press is over or the selection is. Neither is allowed to
+// hold the list for ever: a release that never arrives, or a selection left
+// alone, stops counting after a while.
+var HOLD = { down: false, downAt: 0, selAt: 0, pending: false };
+function listHeld() {
+  var now = performance.now();
+  if (HOLD.down && now - HOLD.downAt < 10000) return true;
+  var s = window.getSelection();
+  var list = document.getElementById("list");
+  return !!(s && s.rangeCount && !s.isCollapsed && now - HOLD.selAt < 30000 &&
+    (list.contains(s.anchorNode) || list.contains(s.focusNode)));
+}
+function showHeld() { if (HOLD.pending && !listHeld()) render(); }
+document.addEventListener("mousedown", function (e) {
+  if (e.target.closest && e.target.closest("#list, #tabs")) { HOLD.down = true; HOLD.downAt = performance.now(); }
+}, true);
+// The click that goes with a release is delivered after it, so what was held
+// back is shown a moment later, not in the release itself.
+function pressOver() {
+  if (!HOLD.down) return;
+  setTimeout(function () { HOLD.down = false; showHeld(); }, 0);
+}
+document.addEventListener("mouseup", pressOver, true);
+document.addEventListener("dragend", pressOver, true);
+document.addEventListener("selectionchange", function () { HOLD.selAt = performance.now(); showHeld(); });
+
 function render() {
+  HOLD.pending = false;
   var tasks = S.tasks, running = 0, speed = 0, queued = 0;
   tasks.forEach(function (t) {
     if (t.state === "running") { running++; speed += t.speed || 0; }
@@ -1115,7 +1147,7 @@ function poll() {
       S.speed = d.speed_limit;
       sp.innerHTML = speedOptions(S.speed);
     }
-    render();
+    if (listHeld()) HOLD.pending = true; else render();
   }).catch(function () {
     S.online = false;
     document.getElementById("dot").classList.add("off");
@@ -1150,6 +1182,9 @@ document.addEventListener("keydown", function (e) {
 document.getElementById("list").addEventListener("click", function (e) {
   var b = e.target.closest("[data-act]");
   if (!b) return;
+  // Choosing to act on a card ends the selection that would keep it from
+  // showing the result.
+  window.getSelection().removeAllRanges();
   var id = b.getAttribute("data-id"), act = b.getAttribute("data-act");
   var t = S.tasks.filter(function (x) { return x.id === id; })[0];
   if (act === "play") {
