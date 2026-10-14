@@ -27,10 +27,24 @@ type twoLinks struct {
 	other  *slowServer // what "/b/" serves when it is not the same file
 	refuse atomic.Bool
 	wrong  atomic.Bool
+
+	// When probing is set, the first request that asks "/b/" what it is says
+	// so there and is not answered until letGo is closed, which lets a test
+	// act while a link is being looked at.
+	probing, letGo chan struct{}
+	held           atomic.Bool
 }
 
 func (h *twoLinks) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/b/") {
+		if h.probing != nil && r.Header.Get("Range") == "bytes=0-0" && h.held.CompareAndSwap(false, true) {
+			close(h.probing)
+			select {
+			case <-h.letGo:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if h.refuse.Load() {
 			http.Error(w, "not now", http.StatusBadRequest)
 			return
@@ -275,6 +289,63 @@ func TestAWrongAddressIsStillRefusedAfterWaitingInTheQueue(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(before.Path); sum(after) != sum(partial) {
 		t.Error("the partial file was written to")
+	}
+}
+
+// Matching a new download to the one that waits for its link takes a request
+// to the new link, and the user can do anything in that time. If what they do
+// is remove the waiting download, the new one is all there is: it must go on
+// as a download of its own, not be handed to a task that is no longer there.
+func TestRemovingTheWaitingDownloadWhileItsLinkIsLookedAtKeepsTheNewOne(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		deleteFile bool
+	}{
+		{"removed from the list", false},
+		{"removed with its file", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, src := newTwoLinks(t)
+			h.probing, h.letGo = make(chan struct{}), make(chan struct{})
+			dir := t.TempDir()
+			m := NewManager(dir, 2)
+			m.announce = nil
+			m.openURL = func(string) error { return nil }
+			old, _ := pausedPartway(t, m, src.URL)
+			if _, err := m.RequestRefresh(old); err != nil {
+				t.Fatal(err)
+			}
+
+			fresh, err := m.Add(jobRequest{URL: src.URL + "/b/film.bin", Connections: 2})
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-h.probing:
+			case <-time.After(20 * time.Second):
+				t.Fatal("the new link was never looked at")
+			}
+			if !m.Remove(old, c.deleteFile) {
+				t.Fatal("the waiting download could not be removed")
+			}
+			close(h.letGo)
+
+			waitFor(t, 30*time.Second, "the new download to finish or be lost", func() bool {
+				v, listed := findTask(m, fresh)
+				return !listed || v.State == StateDone
+			})
+			v, listed := findTask(m, fresh)
+			if !listed {
+				t.Fatalf("the new download vanished from the list along with the one it was matched to; "+
+					"the list is now %v and nothing is downloading", m.List())
+			}
+			if got, _ := os.ReadFile(v.Path); sum(got) != sum(h.file.payload) {
+				t.Errorf("%s does not match the source", filepath.Base(v.Path))
+			}
+			if _, listed := findTask(m, old); listed {
+				t.Error("the removed download is back in the list")
+			}
+		})
 	}
 }
 

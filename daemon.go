@@ -1015,10 +1015,20 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 		return false
 	}
 
+	// The probe took a while and the user may have removed either download
+	// meanwhile. Remove takes a task off the list first and leaves its state
+	// alone, so the state says nothing about it; the list does, and holding
+	// the list's lock from the check to the new download leaving it means a
+	// removal comes wholly before the adoption or wholly after. Without the
+	// waiting task the new download is all there is and carries on as itself.
+	// Without the new one there is no fresh link: the user took it back.
+	m.mu.Lock()
 	target.mu.Lock()
-	if target.view.State != StateAwaitingRefresh {
+	if m.tasks[target.view.ID] != target || m.tasks[newID] != nt ||
+		target.view.State != StateAwaitingRefresh { // or another download adopted it first
 		target.mu.Unlock()
-		return false // another download adopted it first
+		m.mu.Unlock()
+		return false
 	}
 	target.req.URL = req.URL
 	if len(req.Headers) > 0 {
@@ -1033,8 +1043,6 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 	target.relinked = true
 	name := target.view.Filename
 	target.mu.Unlock()
-
-	m.mu.Lock()
 	m.detachLocked(newID)
 	m.mu.Unlock()
 	m.dirty.Store(true)
