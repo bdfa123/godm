@@ -166,8 +166,14 @@ type Segment struct {
 	note  atomic.Value // string: why it is retrying or failed
 	eof   atomic.Bool  // a stream of unknown length has ended
 
-	// mu is held while a chunk is written and counted, so a split sees the
-	// exact offset and the worker never writes past a shortened end.
+	// held is what its connection has read past done and not yet written (see
+	// coalesceSize). Those bytes are as good as on disk for a split: they are
+	// what the server already sent for this range.
+	held atomic.Int64
+
+	// mu is held while bytes read are taken into the range and while they are
+	// counted as written, so a split sees the exact offset, done and held
+	// together, and the worker never takes bytes past a shortened end.
 	mu   sync.Mutex
 	busy bool // owned by a worker; guarded by task.segMu
 }
@@ -191,12 +197,19 @@ func (s *Segment) complete() bool {
 	return s.Start+s.done.Load() > e
 }
 
+// readTo is the first byte its connection has not read yet: the bytes on
+// disk and those it holds.
+func (s *Segment) readTo() int64 { return s.Start + s.done.Load() + s.held.Load() }
+
+// remaining is what is left for its connection to read. It has to agree with
+// the splits, which go by the same count, or the supervisor would keep
+// starting connections for a range none of them can take a piece of.
 func (s *Segment) remaining() int64 {
 	e := s.end.Load()
 	if e < 0 {
 		return math.MaxInt64
 	}
-	return e + 1 - s.Start - s.done.Load()
+	return e + 1 - s.readTo()
 }
 
 func (s *Segment) set(st SegmentState, note string) {
@@ -205,8 +218,10 @@ func (s *Segment) set(st SegmentState, note string) {
 }
 
 // splitInHalf gives the back half of the unfinished part of s to a new
-// segment. Holding s.mu means its worker is between writes, so the offset is
-// exact and the worker will stop at the new end.
+// segment. Holding s.mu means its worker is between reads, so the offset it
+// has reached is exact and it will stop at the new end. The bytes it holds
+// stay its own: cutting into them would only have another connection fetch
+// them again.
 func (s *Segment) splitInHalf(minPiece int64) *Segment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,7 +229,7 @@ func (s *Segment) splitInHalf(minPiece int64) *Segment {
 	if end < 0 {
 		return nil
 	}
-	cur := s.Start + s.done.Load()
+	cur := s.readTo()
 	rem := end - cur + 1
 	if rem < 2*minPiece {
 		return nil
@@ -236,7 +251,7 @@ func (s *Segment) splitAt(at, minKeep, minGive int64) *Segment {
 	if end < 0 {
 		return nil
 	}
-	if cur := s.Start + s.done.Load(); at-cur < minKeep || end-at+1 < minGive {
+	if cur := s.readTo(); at-cur < minKeep || end-at+1 < minGive {
 		return nil
 	}
 	ns := newSegment(at, end)
@@ -1024,7 +1039,7 @@ func (t *task) streamClaimLocked(f, g, limit int64, dry bool) (*Segment, bool) {
 		if e < g || s.complete() {
 			continue
 		}
-		cur := s.Start + s.done.Load()
+		cur := s.readTo()
 		var at int64
 		// A piece is normally worth a connection only from MinSplit up, but
 		// not when the player is waiting on exactly these bytes: the index of
@@ -1082,11 +1097,29 @@ func (t *task) shouldMove(seg *Segment) bool {
 	lead := g + t.opts.StreamPiece*int64(t.limit())
 	// A connection just short of the player is the one about to deliver its
 	// bytes; moving it would only cost a reconnect and hand the range back.
-	if cur := seg.Start + seg.done.Load(); cur >= g-t.opts.MinSplit && cur < lead {
+	if cur := seg.readTo(); cur >= g-t.opts.MinSplit && cur < lead {
 		return false
 	}
 	_, found := t.streamClaimLocked(f, g, lead, true)
 	return found
+}
+
+// playerWants reports that a player waits on a byte in what is left of seg's
+// range, from the first one not on disk to its end: one its connection holds
+// or is about to read. Gathering those up for a large write would keep the
+// player waiting with them, so while it waits they are written as they come.
+// A byte far ahead in the range is only wanted until the range is cut there,
+// which shouldMove sees to within moveCheckEvery.
+func (t *task) playerWants(seg *Segment) bool {
+	f, ok := t.focus()
+	if !ok {
+		return false
+	}
+	t.segMu.Lock()
+	g := t.firstMissingLocked(f)
+	t.segMu.Unlock()
+	e := seg.end.Load()
+	return g >= seg.Start+seg.done.Load() && (e < 0 || g <= e)
 }
 
 // playerWaitsOn reports that the next bytes seg fetches are the first ones a
@@ -1256,84 +1289,164 @@ func (t *task) trySegment(ctx context.Context, seg *Segment) error {
 	// whole download with it.
 	body := newStallGuard(resp.Body, t.opts.StallTimeout, cancel)
 	defer body.stop()
-	limits := rateLimits(t.opts.Limiters)
-	buf := make([]byte, readBufSize)
-	var looked time.Time
-	for {
-		if t.yieldSlot() {
-			return errYield
-		}
-		if now := time.Now(); now.Sub(looked) >= moveCheckEvery {
-			looked = now
-			if t.shouldMove(seg) {
-				return errMove
-			}
-		}
-		n, rerr := body.Read(buf[:limits.chunk(len(buf))])
-		if n > 0 {
-			reached, werr := t.store(seg, buf[:n], &offset)
-			if werr != nil {
-				return werr
-			}
-			// Pay for the bytes once they are on disk: a player waiting on
-			// them has them now, and the wait falls on the next read. It is
-			// paid under the download's context: when the guard reports a
-			// stall along with these bytes it has cancelled the request's,
-			// and the stall, which is retried, would come out as a
-			// cancellation, which ends the download.
-			if limits.limited() {
-				if err := limits.wait(ctx, n, t.playerWaitsOn(seg)); err != nil {
-					return err
-				}
-			}
-			if reached {
-				// Also the normal exit when a split shortened this range: the
-				// rest of the response belongs to another connection now.
-				return nil
-			}
-		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			return rerr
-		}
+	g := newGather(offset, end)
+	eof, err := t.receive(ctx, seg, body, g)
+	// Whatever ended the response, the bytes that came before it are good, and
+	// the next attempt, or whichever connection gets the rest of the range,
+	// carries on after them. Only a failed write loses them, and that ends the
+	// download anyway.
+	if werr := t.flush(seg, g); werr != nil {
+		return werr
+	}
+	if err != nil || !eof {
+		return err
 	}
 	e := seg.end.Load()
 	if e < 0 {
 		seg.eof.Store(true)
 		return nil
 	}
-	if offset <= e {
-		return fmt.Errorf("short read: segment stopped at %d, wanted %d", offset, e)
+	if g.off <= e {
+		return fmt.Errorf("short read: segment stopped at %d, wanted %d", g.off, e)
 	}
 	return nil
 }
 
-// store writes one chunk into the segment's range. It runs under seg.mu, so a
-// concurrent split lands either before (the chunk is clipped to the new end)
-// or after (the split sees the exact offset). reached reports the range is
-// complete.
-func (t *task) store(seg *Segment, b []byte, offset *int64) (reached bool, err error) {
+// coalesceSize is how much a connection gathers before it writes. A sparse
+// file is given its space as its writes reach the disk, and eight connections
+// each writing what TLS hands over, some 16 KB a read, can leave a big file
+// in more fragments than NTFS can keep track of for one file, and slow to
+// read back from a hard disk, whenever the cache does not get to gather the
+// writes up first. A megabyte at a time bounds that at one fragment a
+// megabyte, and makes a sixty-fourth of the writes.
+const coalesceSize = 1 << 20
+
+// coalesceFor is the longest bytes wait to be written, so that the progress,
+// the speed and the sidecar still follow a slow connection.
+var coalesceFor = 500 * time.Millisecond
+
+// gather is what one connection has read and not yet written: buf[:n], which
+// goes at off in the file.
+type gather struct {
+	buf   []byte
+	n     int
+	off   int64
+	since time.Time // when buf[0] arrived
+}
+
+// newGather makes the buffer for a response from off, whose range ends at
+// end, or has no end when that is negative. A range smaller than a full
+// buffer gets one its size, so the short pieces handed out near a player
+// cost no more memory than they fill.
+func newGather(off, end int64) *gather {
+	size := int64(coalesceSize)
+	if end >= 0 && end-off+1 < size {
+		size = max(end-off+1, 1)
+	}
+	return &gather{buf: make([]byte, size), off: off}
+}
+
+// receive reads a response into seg's range, through g, until the range is
+// complete or the response ends (eof), or something stops the connection
+// first. Every way out leaves what was read in g, for the caller to write.
+func (t *task) receive(ctx context.Context, seg *Segment, body io.Reader, g *gather) (eof bool, err error) {
+	limits := rateLimits(t.opts.Limiters)
+	var looked time.Time
+	for {
+		// Before anything else, so that a connection holding what a player
+		// waits for hands it over instead of being moved away from it.
+		if g.n > 0 && (time.Since(g.since) >= coalesceFor || t.playerWants(seg)) {
+			if err := t.flush(seg, g); err != nil {
+				return false, err
+			}
+		}
+		if t.yieldSlot() {
+			return false, errYield
+		}
+		if now := time.Now(); now.Sub(looked) >= moveCheckEvery {
+			looked = now
+			if t.shouldMove(seg) {
+				return false, errMove
+			}
+		}
+		room := g.buf[g.n:]
+		if len(room) > readBufSize {
+			room = room[:readBufSize]
+		}
+		n, rerr := body.Read(room[:limits.chunk(len(room))])
+		if n > 0 {
+			reached := t.take(seg, g, n)
+			if reached || g.n == len(g.buf) || t.playerWants(seg) {
+				if err := t.flush(seg, g); err != nil {
+					return false, err
+				}
+			}
+			// Pay for the bytes once they are taken: a player waiting on
+			// them has them on disk now, and the wait falls on the next read.
+			// It is paid under the download's context: when the guard reports
+			// a stall along with these bytes it has cancelled the request's,
+			// and the stall, which is retried, would come out as a
+			// cancellation, which ends the download.
+			if limits.limited() {
+				if err := limits.wait(ctx, n, t.playerWaitsOn(seg)); err != nil {
+					return false, err
+				}
+			}
+			if reached {
+				// Also the normal exit when a split shortened this range: the
+				// rest of the response belongs to another connection now.
+				return false, nil
+			}
+		}
+		if rerr == io.EOF {
+			return true, nil
+		}
+		if rerr != nil {
+			return false, rerr
+		}
+	}
+}
+
+// take adds n bytes just read into the free part of g's buffer to what the
+// connection holds for seg. Whatever lies past the end of the range is left
+// out: the server overshot, or a split shortened the range. It runs under
+// seg.mu, so a split lands either before (the bytes are cut at the new end)
+// or after (it sees them held and leaves them be). reached reports that the
+// range is complete with these.
+func (t *task) take(seg *Segment, g *gather, n int) (reached bool) {
 	seg.mu.Lock()
 	defer seg.mu.Unlock()
 	end := seg.end.Load()
 	if end >= 0 {
-		if *offset > end {
-			return true, nil
-		}
-		if *offset+int64(len(b)) > end+1 {
-			b = b[:end+1-*offset] // server overshot, or the range was split
+		if room := end + 1 - g.off - int64(g.n); int64(n) > room {
+			n = int(max(room, 0))
 		}
 	}
-	wn, err := t.writeAt(b, *offset)
-	*offset += int64(wn)
+	if g.n == 0 {
+		g.since = time.Now()
+	}
+	g.n += n
+	seg.held.Store(int64(g.n))
+	return end >= 0 && g.off+int64(g.n) > end
+}
+
+// flush writes what g holds and counts it as done. The write needs no lock:
+// a split never cuts into what is held, so the bytes are in the range
+// whatever happens meanwhile.
+func (t *task) flush(seg *Segment, g *gather) error {
+	if g.n == 0 {
+		return nil
+	}
+	wn, err := t.writeAt(g.buf[:g.n], g.off)
+	seg.mu.Lock()
 	seg.done.Add(int64(wn))
+	// Whatever a failed write did not get to is dropped: the download ends.
+	seg.held.Store(0)
+	seg.mu.Unlock()
 	t.received.Add(int64(wn))
-	if err != nil {
-		return false, err
-	}
-	return end >= 0 && *offset > end, nil
+	g.off += int64(wn)
+	g.n = 0
+	return err
 }
 
 // checkResponse decides whether a segment response really carries our bytes.
@@ -1381,8 +1494,12 @@ func (t *task) writeAt(b []byte, off int64) (int, error) {
 		t.writeMu.Lock()
 		defer t.writeMu.Unlock()
 	}
-	return t.file.WriteAt(b, off)
+	return writeFileAt(t.file, b, off)
 }
+
+// writeFileAt is where every byte of a download is written; the tests watch
+// it.
+var writeFileAt = func(f *os.File, b []byte, off int64) (int, error) { return f.WriteAt(b, off) }
 
 // dataSyncEvery is how often a running download flushes the bytes it has
 // written to disk. The sidecar only ever says what the last flush covered, so
