@@ -1272,7 +1272,8 @@ document.getElementById("addrGo").addEventListener("click", function () {
 // ---------- queue controls ----------
 (function () {
   var sel = document.getElementById("limit");
-  for (var i = 1; i <= 8; i++) sel.insertAdjacentHTML("beforeend", '<option value="' + i + '">' + i + "</option>");
+  // The daemon allows up to 16, whatever -parallel it was started with.
+  for (var i = 1; i <= 16; i++) sel.insertAdjacentHTML("beforeend", '<option value="' + i + '">' + i + "</option>");
   sel.value = S.limit;
   sel.addEventListener("change", function () {
     post("/api/limit?n=" + sel.value).then(function (r) { S.limit = r.limit; poll(); }).catch(fail);

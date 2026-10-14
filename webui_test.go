@@ -68,6 +68,10 @@ func TestSpeedsUnderOneKilobyteAreWholeNumbers(t *testing.T) {
 	runPage(t, "slow", "en")
 }
 
+func TestDownloadsAtOnceShowsEveryLimitTheDaemonAllows(t *testing.T) {
+	runPage(t, "limit", "en")
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -373,6 +377,20 @@ scenarios.slow = async function () {
   const cells = conn.replace(/<\/td>/g, "\n").replace(/<[^>]*>/g, "").split("\n").filter((c) => /B\/s/.test(c));
   assert(cells.length > 0 && cells.every((c) => !/\d\.\d{3,}/.test(c)), "a connection speed with a long fraction: " + cells);
   assert(cells.every((c) => !/^0 B/.test(c)), "a connection that sends nothing should not read 0 B/s: " + cells);
+};
+
+scenarios.limit = async function () {
+  for (const n of [1, 3, 8, 9, 12, Number(process.env.MAX_PARALLEL)]) {
+    for (const k of Object.keys(els)) delete els[k];
+    limit = n;
+    intervals.length = 0;
+    await boot();
+    same(els.limit.value, String(n), "Downloads at once with a limit of " + n);
+  }
+  // Moving between values the daemon allows.
+  limit = 5;
+  await poll();
+  same(els.limit.value, "5", "the box should follow the daemon");
 };
 
 const run = scenarios[which];
