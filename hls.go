@@ -456,6 +456,12 @@ type HLSOptions struct {
 	// highest bandwidth on offer, which is what a player on a fast link does.
 	Variant int
 
+	// Refresh continues an interrupted download from a playlist at another
+	// address, as Options.Refresh does for a file. The segments already saved
+	// are kept as long as the stream is still the one they came from; if it
+	// is not, the download is refused instead of silently starting over.
+	Refresh bool
+
 	OnStart    func(HLSStart)
 	OnProgress func(HLSProgress)
 }
@@ -706,10 +712,17 @@ func hasMediaExt(name string) bool {
 // unfinished work, never write over a file that is already there. A sidecar
 // naming a different playlist belongs to another video whose name merely
 // collides, so that one gets a numbered name instead.
+//
+// A refresh is the exception to the last part. The address is new on purpose,
+// a playlist behind a signed link having a new one every time it is asked
+// for, so the sidecar is matched on what the stream is, its quality and its
+// number of segments, and not on where it was found. That is as much as a
+// file's size says about a file.
 func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsState, func(), error) {
 	base := filepath.Join(o.OutDir, hlsName(o, media))
 
-	if st, ok := loadHLSState(base); ok && st.Playlist == o.URL {
+	st, hasState := loadHLSState(base)
+	if hasState && (st.Playlist == o.URL || o.Refresh) {
 		if st.Variant == variant && st.fits(media) {
 			if fi, err := os.Stat(base); err == nil && fi.Size() >= st.Written {
 				if release, ok := reserveTarget(base); ok {
@@ -721,9 +734,32 @@ func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsStat
 		// the stream was re-encoded, a different quality was chosen, or the
 		// sidecar does not add up. Start it over in place rather than leave a
 		// dead file behind.
-		if release, ok := reserveTarget(base); ok {
-			clearState(base)
-			return base, nil, release, nil
+		if !o.Refresh {
+			if release, ok := reserveTarget(base); ok {
+				clearState(base)
+				return base, nil, release, nil
+			}
+		}
+	}
+
+	if o.Refresh {
+		// The caller has segments it means to keep. Starting over, here or
+		// under another name, is not what it asked for.
+		name := filepath.Base(base)
+		switch {
+		case !hasState:
+			return "", nil, nil, &RefreshMismatchError{Reason: "no saved progress was found for " + name}
+		case st.Total != len(media.Segments):
+			return "", nil, nil, &RefreshMismatchError{Reason: fmt.Sprintf(
+				"it points to a different stream (%d segments, the partial download has %d)",
+				len(media.Segments), st.Total)}
+		case st.Variant != variant:
+			return "", nil, nil, &RefreshMismatchError{Reason: "it points to another quality of the stream than " +
+				name + " was saved in"}
+		default:
+			// The sidecar and the file do not add up for this stream, or
+			// another download has the file open.
+			return "", nil, nil, &RefreshMismatchError{Reason: "what is saved of " + name + " cannot be continued from it"}
 		}
 	}
 

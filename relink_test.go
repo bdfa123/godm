@@ -277,3 +277,137 @@ func TestAWrongAddressIsStillRefusedAfterWaitingInTheQueue(t *testing.T) {
 		t.Error("the partial file was written to")
 	}
 }
+
+// ---------- a stream ----------
+
+// A stream is offered Change address like any other download, and its playlist
+// is as likely to be a signed link. What it has saved is segments, counted in
+// a sidecar of its own kind.
+func pausedStream(t *testing.T, m *Manager, s *hlsServer) (string, TaskView) {
+	t.Helper()
+	// The first three arrive at once and the rest take their time, so the
+	// pause lands with some segments written and most still to come.
+	s.mu.Lock()
+	for i := 3; i < len(s.segs); i++ {
+		s.delay[i] = 300 * time.Millisecond
+	}
+	s.mu.Unlock()
+	id, err := m.Add(jobRequest{URL: s.URL + "/show.m3u8?sig=old", Connections: 1, Variant: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the first segments", func() bool {
+		v, _ := findTask(m, id)
+		return v.SegDone >= 3
+	})
+	m.Pause(id)
+	waitFor(t, 10*time.Second, "the pause", stateIs(m, id, StatePaused))
+	v, _ := findTask(m, id)
+	if st, ok := loadHLSState(v.Path); !ok || st.Next < 3 || st.Next >= len(s.segs) {
+		t.Fatalf("paused with no sidecar to continue from, or nothing left to fetch: %+v", st)
+	}
+	// From here on every segment is quick. The map is replaced, not emptied:
+	// requests still being served hold the old one.
+	s.mu.Lock()
+	s.delay = map[int]time.Duration{}
+	s.mu.Unlock()
+	return id, v
+}
+
+func TestANewAddressContinuesAStream(t *testing.T) {
+	segs := makeSegments(12)
+	s := newHLSServer(t, segs)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedStream(t, m, s)
+
+	// The same playlist with a new signature, which is what a fresh link is.
+	if err := m.ChangeAddress(id, s.URL+"/show.m3u8?sig=new"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the stream to finish", stateIs(m, id, StateDone))
+	v, _ := findTask(m, id)
+	if v.Path != before.Path {
+		t.Errorf("with %d of %d segments saved in %s the new address started over in %s",
+			before.SegDone, before.SegTotal, filepath.Base(before.Path), filepath.Base(v.Path))
+	}
+	if got := namesIn(t, dir); len(got) != 1 || got[0] != "show.ts" {
+		t.Errorf("the folder holds %v, want show.ts alone", got)
+	}
+	if n := s.hitCount("/seg0.ts"); n != 1 {
+		t.Errorf("segment 0 was fetched %d times; it was already saved", n)
+	}
+	if got, _ := os.ReadFile(before.Path); sum(got) != sum(joined(segs)) {
+		t.Error("the file put together from two addresses does not match the stream")
+	}
+}
+
+// Waiting in the queue must not cost a stream its segments either.
+func TestANewAddressContinuesAStreamAfterWaitingInTheQueue(t *testing.T) {
+	segs := makeSegments(12)
+	s := newHLSServer(t, segs)
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedStream(t, m, s)
+	blocker := holdTheQueue(t, m)
+
+	if err := m.ChangeAddress(id, s.URL+"/show.m3u8?sig=new"); err != nil {
+		t.Fatal(err)
+	}
+	m.Pause(id)
+	m.Pause(blocker)
+	waitFor(t, 10*time.Second, "the other download to stop", stateIs(m, blocker, StatePaused))
+	if !m.Resume(id) {
+		t.Fatal("resume refused")
+	}
+	waitFor(t, 30*time.Second, "the stream to finish", stateIs(m, id, StateDone))
+	if v, _ := findTask(m, id); v.Path != before.Path {
+		t.Errorf("finished in %s, want %s continued", filepath.Base(v.Path), filepath.Base(before.Path))
+	}
+	if n := s.hitCount("/seg0.ts"); n != 1 {
+		t.Errorf("segment 0 was fetched %d times; it was already saved", n)
+	}
+	if got, _ := os.ReadFile(before.Path); sum(got) != sum(joined(segs)) {
+		t.Error("the file does not match the stream")
+	}
+}
+
+// An address that is some other stream is refused, as another file is for a
+// plain download: the segments saved are not thrown away for it, and it is not
+// fetched into a second file beside them.
+func TestANewAddressThatIsAnotherStreamIsRefused(t *testing.T) {
+	s := newHLSServer(t, makeSegments(12))
+	other := newHLSServer(t, makeSegments(7))
+	dir := t.TempDir()
+	m := NewManager(dir, 1)
+	m.announce = nil
+	id, before := pausedStream(t, m, s)
+	partial, err := os.ReadFile(before.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.ChangeAddress(id, other.URL+"/show.m3u8"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, "the download to stop one way or another", func() bool {
+		v, _ := findTask(m, id)
+		return v.State == StateNeedsRefresh || v.State == StateDone || v.State == StateError
+	})
+	v, _ := findTask(m, id)
+	if v.State != StateNeedsRefresh || !strings.Contains(v.Error, "different stream") {
+		t.Errorf("ended %s (%q) in %s, want the address refused as another stream",
+			v.State, v.Error, filepath.Base(v.Path))
+	}
+	if got := namesIn(t, dir); len(got) != 2 || got[0] != "show.ts" || got[1] != "show.ts.godm" {
+		t.Errorf("the folder holds %v, want the partial file and its sidecar and nothing else", got)
+	}
+	if after, _ := os.ReadFile(before.Path); sum(after) != sum(partial) {
+		t.Error("the partial file was written to")
+	}
+	if st, ok := loadHLSState(before.Path); !ok || !strings.Contains(st.Playlist, "sig=old") {
+		t.Error("the sidecar no longer describes the stream the segments came from")
+	}
+}

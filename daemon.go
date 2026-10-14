@@ -585,7 +585,9 @@ func (m *Manager) start(mt *managedTask, allowMatch bool) {
 			ConnLimit:   func() int { return int(mt.connLimit.Load()) },
 			Limiters:    []*RateLimiter{&m.speed, &mt.speed},
 			Variant:     req.Variant,
+			Refresh:     refresh,
 			OnStart: func(si HLSStart) {
+				planned = true
 				mt.hlsStart(gen, si)
 				m.dirty.Store(true)
 			},
