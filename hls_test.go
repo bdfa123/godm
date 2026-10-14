@@ -1127,3 +1127,150 @@ func TestRelativeURIsFollowTheRedirectedPlaylist(t *testing.T) {
 		})
 	}
 }
+
+// ---------- flushing the data before the sidecar that describes it ----------
+
+// flushWatch stands in for syncData and keeps what the file held at the last
+// flush that completed, which is all a power cut would leave of it.
+type flushWatch struct {
+	mu      sync.Mutex
+	flushed []byte
+	flushes int
+}
+
+func (w *flushWatch) install(t *testing.T, every time.Duration) {
+	t.Helper()
+	oldSync, oldEvery := syncData, dataSyncEvery
+	t.Cleanup(func() { syncData, dataSyncEvery = oldSync, oldEvery })
+	dataSyncEvery = every
+	syncData = func(f *os.File) error {
+		err := f.Sync()
+		b, _ := os.ReadFile(f.Name())
+		w.mu.Lock()
+		w.flushed, w.flushes = b, w.flushes+1
+		w.mu.Unlock()
+		// A flush takes time, and the segments are written on through it. What
+		// goes in meanwhile is not on disk yet and must not be claimed.
+		time.Sleep(40 * time.Millisecond)
+		return err
+	}
+}
+
+func TestTheHLSSidecarNeverClaimsMoreThanWasFlushed(t *testing.T) {
+	var w flushWatch
+	w.install(t, 500*time.Millisecond)
+
+	segs := makeSegments(40)
+	s := newHLSServer(t, segs)
+	s.init = []byte("FTYPISO6MOOVBOXHERE")
+	for i := range segs {
+		s.delay[i] = 150 * time.Millisecond
+	}
+	want := append(append([]byte{}, s.init...), joined(segs)...)
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "clip.mp4")
+	var claimed int64
+	var reported atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	start := time.Now()
+	_, err := DownloadHLS(ctx, HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip.mp4",
+		Connections: 2, MaxRetries: 1,
+		// This runs just before the run saves again, so the sidecar it reads
+		// was saved a tick ago, and the last flush is no older.
+		OnProgress: func(p HLSProgress) {
+			reported.Store(int64(p.Segments))
+			if p.Segments >= 24 {
+				cancel()
+			}
+			st, ok := loadHLSState(target)
+			if !ok {
+				return
+			}
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			claimed = st.Written
+			if st.Written > int64(len(w.flushed)) || !bytes.Equal(w.flushed[:st.Written], want[:st.Written]) {
+				t.Errorf("the sidecar says %d bytes are in; after the last flush the file holds %d bytes there that match",
+					st.Written, matching(w.flushed, want, 0, st.Written))
+				cancel()
+			}
+		},
+	})
+	if err == nil {
+		t.Fatal("the download was not interrupted")
+	}
+	elapsed := time.Since(start)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.flushes < 2 || claimed == 0 {
+		t.Fatalf("%d flushes and %d bytes claimed: the test looked at nothing", w.flushes, claimed)
+	}
+	// The flush is rationed: one per interval, not one per tick of the
+	// display, so throughput does not wait on the disk. The init segment and
+	// the stop each flush once more.
+	if max := int(elapsed/dataSyncEvery) + 3; w.flushes > max {
+		t.Errorf("%d flushes in %v with one due every %v: the file is being flushed on every tick", w.flushes, elapsed, dataSyncEvery)
+	}
+
+	// A stopped download keeps all that it got: the lag is for the sidecar of
+	// a running one, and ends when it stops.
+	st, ok := loadHLSState(target)
+	if !ok {
+		t.Fatal("no sidecar after the interruption")
+	}
+	if int64(st.Next) < reported.Load() {
+		t.Errorf("the sidecar after stopping says %d segments, %d were reported done", st.Next, reported.Load())
+	}
+	onDisk, _ := os.ReadFile(target)
+	if int64(len(w.flushed)) < st.Written || !bytes.Equal(w.flushed[:st.Written], want[:st.Written]) {
+		t.Errorf("the sidecar after stopping says %d bytes are in, and the last flush holds only %d of them", st.Written, len(w.flushed))
+	}
+	if st.Written != int64(len(onDisk)) {
+		t.Errorf("the sidecar after stopping says %d bytes, the file is %d", st.Written, len(onDisk))
+	}
+
+	// And it resumes from there to the whole stream.
+	s.mu.Lock()
+	for i := range segs {
+		delete(s.delay, i)
+	}
+	s.mu.Unlock()
+	if _, err := DownloadHLS(context.Background(), HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: dir, Filename: "clip.mp4", Connections: 2, MaxRetries: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(target)
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the resumed file is %d bytes, want %d, or differs", len(got), len(want))
+	}
+}
+
+func TestAFailedFlushDoesNotStopAnHLSDownload(t *testing.T) {
+	oldSync, oldEvery := syncData, dataSyncEvery
+	defer func() { syncData, dataSyncEvery = oldSync, oldEvery }()
+	dataSyncEvery = time.Millisecond
+	syncData = func(*os.File) error { return errors.New("the disk would not flush") }
+
+	segs := makeSegments(8)
+	s := newHLSServer(t, segs)
+	for i := range segs {
+		s.delay[i] = 100 * time.Millisecond
+	}
+	target, err := DownloadHLS(context.Background(), HLSOptions{
+		URL: s.URL + "/media.m3u8", OutDir: t.TempDir(), Filename: "clip.ts", Connections: 2, MaxRetries: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(target)
+	if !bytes.Equal(got, joined(segs)) {
+		t.Fatalf("the file is %d bytes, want %d", len(got), len(joined(segs)))
+	}
+	if _, ok := loadHLSState(target); ok {
+		t.Error("the sidecar was left behind after a finished download")
+	}
+}

@@ -555,6 +555,8 @@ type hlsRun struct {
 	want   int            // next segment index to write
 	failed error
 
+	syncedAt time.Time // when persist last flushed the file; only its caller touches it
+
 	keysMu sync.Mutex
 	keys   map[string]*keyFetch
 
@@ -789,7 +791,7 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 		}
 		r.bytes += int64(n)
 		r.initDone = true
-		r.persist()
+		r.persist(f, true)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -839,7 +841,7 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 				return
 			case <-t.C:
 				r.report()
-				r.persist()
+				r.persist(f, false)
 				r.mu.Lock()
 				short := r.limit() - int(r.workers.Load())
 				work := r.next < len(r.media.Segments)
@@ -866,7 +868,7 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 			clearState(r.target)
 			return err
 		}
-		r.persist()
+		r.persist(f, true)
 		return err
 	}
 	if err := f.Sync(); err != nil {
@@ -1199,10 +1201,28 @@ func decryptAES128(data, key, iv []byte) ([]byte, error) {
 	return out[:len(out)-pad], nil
 }
 
-func (r *hlsRun) persist() {
+// persist saves progress, in the order that keeps the sidecar honest: the
+// count is taken first, the file flushed after, and only then is the sidecar
+// written. The flush covers every byte the count includes (and any written
+// meanwhile, which the sidecar does not claim), so a power cut cannot leave it
+// saying segments are in when their bytes were still in the cache, which a
+// resume would trust and leave as zeros inside the stream. The flush is done
+// when one is due (dataSyncEvery, shared with the byte-range engine), or at
+// once with force, as the init segment and a stopping download do. In between
+// nothing is written, and the sidecar keeps the point of the last flush.
+func (r *hlsRun) persist(f *os.File, force bool) {
+	if !force && !r.syncedAt.IsZero() && time.Since(r.syncedAt) < dataSyncEvery {
+		return
+	}
 	r.mu.Lock()
 	done, written := r.want, r.bytes
 	r.mu.Unlock()
+	if err := syncData(f); err != nil {
+		// Nothing is known to be on disk beyond the last flush, and that is
+		// what the sidecar already says.
+		return
+	}
+	r.syncedAt = time.Now()
 	saveHLSState(r.target, &hlsState{
 		Version:  stateVersion,
 		Kind:     "hls",
