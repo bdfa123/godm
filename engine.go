@@ -372,6 +372,14 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	t := &task{
+		opts: o, probe: pr, segs: plan.segs, file: f, target: plan.path, client: client,
+		changed: make(chan struct{}, 1),
+	}
+	for _, s := range plan.segs {
+		t.received.Add(s.done.Load())
+	}
+
 	// A file whose ranges arrive in any order is given its whole length at
 	// once, so parallel WriteAt calls never race to extend it. See prepareFile.
 	//
@@ -379,8 +387,13 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	// support the probe's Content-Length is just a hint from a *different*
 	// request: dynamic endpoints happily return a different body length each
 	// time, and preallocating to the stale number leaves the file zero-padded.
-	if pr.Size > 0 && pr.Resumable {
-		if err := prepareFile(f, o.OutDir, pr.Size, !plan.resumed); err != nil {
+	sized := pr.Size > 0 && pr.Resumable
+	unclaim := func() {}
+	if sized {
+		// Before the file is resized or written. Sparse, it takes its space
+		// only as it is written, so whether the rest fits is asked now rather
+		// than found out at 90 percent.
+		if unclaim, err = claimRoom(o.OutDir, t.unwritten); err != nil {
 			f.Close()
 			if !plan.resumed && !plan.overwrite {
 				// The empty file just made for this attempt, which nothing
@@ -392,16 +405,21 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 	}
+	if sized {
+		if err := prepareFile(f, pr.Size, !plan.resumed); err != nil {
+			unclaim()
+			f.Close()
+			if !plan.resumed && !plan.overwrite {
+				os.Remove(plan.path)
+			}
+			plan.release()
+			return nil, err
+		}
+	}
 	defer plan.release()
 	defer f.Close()
+	defer unclaim() // while the file is open: the claim looks at it
 
-	t := &task{
-		opts: o, probe: pr, segs: plan.segs, file: f, target: plan.path, client: client,
-		changed: make(chan struct{}, 1),
-	}
-	for _, s := range plan.segs {
-		t.received.Add(s.done.Load())
-	}
 	if o.Playback != nil {
 		o.Playback.attach(t)
 		defer o.Playback.detach(t)
@@ -438,8 +456,8 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	}, nil
 }
 
-// prepareFile readies f, a download of size bytes in dir, for its ranges to
-// be written in any order: it makes it sparse and, when fresh, gives it its
+// prepareFile readies f, a download of size bytes, for its ranges to be
+// written in any order: it makes it sparse and, when fresh, gives it its
 // whole length.
 //
 // Sparse, because the connections write all over the file from the start,
@@ -448,15 +466,7 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 // sparse too, which spares one that an older godm left ordinary the zeros
 // it has not reached yet. Where the file system has no sparse files the file
 // is written as it always was.
-//
-// A sparse file no longer takes its space the moment it is made, so a disk
-// too full for it would only show at 90 percent. What the file does not
-// take up yet is checked against the free space here instead.
-func prepareFile(f *os.File, dir string, size int64, fresh bool) error {
-	have, _ := allocated(f)
-	if err := roomFor(dir, size-min(have, size)); err != nil {
-		return err
-	}
+func prepareFile(f *os.File, size int64, fresh bool) error {
 	setSparse(f, true)
 	if fresh {
 		if err := f.Truncate(size); err != nil {
@@ -464,6 +474,23 @@ func prepareFile(f *os.File, dir string, size int64, fresh bool) error {
 		}
 	}
 	return nil
+}
+
+// unwritten is what the download still has to take from the disk, for its
+// claim on it (see claimRoom): its length less what its file takes up, or
+// less what has been written to it when that is more, as a write is taken
+// from the free space at once but shows in the file's own size on disk only
+// once it is flushed.
+//
+// The file is looked at each time rather than once at the start. One that an
+// older godm gave its whole length takes all of that up, but once it is
+// sparse its first write past what had been written gives back the space in
+// between (see prepareFile). Counted at the start, that space would look free
+// to the next download while this one still has to fill it.
+func (t *task) unwritten() int64 {
+	size := t.probe.Size
+	have, _ := allocated(t.file)
+	return size - min(max(have, t.received.Load()), size)
 }
 
 // ---------- choosing the file on disk ----------

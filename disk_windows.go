@@ -19,6 +19,7 @@ const (
 var (
 	procGetDiskFreeSpaceEx           = kernel32.NewProc("GetDiskFreeSpaceExW")
 	procGetFileInformationByHandleEx = kernel32.NewProc("GetFileInformationByHandleEx")
+	procGetVolumePathName            = kernel32.NewProc("GetVolumePathNameW")
 )
 
 // setSparse makes f a sparse file, or with on false an ordinary one again.
@@ -76,6 +77,26 @@ func diskFree(dir string) (free int64, ok bool) {
 		return 0, false
 	}
 	return int64(min(avail, math.MaxInt64)), true
+}
+
+// volumeOf names the disk dir is on, the same for every folder on it: the
+// drive, the share, or the folder another disk is mounted at. Names differ
+// only in case for the same disk, so it is given in lower case.
+func volumeOf(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if p, err := syscall.UTF16PtrFromString(dir); err == nil {
+		// The answer is never longer than the path it was asked of, with a
+		// backslash added.
+		buf := make([]uint16, max(len(dir)+2, syscall.MAX_PATH+1))
+		r, _, _ := procGetVolumePathName.Call(uintptr(unsafe.Pointer(p)),
+			uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if int32(r) != 0 {
+			return strings.ToLower(syscall.UTF16ToString(buf))
+		}
+	}
+	return strings.ToLower(filepath.VolumeName(dir))
 }
 
 // fileStandard is FILE_STANDARD_INFO.

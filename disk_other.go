@@ -13,4 +13,8 @@ func setSparse(*os.File, bool) error { return nil }
 // at the write that finds the disk full, which still names the reason.
 func diskFree(string) (int64, bool) { return 0, false }
 
+// volumeOf has every folder on the one disk: with the free space never
+// looked at, which downloads share a disk does not matter.
+func volumeOf(string) string { return "" }
+
 func allocated(*os.File) (int64, bool) { return 0, false }

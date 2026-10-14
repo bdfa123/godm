@@ -992,6 +992,12 @@ type btStorage struct {
 	// sparseMu is held while a file is made sparse, so that no write to it
 	// can go ahead of that.
 	sparseMu sync.Mutex
+
+	// wrote is what has been written to the files in this run. With base
+	// added, it is what they take up of the disk, and length less that is
+	// what the torrent's claim on the disk still holds (see room).
+	wrote        atomic.Int64
+	length, base int64
 }
 
 // btFile is one of a torrent's files on disk.
@@ -1159,26 +1165,43 @@ func (s *btStorage) settle() {
 	}
 }
 
-// room checks that the disk has room for what the torrent's files do not take
-// up yet. Sparse, they take their space only as they are written, so a disk
-// too small would only show once it was full.
-func (s *btStorage) room() error {
+// room claims room on the disk for what the torrent's files do not take up
+// yet, beside what the downloads already running there still need (see
+// claimRoom). Sparse, the files take their space only as they are written, so
+// a disk too small would only show once it was full. release lets the claim
+// go once the torrent stops writing.
+func (s *btStorage) room() (release func(), err error) {
 	if !s.enter() {
-		return nil
+		return func() {}, nil
 	}
-	defer s.gate.RUnlock()
 	files, dir := s.fileList()
-	var need int64
+	var length, have int64
 	for _, f := range files {
-		need += f.length
+		length += f.length
 		if fh, err := os.Open(f.path); err == nil {
-			if have, ok := allocated(fh); ok {
-				need -= min(have, f.length)
+			if a, ok := allocated(fh); ok {
+				have += min(a, f.length)
 			}
 			fh.Close()
 		}
 	}
-	return roomFor(dir, need)
+	// From here on the writes are counted rather than the files looked at
+	// again: the claim is asked of each time another download starts, and
+	// opening every file of the torrent then could hold one open just as a
+	// removal deletes it.
+	s.length, s.base = length, have-s.wrote.Load()
+	s.gate.RUnlock()
+	if files == nil {
+		return func() {}, nil
+	}
+	return claimRoom(dir, s.unwritten)
+}
+
+// unwritten is what the torrent still has to take from the disk. A piece
+// written again after it failed its check counts twice, which errs towards
+// letting a download start.
+func (s *btStorage) unwritten() int64 {
+	return s.length - min(max(s.base+s.wrote.Load(), 0), s.length)
 }
 
 // btPiece passes one piece through to the file storage, but only while its
@@ -1196,7 +1219,9 @@ func (p btPiece) WriteAt(b []byte, off int64) (int, error) {
 	}
 	defer p.s.gate.RUnlock()
 	p.s.makeSparse(p.off+off, int64(len(b)))
-	return p.PieceImpl.WriteAt(b, off)
+	n, err := p.PieceImpl.WriteAt(b, off)
+	p.s.wrote.Add(int64(n))
+	return n, err
 }
 
 func (p btPiece) MarkComplete() error {
@@ -1719,9 +1744,11 @@ func (m *Manager) runTorrent(ctx context.Context, mt *managedTask, gen int) (str
 		}
 	}
 	mt.torrentDetails(info, tor.Length())
-	if err := st.room(); err != nil {
+	unclaim, err := st.room()
+	if err != nil {
 		return "", err
 	}
+	defer unclaim()
 
 	writeErr := make(chan error, 1)
 	tor.SetOnWriteChunkError(func(err error) {

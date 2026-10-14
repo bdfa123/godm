@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"net/http/httptest"
 	"os"
@@ -41,16 +42,25 @@ func isSparse(t *testing.T, p string) bool {
 // file is only what has been written to it.
 func onDisk(t *testing.T, p string) int64 {
 	t.Helper()
-	u, err := syscall.UTF16PtrFromString(p)
+	n, err := diskUse(p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return n
+}
+
+// diskUse is onDisk for where a test cannot stop: off its own goroutine.
+func diskUse(p string) (int64, error) {
+	u, err := syscall.UTF16PtrFromString(p)
+	if err != nil {
+		return 0, err
 	}
 	var hi uint32
 	lo, _, callErr := procGetCompressedFileSize.Call(uintptr(unsafe.Pointer(u)), uintptr(unsafe.Pointer(&hi)))
 	if uint32(lo) == math.MaxUint32 && callErr != syscall.Errno(0) {
-		t.Fatalf("GetCompressedFileSize %s: %v", p, callErr)
+		return 0, fmt.Errorf("GetCompressedFileSize %s: %w", p, callErr)
 	}
-	return int64(hi)<<32 | int64(uint32(lo))
+	return int64(hi)<<32 | int64(uint32(lo)), nil
 }
 
 // needSparseFiles skips a test where dir is on a file system that has no
@@ -66,13 +76,6 @@ func needSparseFiles(t *testing.T, dir string) {
 	if err := setSparse(f, true); err != nil {
 		t.Skipf("%s has no sparse files: %v", dir, err)
 	}
-}
-
-// plentyOfRoom stands in for the free space, for a test that is not about it.
-func plentyOfRoom(t *testing.T) {
-	old := freeSpace
-	freeSpace = func(string) (int64, bool) { return math.MaxInt64, true }
-	t.Cleanup(func() { freeSpace = old })
 }
 
 // The connections of a download write all over its file from the start. On
@@ -139,14 +142,13 @@ func TestADownloadIsSparseUntilItIsDone(t *testing.T) {
 func TestAWriteFarIntoAPreparedFileWaitsForNoZeros(t *testing.T) {
 	dir := t.TempDir()
 	needSparseFiles(t, dir)
-	plentyOfRoom(t)
 	const size = 4 << 30
 	f, err := os.OpenFile(filepath.Join(dir, "big.bin"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if err := prepareFile(f, dir, size, true); err != nil {
+	if err := prepareFile(f, size, true); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := f.Stat(); err != nil || fi.Size() != size {
@@ -180,14 +182,12 @@ func TestADownloadThatDoesNotFitIsRefused(t *testing.T) {
 	payload := makePayload(4 << 20)
 	srv := httptest.NewServer(&slowServer{payload: payload, chunk: 16 << 10, delay: 20 * time.Millisecond})
 	defer srv.Close()
-	old := freeSpace
-	defer func() { freeSpace = old }()
 	var free int64
 	var asked []string
-	freeSpace = func(d string) (int64, bool) {
+	diskOfItsOwn(t, func(d string) int64 {
 		asked = append(asked, d)
-		return free, true
-	}
+		return free
+	})
 	opts := Options{URL: srv.URL + "/film.mkv", OutDir: dir, Connections: 2, MinSplit: 64 << 10}
 
 	free = 3 << 20
@@ -295,11 +295,8 @@ func TestATorrentThatDoesNotFitIsRefused(t *testing.T) {
 	src := t.TempDir()
 	payload := makePayload(2 << 20)
 	mi := makeTorrent(t, src, "film.bin", 64<<10, tfile{data: payload})
-	old := freeSpace
-	freeSpace = func(string) (int64, bool) { return 1 << 20, true }
-	defer func() { freeSpace = old }()
-
 	m := newBTManager(t)
+	diskOfItsOwn(t, func(string) int64 { return 1 << 20 })
 	var body bytes.Buffer
 	if err := mi.Write(&body); err != nil {
 		t.Fatal(err)
@@ -315,5 +312,89 @@ func TestATorrentThatDoesNotFitIsRefused(t *testing.T) {
 	}
 	if fi, err := os.Stat(v.Path); err == nil && fi.Size() != 0 {
 		t.Errorf("%d bytes of a torrent refused for want of space were written", fi.Size())
+	}
+}
+
+// An older godm gave a download's file its whole length, which took all its
+// space up at once: such a file resumes even on a disk with less free than
+// that. Once sparse, its first writes past what it had been written give the
+// space in between back to the disk, and that space is still the download's
+// to fill, not free for the next one to take.
+func TestAnOrdinaryPartialFileStillNeedsTheSpaceItGivesBack(t *testing.T) {
+	dir := t.TempDir()
+	needSparseFiles(t, dir)
+	const size = 64 << 20
+	payload := makePayload(size)
+	// A megabyte and a bit at the start of each range, a full write's worth.
+	held := &heldServer{payload: payload, first: 1<<20 + 64<<10, hold: make(chan struct{})}
+	srv := httptest.NewServer(held)
+	defer srv.Close()
+	defer close(held.hold)
+
+	path := filepath.Join(dir, "film.mkv")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.Truncate(size)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := onDisk(t, path); got < size {
+		t.Skipf("an ordinary file of %d bytes takes %d bytes of the disk here", size, got)
+	}
+	url := srv.URL + "/film.mkv"
+	st := &State{Version: stateVersion, URL: url, FinalURL: url, Size: size, Filename: "film.mkv"}
+	for i := int64(0); i < 4; i++ {
+		st.Segments = append(st.Segments, SegSnap{Start: i * size / 4, End: (i+1)*size/4 - 1})
+	}
+	if err := saveState(path, st); err != nil {
+		t.Fatal(err)
+	}
+	// 32 MB free, and whatever the file gives back.
+	diskOfItsOwn(t, func(string) int64 {
+		used, err := diskUse(path)
+		if err != nil {
+			return 32 << 20
+		}
+		return 32<<20 + max(size-used, 0)
+	})
+
+	stop := startHeld(t, Options{URL: url, OutDir: dir, Connections: 4, MinSplit: 1 << 20})
+	defer stop()
+	waitFor(t, 20*time.Second, "the resumed file to give back what it had not been written", func() bool {
+		return onDisk(t, path) < size/2
+	})
+	gave := size - onDisk(t, path)
+	other := t.TempDir()
+	if release, err := claimRoom(other, needs(40<<20)); err == nil {
+		release()
+		t.Errorf("40 MB was given beside a download that gave back %d MB it still has to write, with 32 MB free besides",
+			gave>>20)
+	}
+	release, err := claimRoom(other, needs(24<<20))
+	if err != nil {
+		t.Fatalf("24 MB of the 32 MB free besides what the other download gave back: %v", err)
+	}
+	release()
+}
+
+// The claims of the downloads on one disk add up whichever folder on it they
+// are in, and however its name is written.
+func TestEveryFolderOnADiskIsOnTheOneDisk(t *testing.T) {
+	dir := t.TempDir()
+	v := volumeOf(dir)
+	if v == "" {
+		t.Fatalf("no disk was found for %s", dir)
+	}
+	for _, d := range []string{
+		filepath.Join(dir, "not", "made", "yet"),
+		strings.ToUpper(dir),
+		filepath.VolumeName(dir) + `\`,
+	} {
+		if got := volumeOf(d); got != v {
+			t.Errorf("%s is on %q, and %s on %q", d, got, dir, v)
+		}
 	}
 }

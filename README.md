@@ -254,7 +254,11 @@ download:
   writes it a megabyte at a time, or at once while a player waits on it.
 - **Disk space**: a sparse file takes its space only as it is written, so a
   download that would not fit is refused before it starts, counting what a
-  partial file already holds, rather than found out at 90 percent.
+  partial file already holds, rather than found out at 90 percent. What the
+  downloads and torrents already running on the same disk still have to write
+  counts as taken, so of three big downloads that do not all fit, the last to
+  start is refused instead of all three running out of room together part of
+  the way through.
 - **Dynamic splitting**: when a connection runs out of work, it takes the back
   half of the largest range still in progress, so one slow connection is never
   left alone with the end of the file. The connection count can be changed while
