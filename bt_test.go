@@ -122,6 +122,9 @@ func newPeer(t *testing.T, dir string, mi *metainfo.MetaInfo, upload int) *peer 
 		Logger:          quiet,
 	})
 	cfg.Slogger = quiet
+	// This peer is the same library as godm's client, and can lose the same
+	// wake-up: a chunk it has ready then waits for its writer's next look.
+	cfg.KeepAliveTimeout = btPeerWake
 	if upload > 0 {
 		cfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(upload), 16<<10)
 	}
@@ -354,6 +357,7 @@ func TestTorrentFilesThatShareANameOnNTFSGetTheirOwn(t *testing.T) {
 		Logger:          quiet,
 	})
 	cfg.Slogger = quiet
+	cfg.KeepAliveTimeout = btPeerWake // as in newPeer
 	cl, err := torrent.NewClient(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -813,6 +817,48 @@ func TestAMagnetNobodyAnswersGivesUpItsPlaceInTheQueue(t *testing.T) {
 	mt := taskOf(m, magnet)
 	m.Remove(magnet, true)
 	waitFor(t, 5*time.Second, "the removed magnet to leave the client", func() bool { return m.bt.loadedFor(mt) == nil })
+}
+
+// The library's writer for a peer connection looks at it only when told there
+// is something to send, or when a keep-alive is due, and it can miss being
+// told: the connection then asks for nothing more until the keep-alive. That
+// cannot be staged here, but what bounds it can be seen: a connection with
+// nothing to say is written to, which is the writer looking at it, every
+// btPeerWake and not once a minute.
+func TestAnIdlePeerConnectionIsLookedAtAgainWithinSeconds(t *testing.T) {
+	src := t.TempDir()
+	mi := makeTorrent(t, src, "film.bin", 32<<10, tfile{data: makePayload(1 << 20)})
+	// One chunk and then next to nothing, so godm is left waiting on what it
+	// has asked for, with no more to ask.
+	seed := newSeeder(t, src, mi, 1)
+
+	m := newBTManager(t)
+	id, err := m.Add(jobRequest{URL: magnetOf(mi, "film.bin", seed.addr())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tor := waitLoaded(t, m, id)
+	waitFor(t, 10*time.Second, "the first chunk", func() bool {
+		s := tor.Stats()
+		return s.ChunksReadUseful.Int64() >= 1
+	})
+	written := func() int64 {
+		s := tor.Stats()
+		return s.BytesWritten.Int64()
+	}
+	sent := written()
+	waitFor(t, 10*time.Second, "godm to have no more to send", func() bool {
+		time.Sleep(500 * time.Millisecond)
+		before := sent
+		sent = written()
+		return sent == before
+	})
+	idle := time.Now()
+	waitFor(t, 2*btPeerWake+2*time.Second, "the idle connection to be looked at again", func() bool { return written() > sent })
+	if s := tor.Stats(); s.ActivePeers != 1 || tor.Complete().Bool() {
+		t.Fatalf("after %s: %d peers, complete %v; this no longer watches an idle connection", time.Since(idle).Round(time.Millisecond), s.ActivePeers, tor.Complete().Bool())
+	}
+	m.Pause(id)
 }
 
 func TestTorrentResumesAfterARestartWithoutRefetching(t *testing.T) {

@@ -63,6 +63,21 @@ const (
 	// link nobody answers must not hold it for good. Peers found through the
 	// DHT usually answer within a minute, if at all.
 	btMetadataWait = 5 * time.Minute
+	// btPeerWake is how long a peer connection sits with nothing to send
+	// before the client looks at it again. The library has one writer per
+	// connection, which sleeps until it is told there is something to send:
+	// a request to make, a chunk a peer asked for. A wake-up that comes in
+	// the moment between its last look and its going to sleep is lost, and no
+	// second one follows, because what it was for is by then marked as
+	// already asked. The connection then requests nothing, or holds back a
+	// chunk it has ready, until the writer wakes by itself to send a
+	// keep-alive, which the library leaves for a minute. The timer it once
+	// had for this, every three seconds, is switched off in this version.
+	// With a single seed that is a torrent standing still for a minute, most
+	// often right at the start, when the pieces only become requestable one
+	// by one as each is checked. Waking this often bounds it, at the cost of
+	// four bytes every few seconds on a connection with nothing else to say.
+	btPeerWake = 3 * time.Second
 )
 
 // errNoMetadata ends a run whose magnet link nobody answered. The link may
@@ -545,6 +560,9 @@ func (e *btEngine) config(port int) *torrent.ClientConfig {
 	// Every torrent brings its own storage. Without this the client would open
 	// a second piece database in the working directory.
 	cfg.DefaultStorage = noStorage{}
+	// The keep-alive timer is the only thing that wakes a connection's writer
+	// unasked; see btPeerWake.
+	cfg.KeepAliveTimeout = btPeerWake
 	cfg.Slogger = e.slog
 	limit, burst := btDownloadLimit(e.downRate)
 	e.down = rate.NewLimiter(limit, burst)
