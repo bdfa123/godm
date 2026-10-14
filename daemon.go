@@ -77,12 +77,20 @@ type TaskView struct {
 	Stage string `json:"stage,omitempty"`
 	// A torrent counts what it has sent to other peers, and names the file
 	// Play opens, its largest video, relative to the download folder.
-	Uploaded     int64     `json:"uploaded,omitempty"`
-	Media        string    `json:"media,omitempty"`
-	AddedAt      time.Time `json:"added_at"`
-	StartedAt    time.Time `json:"started_at,omitempty"`
-	EndedAt      time.Time `json:"ended_at,omitempty"`
-	RefreshUntil time.Time `json:"refresh_until,omitempty"`
+	Uploaded int64     `json:"uploaded,omitempty"`
+	Media    string    `json:"media,omitempty"`
+	AddedAt  time.Time `json:"added_at"`
+	// StartedAt is when the run under way got its slot, set back by the time
+	// the runs before it took, so that the time since is the time the
+	// download has spent downloading however often it was paused, retried or
+	// met a restart of godm in between. Once it is done, EndedAt less
+	// StartedAt is that time in all, which is what "finished in" on the card
+	// and in the notice divide the size by. Spent is the same time as of the
+	// end of the last run, kept for the next run to be set back by.
+	StartedAt    time.Time     `json:"started_at,omitempty"`
+	EndedAt      time.Time     `json:"ended_at,omitempty"`
+	Spent        time.Duration `json:"spent_ns,omitempty"`
+	RefreshUntil time.Time     `json:"refresh_until,omitempty"`
 }
 
 type jobRequest struct {
@@ -756,7 +764,9 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 			if ok {
 				mt.waitingSlot = false
 				mt.view.State = StateRunning
-				mt.view.StartedAt = time.Now()
+				// Not simply now: a resumed download would then say it took
+				// only as long as its last run. See StartedAt.
+				mt.view.StartedAt = time.Now().Add(-mt.view.Spent)
 			}
 			mt.mu.Unlock()
 			if ok {
@@ -834,6 +844,13 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		mt.mu.Unlock()
 		return
 	}
+	now := time.Now()
+	if mt.view.State == StateRunning {
+		// The run had a slot, and StartedAt is when it got it less what the
+		// runs before it took. A run that ends while still in the queue
+		// spent no time, and the time since StartedAt is not its own.
+		mt.view.Spent = max(now.Sub(mt.view.StartedAt), 0)
+	}
 	mt.view.State = st
 	mt.view.Error = errMsg
 	mt.view.Speed, mt.view.Active = 0, 0
@@ -848,7 +865,7 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		// yt-dlp has put its streams together and cleared up after itself;
 		// from here on the download is the one file at its path.
 		mt.ytFiles = nil
-		mt.view.EndedAt = time.Now()
+		mt.view.EndedAt = now
 		mt.view.Received = mt.view.Size
 		mt.view.Segments = nil
 	} else {
@@ -1281,6 +1298,10 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	if mt.view.Path != "" && mt.view.Received > 0 && mt.view.State != StateDone {
 		// There is progress to keep, and it is saved under the old address.
 		mt.relinked = true
+	} else {
+		// Nothing of what was fetched before is kept, so the time it took is
+		// no part of how long this download takes.
+		mt.view.Spent = 0
 	}
 	gen := mt.queueRun()
 	mt.view.Error = ""
@@ -1451,6 +1472,11 @@ func (m *Manager) save() error {
 		t.mu.Lock()
 		v := t.view
 		v.Segments, v.Speed, v.Active = nil, 0, 0
+		if v.State == StateRunning {
+			// A run notes the time it took when it ends, and a godm that
+			// dies never sees this one end. The list says how far it had got.
+			v.Spent = max(time.Since(v.StartedAt), 0)
+		}
 		list.Tasks = append(list.Tasks, savedTask{
 			View: v, Req: t.req, OutDir: t.outDir, Relinked: t.relinked,
 			YTFiles: slices.Clone(t.ytFiles),
