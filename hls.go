@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -496,6 +497,21 @@ type hlsState struct {
 	Next     int    `json:"next_segment"`
 	Written  int64  `json:"written"`
 	InitDone bool   `json:"init_done,omitempty"`
+	// Duration is how long the stream plays, in seconds: what, besides its
+	// quality and its number of segments, tells one stream from another when
+	// a new address is offered for it. A sidecar written before this was kept
+	// has none, and is not held to it.
+	Duration float64 `json:"duration,omitempty"`
+}
+
+// sameLength reports whether media plays for as long as the stream the sidecar
+// was written for. The tolerance is for a server that rounds the lengths of
+// its segments differently from one address to the next.
+func (s *hlsState) sameLength(media *hlsMedia) bool {
+	if s.Duration <= 0 {
+		return true
+	}
+	return math.Abs(s.Duration-media.TotalDuration) <= max(1, s.Duration/200)
 }
 
 func loadHLSState(target string) (*hlsState, bool) {
@@ -716,14 +732,14 @@ func hasMediaExt(name string) bool {
 // A refresh is the exception to the last part. The address is new on purpose,
 // a playlist behind a signed link having a new one every time it is asked
 // for, so the sidecar is matched on what the stream is, its quality and its
-// number of segments, and not on where it was found. That is as much as a
-// file's size says about a file.
+// number of segments and how long it plays, and not on where it was found.
+// That is as much as a file's size says about a file.
 func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsState, func(), error) {
 	base := filepath.Join(o.OutDir, hlsName(o, media))
 
 	st, hasState := loadHLSState(base)
 	if hasState && (st.Playlist == o.URL || o.Refresh) {
-		if st.Variant == variant && st.fits(media) {
+		if st.Variant == variant && st.fits(media) && (!o.Refresh || st.sameLength(media)) {
 			if fi, err := os.Stat(base); err == nil && fi.Size() >= st.Written {
 				if release, ok := reserveTarget(base); ok {
 					return base, st, release, nil
@@ -756,6 +772,11 @@ func planHLSTarget(o HLSOptions, media *hlsMedia, variant int) (string, *hlsStat
 		case st.Variant != variant:
 			return "", nil, nil, &RefreshMismatchError{Reason: "it points to another quality of the stream than " +
 				name + " was saved in"}
+		case !st.sameLength(media):
+			return "", nil, nil, &RefreshMismatchError{Reason: fmt.Sprintf(
+				"it points to a different stream (%s long, the partial download is %s)",
+				time.Duration(media.TotalDuration*float64(time.Second)).Round(time.Second),
+				time.Duration(st.Duration*float64(time.Second)).Round(time.Second))}
 		default:
 			// The sidecar and the file do not add up for this stream, or
 			// another download has the file open.
@@ -787,6 +808,13 @@ func (r *hlsRun) run(ctx context.Context, resume *hlsState) error {
 	if resume != nil {
 		r.next, r.want, r.bytes = resume.Next, resume.Next, resume.Written
 		r.initDone = resume.InitDone
+		if r.opts.Refresh {
+			// The segments are this address's from here on. Say so before
+			// anything can go wrong: the caller counts the new address as
+			// taken up once the plan is made, and a run that fails to open
+			// the file would otherwise leave a sidecar that names the old one.
+			r.persist()
+		}
 	}
 	// The init segment is fetched before the file exists. One that cannot be had
 	// (refused, timed out, or the user pausing while it is in flight) then
@@ -1268,6 +1296,7 @@ func (r *hlsRun) persist(f *os.File, force bool) {
 		Next:     done,
 		Written:  written,
 		InitDone: r.initDone,
+		Duration: r.media.TotalDuration,
 	})
 }
 
