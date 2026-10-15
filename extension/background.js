@@ -99,10 +99,17 @@ async function setHostState(ok, error) {
   // the page, because the popup asks for the task list every second and every
   // answer came through this function.
   paintBadge();
+  paintTitle(ok);
+  return st;
+}
+
+// The toolbar button's tooltip says whether godm can be reached. That is words,
+// so it is written again when the language is changed, and not only when the
+// host's state is.
+function paintTitle(ok) {
   chrome.action.setTitle({
     title: ok ? "godm" : tr("action_title_down")
   });
-  return st;
 }
 
 // noteHost records what an answer from the host says about the host. The host
@@ -652,14 +659,15 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 // A language chosen on the options page is taken up by a worker that is already
-// running, so that what it says from then on, and the right-click menu, which
-// Chrome keeps as it was made, follow the choice. A worker that was asleep is
-// woken by this event, and has read the new choice already; it reads it again,
-// which does no harm.
+// running, so that what it says from then on, and the right-click menu and the
+// button's tooltip, which Chrome keeps as they were made, follow the choice. A
+// worker that was asleep is woken by this event, and has read the new choice
+// already; it reads it again, which does no harm.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync" || !changes.language) return;
   i18nReady = useLanguage(changes.language.newValue).catch(() => {});
   buildMenus();
+  i18nReady.then(getHostState).then((st) => paintTitle(st.ok));
 });
 
 // selfTest pings the host as soon as the worker wakes, so a broken

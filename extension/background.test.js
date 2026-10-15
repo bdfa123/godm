@@ -72,7 +72,7 @@ const WEB_PAGE = {
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {}, session: {} }, options);
   const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: {} };
-  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [] };
+  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [], titles: [] };
   const events = {
     determining: event(),
     removed: event(),
@@ -118,7 +118,7 @@ function start(options) {
         return win;
       }
     },
-    action: { setTitle() {}, setBadgeText: (o) => seen.badges.push(o.text), setBadgeBackgroundColor() {} },
+    action: { setTitle: (o) => seen.titles.push(o.title), setBadgeText: (o) => seen.badges.push(o.text), setBadgeBackgroundColor() {} },
     tabs: {
       query: async () => [],
       get: async () => ({}),
@@ -949,6 +949,40 @@ test("only a change to the language, in the settings that sync, remakes the menu
     for (let i = 0; i < 5; i++) await settle();
   }
   assert.deepEqual(w.seen.menus, []);
+});
+
+test("the toolbar button's tooltip is written again in the language that is chosen", async () => {
+  const rest = async () => {
+    for (let i = 0; i < 5; i++) await settle();
+  };
+  const last = (w) => w.seen.titles[w.seen.titles.length - 1];
+  const w = start({ host: hostDown, browser: "en" });
+  await w.download(ITEM); // the host is found down, and the tooltip says so
+  assert.equal(last(w), messageIn("en", "action_title_down"));
+
+  w.data.sync.language = "zh_CN";
+  w.events.storage.fns[0]({ language: { oldValue: "auto", newValue: "zh_CN" } }, "sync");
+  await rest();
+  assert.equal(last(w), messageIn("zh_CN", "action_title_down"));
+
+  // Back to the browser's language.
+  delete w.data.sync.language;
+  w.events.storage.fns[0]({ language: { oldValue: "zh_CN" } }, "sync");
+  await rest();
+  assert.equal(last(w), messageIn("en", "action_title_down"));
+
+  // A host that is up has the same name whatever the language, and a change to
+  // some other setting leaves the tooltip alone.
+  const up = start({ browser: "en" });
+  await up.download(ITEM);
+  up.data.sync.language = "zh_CN";
+  up.events.storage.fns[0]({ language: { newValue: "zh_CN" } }, "sync");
+  await rest();
+  assert.equal(last(up), "godm");
+  const before = up.seen.titles.length;
+  up.events.storage.fns[0]({ enabled: { newValue: false } }, "sync");
+  await rest();
+  assert.equal(up.seen.titles.length, before);
 });
 
 // ---------- what a page played belongs to the page ----------
