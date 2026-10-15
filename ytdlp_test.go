@@ -27,6 +27,9 @@ func TestMain(m *testing.M) {
 	if scene := os.Getenv(stubEnv); scene != "" {
 		os.Exit(playYTDLP(scene, os.Args[1:]))
 	}
+	// What the machine running the tests has installed since it last started
+	// is not for a test to find: the system's PATH is read from its registry.
+	currentSystemPath = func() []string { return nil }
 	os.Exit(m.Run())
 }
 
@@ -126,6 +129,9 @@ func playYTDLP(scene string, args []string) int {
 		say("[youtube] Extracting URL: https://example.test/watch")
 		say("ERROR: [youtube] xyz: Video unavailable. This video is private")
 		return 1
+	case "path":
+		// The PATH the child was given, reported as if it were the file.
+		say("%s%s", fileMarker, os.Getenv("PATH"))
 	case "silent":
 		progress("downloading", 1<<20, 4<<20, 100000, 30, "avc1")
 	case "where":

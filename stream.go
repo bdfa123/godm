@@ -511,7 +511,7 @@ type playerLaunch struct {
 // mpv comes first: it copes best with a stream that pauses for data.
 func findPlayer() (exe string, isMPV bool) {
 	for _, name := range []string{"mpv", "vlc"} {
-		if p, err := exec.LookPath(name); err == nil {
+		if p, err := lookPath(name); err == nil {
 			return p, name == "mpv"
 		}
 		for _, p := range playerPaths(name) {

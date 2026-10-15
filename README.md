@@ -146,6 +146,11 @@ the extension was loaded need reloading first.
   your own yt-dlp configuration (`%APPDATA%\yt-dlp\config` and the other user
   locations) and no other: a `yt-dlp.conf` in the download folder or beside
   `yt-dlp.exe` is ignored, because a download could have put it there.
+  A yt-dlp installed after godm started (with `winget install yt-dlp.yt-dlp`,
+  say) is found at once: godm reads the system's PATH again from the registry
+  when it does not find it on its own, and gives yt-dlp that PATH, so the Deno
+  and ffmpeg that winget installs beside it are found too. No restart of the
+  browser is needed.
 - DRM-protected streams (Widevine, PlayReady, FairPlay) and live streams are
   refused with a reason.
 

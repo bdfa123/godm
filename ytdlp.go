@@ -57,6 +57,14 @@ func findYTDLP() (string, error) {
 			return p, nil
 		}
 	}
+	// godm's PATH is the one it was started with, and a daemon started by
+	// Chrome's native host is started once. yt-dlp installed since is on the
+	// system's PATH and on no one's else; see syspath.go.
+	for _, name := range ytdlpNames {
+		if p, err := lookPathNow(name); err == nil {
+			return p, nil
+		}
+	}
 	return "", &YTDLPMissingError{}
 }
 
@@ -234,18 +242,27 @@ func runFromOwnFolder(cmd *exec.Cmd) {
 	cmd.Dir = filepath.Dir(cmd.Path)
 }
 
-// speakUTF8 asks yt-dlp to write UTF-8. Left to itself it writes to a pipe in
-// the code page of the machine and drops what that cannot hold, so on a
-// Western or a Chinese Windows the name of the file it saved came back
-// missing letters, or as bytes that are not UTF-8 at all, and the task
-// pointed at a file that was never there. --encoding covers everything yt-dlp
-// writes once it has read its options; the variable covers Python itself, for
-// the little it says before that.
-func speakUTF8(cmd *exec.Cmd) {
+// prepareEnv sets up the environment yt-dlp is started in.
+//
+// It asks yt-dlp to write UTF-8. Left to itself it writes to a pipe in the code
+// page of the machine and drops what that cannot hold, so on a Western or a
+// Chinese Windows the name of the file it saved came back missing letters, or
+// as bytes that are not UTF-8 at all, and the task pointed at a file that was
+// never there. --encoding covers everything yt-dlp writes once it has read its
+// options; the variable covers Python itself, for the little it says before
+// that.
+//
+// It gives yt-dlp the PATH the system has now, after godm's own. Deno, which
+// YouTube needs, and ffmpeg, which merging needs, are found there and not
+// beside yt-dlp when winget installs them as separate packages, and godm's own
+// PATH is as old as the browser that started it; see syspath.go. Without them
+// yt-dlp reports the video as unavailable.
+func prepareEnv(cmd *exec.Cmd) {
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
 	cmd.Env = append(cmd.Env, "PYTHONIOENCODING=utf-8")
+	cmd.Env = withPathDirs(cmd.Env, currentSystemPath())
 }
 
 func ytdlpArgs(o YTDLPOptions) []string {
@@ -316,7 +333,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	}
 	cmd := newYTDLPCmd(ctx, bin, ytdlpArgs(o))
 	runFromOwnFolder(cmd)
-	speakUTF8(cmd)
+	prepareEnv(cmd)
 	// Progress goes to stderr and the printed path to stdout. Both ends of one
 	// pipe keeps them in order and means neither can fill its own buffer and
 	// wedge the process.
@@ -554,7 +571,7 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 	args = append(args, "--", o.URL)
 	cmd := newYTDLPCmd(ctx, bin, args)
 	runFromOwnFolder(cmd)
-	speakUTF8(cmd)
+	prepareEnv(cmd)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	// The same two ways of being held up as a download has: when time is up
