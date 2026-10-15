@@ -156,6 +156,30 @@ the extension was loaded need reloading first.
   for any other download). What yt-dlp leaves in that folder besides the
   result (the streams `--keep-video` asks it to keep, say) is deleted with it
   when the download is done.
+- **Keeping yt-dlp current**: the sites yt-dlp is used for change often, and a
+  copy a few months old stops working on them with an error that does not say
+  so. The **Video sites (yt-dlp)** section of Settings shows the installed
+  version (`yt-dlp --version`) and the newest release, with **Check for
+  updates** and **Update** buttons. The newest release is the latest stable one
+  on GitHub (`api.github.com/repos/yt-dlp/yt-dlp/releases/latest`), asked for
+  through godm's usual connection, so the system proxy applies; the answer is
+  kept for six hours, and a check that fails is shown as failed, never as
+  being up to date. How an update is done follows yt-dlp's own README
+  ("Update"): a copy installed with winget (it lives under
+  `...\WinGet\Packages\yt-dlp.yt-dlp_*`) is updated with `winget upgrade --id
+  yt-dlp.yt-dlp`, and so is Deno with `DenoLand.Deno` when that came from winget
+  too, since yt-dlp asks for a newer Deno from time to time; any other release
+  binary (`yt-dlp.exe` downloaded from GitHub) updates itself with `yt-dlp -U`;
+  a copy from pip, Scoop, Chocolatey, Homebrew or another package manager is
+  left alone and the page gives the command to run. winget's list follows
+  GitHub's by a day or so, and then the page says that the newest release is
+  not in winget yet. An update is refused while a yt-dlp download or a page
+  being read is running (Windows cannot replace a running `yt-dlp.exe`), and
+  downloads that start while one is under way wait for it. When a yt-dlp
+  download or inspection fails and the installed version is older than the
+  newest release godm knows of, the reason ends with a note that yt-dlp may be
+  out of date, and where to update it. It says nothing when the versions
+  cannot be compared or the newest one could not be learnt.
 - DRM-protected streams (Widevine, PlayReady, FairPlay) and live streams are
   refused with a reason.
 
@@ -272,6 +296,20 @@ download:
 - **Language**: follow Windows, English, or 简体中文. The extension follows the
   browser's language.
 - **After a torrent finishes**: stop uploading, seed to ratio 1.0, or keep seeding.
+- **Video sites (yt-dlp)**: the installed and the newest version, a button to
+  check and one to update; see *Keeping yt-dlp current* above. These two act at
+  once and are not part of Save.
+
+### The yt-dlp part of the API
+
+Like every address under `/api/`, these need the bearer token (see *Security
+notes*).
+
+| Request | What it does |
+|---|---|
+| `GET /api/ytdlp` | What is known without asking anyone: whether yt-dlp was found and where, how it was installed (`winget`, `standalone`, `scoop`, `chocolatey`, `brew`, `pipx`, `pip` or `package`), whether godm updates that kind (`can_update`) or else the `command` to run by hand, the `version` and `latest` found so far (with `version_error` and `latest_error` when looking failed), `outdated` (`true`, `false`, or `null` when the two cannot be compared), `busy` while yt-dlp is in use, and `updating` with the `step` and, afterwards, the `result` of the last update. |
+| `POST /api/ytdlp/check` | Reads the installed version and asks GitHub for the newest release, unless that was done within the last six hours; `?force=1` always looks again. Answers like `GET /api/ytdlp`. |
+| `POST /api/ytdlp/update` | Starts an update in the background and answers at once with the status; follow it with `GET /api/ytdlp`. When it cannot start it answers `{"ok": false, "reason": ..., "error": ...}`, the reason being `missing`, `manual`, `winget`, `busy` or `updating`. |
 
 ## Commands
 

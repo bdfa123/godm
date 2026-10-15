@@ -196,6 +196,14 @@ const uiHTML = `<!doctype html>
   .folders label span { width: 68px; flex: none; }
   .folders input { flex: 1; min-width: 0; }
   @media (max-width: 520px) { .folders { grid-template-columns: 1fr; } }
+  .sethead { font-weight: 600; }
+  .ytline { display: flex; gap: 4px 20px; flex-wrap: wrap; margin: 6px 0 0; color: var(--muted); }
+  .ytline b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .ytbtns { display: flex; gap: 8px; margin: 8px 0 0; flex-wrap: wrap; }
+  .dialog .set p#ytStatus { min-height: 1.45em; }
+  .dialog .set p#ytStatus.err { color: var(--err); }
+  .dialog .set p#ytStatus.ok { color: var(--ok); }
+  .dialog .set p#ytStatus.warn { color: var(--warn); }
 
   .toast {
     position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 30;
@@ -292,6 +300,19 @@ const uiHTML = `<!doctype html>
       <label class="check"><input type="checkbox" id="setSort"> <span data-i18n="set.sort"></span></label>
       <p id="setSortHelp"></p>
       <div class="folders" id="setFolders"></div>
+    </div>
+    <div class="set" id="ytRow">
+      <div class="sethead" data-i18n="set.yt"></div>
+      <p data-i18n="set.yt.help"></p>
+      <div class="ytline">
+        <span><span data-i18n="yt.have"></span> <b id="ytHave"></b></span>
+        <span><span data-i18n="yt.newest"></span> <b id="ytLatest"></b></span>
+      </div>
+      <div class="ytbtns">
+        <button class="btn small" id="ytCheck" data-i18n="yt.check"></button>
+        <button class="btn small" id="ytUpdate" data-i18n="yt.update"></button>
+      </div>
+      <p id="ytStatus" role="status"></p>
     </div>
     <div class="foot">
       <button class="btn" data-close="setDlg" data-i18n="common.cancel"></button>
@@ -506,6 +527,34 @@ I18N.en = {
   "kind.doc": "Documents",
   "kind.app": "Programs",
   "kind.image": "Images",
+  "set.yt": "Video sites (yt-dlp)",
+  "set.yt.help": "godm hands some video sites to yt-dlp. Those sites change often and yt-dlp is released again to keep up, so a copy that is a few months old stops working on them.",
+  "yt.have": "Installed:",
+  "yt.newest": "Newest:",
+  "yt.unknown": "unknown",
+  "yt.none": "not installed",
+  "yt.check": "Check for updates",
+  "yt.update": "Update",
+  "yt.checking": "Looking for the newest version…",
+  "yt.updating": "Updating yt-dlp… this can take a minute.",
+  "yt.updating.deno": "Updating Deno, which YouTube needs…",
+  "yt.notfound": "yt-dlp is not installed. To install it, run winget install yt-dlp.yt-dlp in a terminal; godm finds it without a restart.",
+  "yt.current": "yt-dlp is up to date.",
+  "yt.available": "A newer yt-dlp is available: {have} → {newest}.",
+  "yt.cannotCompare": "The installed version, {have}, cannot be compared with the newest release, {newest}.",
+  "yt.checkFailed": "Could not check for the newest version: {why}",
+  "yt.versionFailed": "Could not read the installed version: {why}",
+  "yt.updated": "Updated yt-dlp: {from} → {to}.",
+  "yt.alreadyNewest": "yt-dlp is already the newest version available ({to}).",
+  "yt.behind": "The newest release is {newest}, which winget does not have yet.",
+  "yt.deno.updated": "Deno was updated too.",
+  "yt.deno.failed": "Deno could not be updated: {why}",
+  "yt.failed": "Update failed: {why}",
+  "yt.busy": "yt-dlp is in use by a download or by a page being read. Pause it or wait until it is done, then update.",
+  "yt.already": "An update is already running.",
+  "yt.nowinget": "winget was not found on this computer. Run winget upgrade --id yt-dlp.yt-dlp in a terminal to update.",
+  "yt.manual": "godm does not update this copy of yt-dlp itself. Update it the way you installed it, for example with {cmd}",
+  "yt.manual.named": "This copy of yt-dlp came from {name}, which godm does not run. Update it with {cmd}",
 
   "time.s": "{s}s",
   "time.ms": "{m}m {s}s",
@@ -687,6 +736,34 @@ I18N.zh = {
   "kind.doc": "文档",
   "kind.app": "程序",
   "kind.image": "图片",
+  "set.yt": "视频网站（yt-dlp）",
+  "set.yt.help": "godm 会把部分视频网站交给 yt-dlp 处理。这些网站经常改版，yt-dlp 也会不断发布新版本来跟进，所以放了几个月的旧版本会在这些网站上失效。",
+  "yt.have": "已安装：",
+  "yt.newest": "最新：",
+  "yt.unknown": "未知",
+  "yt.none": "未安装",
+  "yt.check": "检查更新",
+  "yt.update": "更新",
+  "yt.checking": "正在查找最新版本…",
+  "yt.updating": "正在更新 yt-dlp…可能需要一分钟。",
+  "yt.updating.deno": "正在更新 Deno（YouTube 需要它）…",
+  "yt.notfound": "未安装 yt-dlp。请在终端运行 winget install yt-dlp.yt-dlp 安装；godm 无需重启即可找到它。",
+  "yt.current": "yt-dlp 已是最新版本。",
+  "yt.available": "有更新的 yt-dlp：{have} → {newest}。",
+  "yt.cannotCompare": "已安装的版本 {have} 无法与最新版本 {newest} 比较。",
+  "yt.checkFailed": "无法检查最新版本：{why}",
+  "yt.versionFailed": "无法读取已安装的版本：{why}",
+  "yt.updated": "已更新 yt-dlp：{from} → {to}。",
+  "yt.alreadyNewest": "yt-dlp 已是可获得的最新版本（{to}）。",
+  "yt.behind": "最新版本 {newest} 已发布，但 winget 暂时还没有。",
+  "yt.deno.updated": "Deno 也已更新。",
+  "yt.deno.failed": "Deno 无法更新：{why}",
+  "yt.failed": "更新失败：{why}",
+  "yt.busy": "yt-dlp 正被下载任务或网页解析占用。请先暂停它或等它结束，再更新。",
+  "yt.already": "已有一个更新正在进行。",
+  "yt.nowinget": "此电脑上找不到 winget。请在终端运行 winget upgrade --id yt-dlp.yt-dlp 进行更新。",
+  "yt.manual": "godm 不会自己更新这份 yt-dlp。请用当初安装它的方式更新，例如：{cmd}",
+  "yt.manual.named": "这份 yt-dlp 来自 {name}，godm 不会代为运行它。请用 {cmd} 更新。",
 
   "time.s": "{s}秒",
   "time.ms": "{m}分{s}秒",
@@ -1508,6 +1585,7 @@ function fillSettingsText() {
     return '<option value="' + esc(c.value) + '">' + esc(SEED_LABEL[c.value] ? tr(SEED_LABEL[c.value]) : c.label) + "</option>";
   }).join("");
   seed.value = kept;
+  ytRender();
 }
 
 // setLang shows the page in a language, now. It is also how the page follows a
@@ -1544,6 +1622,7 @@ function openSettings() {
     folderInputs().forEach(function (i) { i.value = (d.folders || {})[i.getAttribute("data-folder")] || ""; });
     dimFolders();
     show("setDlg");
+    ytLoad();
   }).catch(fail);
 }
 document.getElementById("setBtn").addEventListener("click", openSettings);
@@ -1580,6 +1659,127 @@ document.getElementById("setGo").addEventListener("click", function () {
     poll();
   }).catch(fail);
 });
+
+// ---------- yt-dlp ----------
+// The Settings dialog says which yt-dlp godm uses and which release is the
+// newest, and can update it. The daemon does the looking and the updating and
+// this page asks and shows. An update takes a while and goes on in the daemon,
+// so while one runs the page asks how it is getting on once a second, for as
+// long as the dialog is open. These buttons act at once and have nothing to do
+// with Save.
+var YT = { st: null, seq: 0, wait: "", note: "", noteKind: "", polling: false };
+// The reasons the daemon gives for not starting an update, in the page's words.
+var YT_REFUSED = { busy: "yt.busy", updating: "yt.already", winget: "yt.nowinget", missing: "yt.notfound" };
+
+function ytv(v) { return v || tr("yt.unknown"); }
+// ytManual says how to update a yt-dlp that godm leaves to whatever installed it.
+function ytManual(st) {
+  return st.install_name ? tr("yt.manual.named", { name: st.install_name, cmd: st.command || "" })
+    : tr("yt.manual", { cmd: st.command || "" });
+}
+// ytSaying is the line under the buttons: what is going on, or how the last
+// thing went. Where a look failed it says so, and never that all is well.
+function ytSaying(st) {
+  var r = st.result, parts = [], kind = "";
+  if (st.updating) return { text: tr(st.step === "Deno" ? "yt.updating.deno" : "yt.updating"), kind: "" };
+  if (YT.wait) return { text: tr(YT.wait), kind: "" };
+  if (YT.note) return { text: YT.note, kind: YT.noteKind };
+  if (r) {
+    if (!r.ok) return { text: tr("yt.failed", { why: r.error || "" }), kind: "err" };
+    parts.push(r.changed ? tr("yt.updated", { from: ytv(r.from), to: ytv(r.to) }) : tr("yt.alreadyNewest", { to: ytv(r.to) }));
+    if (r.behind && st.install === "winget") parts.push(tr("yt.behind", { newest: st.latest || "" }));
+    if (r.deno === "updated") parts.push(tr("yt.deno.updated"));
+    if (r.deno === "failed") parts.push(tr("yt.deno.failed", { why: r.deno_error || "" }));
+    return { text: parts.join(" "), kind: r.deno === "failed" ? "warn" : "ok" };
+  }
+  if (!st.found) return { text: tr("yt.notfound"), kind: "warn" };
+  if (st.version_error) { parts.push(tr("yt.versionFailed", { why: st.version_error })); kind = "err"; }
+  else if (st.latest_error && st.outdated !== true) { parts.push(tr("yt.checkFailed", { why: st.latest_error })); kind = "err"; }
+  else if (st.outdated === true) { parts.push(tr("yt.available", { have: st.version, newest: st.latest })); kind = "warn"; }
+  else if (st.outdated === false) { parts.push(tr("yt.current")); kind = "ok"; }
+  else if (st.version && st.latest) parts.push(tr("yt.cannotCompare", { have: st.version, newest: st.latest }));
+  if (!st.can_update) parts.push(ytManual(st));
+  return { text: parts.join(" "), kind: kind };
+}
+function ytRender() {
+  var st = YT.st;
+  if (!st) return;
+  var say = ytSaying(st), line = document.getElementById("ytStatus");
+  document.getElementById("ytHave").textContent = st.found ? ytv(st.version) : tr("yt.none");
+  document.getElementById("ytLatest").textContent = ytv(st.latest);
+  line.textContent = say.text;
+  line.className = say.kind;
+  var working = !!(st.updating || YT.wait);
+  document.getElementById("ytCheck").disabled = working;
+  // Nothing to update when it is the newest, unless that is not known.
+  document.getElementById("ytUpdate").disabled = working || !st.found || !st.can_update ||
+    (st.outdated === false && !st.latest_error);
+}
+function ytShow(st) {
+  YT.st = st;
+  ytRender();
+  if (st.updating) ytFollow();
+}
+// An answer that arrives after the question was asked again is out of date.
+function ytFail(my, e) {
+  if (my !== YT.seq) return;
+  YT.wait = "";
+  YT.note = e && e.message ? e.message : String(e);
+  YT.noteKind = "err";
+  ytRender();
+}
+// ytLoad shows what the daemon has, then has it look: from what it found
+// within the last few hours, so that opening the dialog costs nothing.
+function ytLoad() {
+  var my = ++YT.seq;
+  YT.wait = YT.note = "";
+  api("/api/ytdlp").then(function (st) {
+    if (my !== YT.seq) return;
+    ytShow(st);
+    if (!st.updating) ytCheck(false);
+  }).catch(function (e) { ytFail(my, e); });
+}
+function ytCheck(force) {
+  var my = ++YT.seq;
+  YT.wait = "yt.checking";
+  YT.note = "";
+  ytRender();
+  post("/api/ytdlp/check" + (force ? "?force=1" : "")).then(function (st) {
+    if (my !== YT.seq) return;
+    YT.wait = "";
+    ytShow(st);
+  }).catch(function (e) { ytFail(my, e); });
+}
+function ytUpdate() {
+  var my = ++YT.seq;
+  YT.wait = YT.note = "";
+  post("/api/ytdlp/update").then(function (r) {
+    if (my !== YT.seq) return;
+    if (r.ok === false) {
+      YT.note = YT_REFUSED[r.reason] ? tr(YT_REFUSED[r.reason]) :
+        (r.reason === "manual" && YT.st ? ytManual(YT.st) : (r.error || ""));
+      YT.noteKind = "err";
+      ytRender();
+      return;
+    }
+    ytShow(r);
+  }).catch(function (e) { ytFail(my, e); });
+}
+function ytFollow() {
+  if (YT.polling) return;
+  YT.polling = true;
+  setTimeout(function () {
+    YT.polling = false;
+    if (document.getElementById("setDlg").hidden) return;
+    api("/api/ytdlp").then(function (st) {
+      YT.st = st;
+      ytRender();
+      if (st.updating) ytFollow();
+    }).catch(function () {});
+  }, 1000);
+}
+document.getElementById("ytCheck").addEventListener("click", function () { ytCheck(true); });
+document.getElementById("ytUpdate").addEventListener("click", ytUpdate);
 
 // A .torrent file is sent as it is; the daemon keeps its own copy, so the
 // original can be deleted afterwards.
