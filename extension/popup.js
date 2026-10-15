@@ -74,8 +74,13 @@ box.addEventListener("change", () => {
   chrome.storage.sync.set({ enabled: box.checked });
 });
 
-refresh();
-setInterval(refresh, 1000);
+// Nothing is drawn before the language is known; see i18n.js.
+i18nReady.then(() => {
+  refresh();
+  setInterval(refresh, 1000);
+  loadConfig();
+  loadMedia();
+});
 
 // ---------- video found on this page ----------
 
@@ -280,6 +285,3 @@ document.getElementById("media").addEventListener("click", (e) => {
     refresh();
   });
 });
-
-loadConfig();
-loadMedia();

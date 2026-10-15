@@ -40,4 +40,16 @@ function install(locale) {
   return globalThis.chrome;
 }
 
-module.exports = { expand, install, messagesFor };
+// ownFiles stands in for fetch as an extension page or worker uses it on its
+// own files: a chrome-extension:// address is read from this folder.
+function ownFiles(id) {
+  const root = "chrome-extension://" + (id || "godm-extension-id") + "/";
+  return async (url) => {
+    if (!String(url).startsWith(root)) throw new TypeError("Failed to fetch " + url);
+    const file = path.join(__dirname, String(url).slice(root.length));
+    if (!fs.existsSync(file)) return { ok: false, status: 404, json: async () => ({}) };
+    return { ok: true, status: 200, json: async () => JSON.parse(fs.readFileSync(file, "utf8")) };
+  };
+}
+
+module.exports = { expand, install, messagesFor, ownFiles };

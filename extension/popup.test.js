@@ -10,7 +10,9 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { install } = require("./fakechrome.test.js");
+const { install, ownFiles } = require("./fakechrome.test.js");
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 const IDS = ["body", "media", "open", "opts", "grab", "enabled"];
 
@@ -31,8 +33,9 @@ class FakeElement {
 }
 
 // open runs the popup. reply answers the messages it sends to the worker,
-// which passes the ones it does not know on to the native host.
-function open(reply) {
+// which passes the ones it does not know on to the native host. language is
+// what the options page saved, if anything.
+function open(reply, language) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -44,9 +47,19 @@ function open(reply) {
   const tabs = [];
   const closed = [];
   const chrome = Object.assign({}, install("en"), {
-    storage: { sync: { get: (defaults, cb) => cb(defaults), set: () => {} } },
+    storage: {
+      sync: {
+        get: (defaults, cb) => {
+          const got = Object.assign({}, defaults, language ? { language } : {});
+          if (cb) cb(got);
+          return Promise.resolve(got);
+        },
+        set: () => {}
+      }
+    },
     runtime: {
       id: "abcdefghijklmnop",
+      getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
       openOptionsPage: () => {},
       sendMessage: (message, cb) => {
         sent.push(message);
@@ -60,6 +73,8 @@ function open(reply) {
     chrome,
     window: { close: () => closed.push("window.close") },
     setInterval: () => 0,
+    fetch: ownFiles("abcdefghijklmnop"),
+    console: { warn() {} },
     URL
   });
   for (const file of ["i18n.js", "popup.js"]) {
@@ -113,4 +128,16 @@ test("no answer at all is said in the popup's own words", () => {
 
   assert.deepEqual(p.closed, []);
   assert.equal(p.ui.open.title, "no response");
+});
+
+test("the popup speaks the language that was chosen, and asks nothing before it knows it", async () => {
+  const p = open(host(), "zh_CN");
+  assert.deepEqual(p.sent, [], "nothing was drawn, or asked for, in the browser's language");
+  await settle();
+  assert.ok(p.sent.some((m) => m.type === "tasks"), "then the list is asked for");
+  assert.equal(p.ui.body.innerHTML.includes("还没有下载任务。"), true, p.ui.body.innerHTML);
+
+  const plain = open(host());
+  await settle();
+  assert.equal(plain.ui.body.innerHTML.includes("No downloads yet."), true, plain.ui.body.innerHTML);
 });

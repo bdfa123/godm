@@ -324,6 +324,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 });
 
 async function handleDownload(item) {
+  await i18nReady;
   const cfg = await getConfig();
   if (!cfg.enabled) return;
 
@@ -615,10 +616,12 @@ async function browseFolder(current) {
 
 // ---------- right-click entry point ----------
 
-// The titles are stored with the menu, in the browser's language at the time.
+// The titles are stored with the menu, in the language spoken at the time.
 // Making them again at every start keeps them right after the browser's
-// language is changed, which no install or update would announce.
-function buildMenus() {
+// language is changed, which no install or update would announce, and the
+// language option makes them again when it is changed (see below).
+async function buildMenus() {
+  await i18nReady;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: "godm-link",
@@ -648,10 +651,22 @@ chrome.runtime.onStartup.addListener(() => {
   selfTest();
 });
 
+// A language chosen on the options page is taken up by a worker that is already
+// running, so that what it says from then on, and the right-click menu, which
+// Chrome keeps as it was made, follow the choice. A worker that was asleep is
+// woken by this event, and has read the new choice already; it reads it again,
+// which does no harm.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "sync" || !changes.language) return;
+  i18nReady = useLanguage(changes.language.newValue).catch(() => {});
+  buildMenus();
+});
+
 // selfTest pings the host as soon as the worker wakes, so a broken
 // registration shows up on the options page rather than the first time a real
 // download needs it.
 async function selfTest() {
+  await i18nReady;
   const resp = await callHost({ type: "ping" });
   await setHostState(!!resp.ok, resp.error);
   if (resp.ok) console.log("godm: native host reachable");
@@ -659,6 +674,7 @@ async function selfTest() {
 }
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  await i18nReady;
   if (info.menuItemId === "godm-page-links" || info.menuItemId === "godm-selection-links") {
     await pickLinksFromTab(tab, info.menuItemId === "godm-selection-links");
     return;
@@ -891,7 +907,14 @@ function fromOwnPage(sender) {
   );
 }
 
+// Every answer may be in words, so none is given before the language is known.
+// Whether the sender may be answered is judged by route, as it always was.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  i18nReady.then(() => route(msg, sender, sendResponse));
+  return true; // keep the channel open for the async reply
+});
+
+function route(msg, sender, sendResponse) {
   if (!fromOwnPage(sender)) {
     // The bridge below passes anything it does not know on to the native
     // host, so a page must not get that far: a clicked magnet is all it may
@@ -945,8 +968,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     sendResponse(resp);
   });
-  return true; // keep the channel open for the async reply
-});
+  return true;
+}
 
 // ---------- media sniffing ----------
 //

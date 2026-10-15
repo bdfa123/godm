@@ -5,7 +5,8 @@ const test = require("node:test");
 const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
-const { expand, install, messagesFor } = require("./fakechrome.test.js");
+const vm = require("node:vm");
+const { expand, install, messagesFor, ownFiles } = require("./fakechrome.test.js");
 
 const en = messagesFor("en");
 const zh = messagesFor("zh_CN");
@@ -138,4 +139,152 @@ test("a message fills its placeholders in the order the English gives them", () 
 test("a Chinese message can put the values in a different order", () => {
   const entry = { message: "$B$ then $A$", placeholders: { a: { content: "$1" }, b: { content: "$2" } } };
   assert.equal(expand(entry, ["x", "y"]), "y then x");
+});
+
+// ---------- the language option ----------
+
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+// speak loads i18n.js the way a page or the worker does, with the browser set to
+// browserLanguage and the options page having saved language (nothing, if
+// undefined). It returns the context once the language has been read.
+async function speak(browserLanguage, language, extra) {
+  const base = install(browserLanguage);
+  const stored = language === undefined ? {} : { language };
+  const chrome = Object.assign({}, base, {
+    storage: { sync: { get: async (defaults) => Object.assign({}, defaults, stored) } },
+    runtime: { getURL: (p) => "chrome-extension://godm-extension-id/" + p }
+  });
+  const context = vm.createContext(
+    Object.assign({ chrome, fetch: ownFiles("godm-extension-id"), console: { warn() {} } }, extra)
+  );
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "i18n.js"), "utf8"), context, { filename: "i18n.js" });
+  await vm.runInContext("i18nReady", context);
+  install("en");
+  return context;
+}
+
+test("with no language chosen, or automatic, the words are the browser's", async () => {
+  for (const language of [undefined, "auto"]) {
+    assert.equal((await speak("en", language)).tr("picker_cancel"), "Cancel");
+    assert.equal((await speak("zh_CN", language)).tr("picker_cancel"), "取消");
+  }
+});
+
+test("a language that is chosen is spoken whatever the browser is set to", async () => {
+  const inChinese = await speak("en", "zh_CN");
+  assert.equal(inChinese.tr("picker_cancel"), "取消");
+  assert.equal(inChinese.tr("popup_empty"), "还没有下载任务。");
+  const inEnglish = await speak("zh_CN", "en");
+  assert.equal(inEnglish.tr("picker_cancel"), "Cancel");
+  assert.equal(inEnglish.tr("popup_empty"), "No downloads yet.");
+});
+
+test("a chosen language fills in values as the browser would have", async () => {
+  // The browser's own reading of the same messages is the stand-in for Chrome,
+  // so this is the choice agreeing with Chrome on every message there is.
+  for (const [locale, other] of [["en", "zh_CN"], ["zh_CN", "en"]]) {
+    const chosen = await speak(other, locale);
+    const native = await speak(locale);
+    for (const key of Object.keys(messagesFor(locale))) {
+      const subs = ["first", "second", "third"];
+      assert.equal(chosen.tr(key, subs), native.tr(key, subs), `${locale} ${key}`);
+      assert.equal(chosen.tr(key), native.tr(key), `${locale} ${key} with no values`);
+    }
+  }
+  const inChinese = await speak("en", "zh_CN");
+  assert.equal(inChinese.tr("picker_count", [3, 10]), "已选择 3 / 10 个链接");
+  assert.equal(inChinese.tr("popup_conns", 6), "6 个连接");
+});
+
+test("anything that cannot be read leaves the browser's language, not a broken page", async () => {
+  assert.equal((await speak("en", "fr")).tr("picker_cancel"), "Cancel", "a language there is none of");
+  assert.equal((await speak("zh_CN", 7)).tr("picker_cancel"), "取消");
+  const noFile = await speak("en", "zh_CN", { fetch: async () => ({ ok: false, status: 404 }) });
+  assert.equal(noFile.tr("picker_cancel"), "Cancel", "a file that is not there");
+  const broken = await speak("en", "zh_CN", { fetch: async () => { throw new TypeError("offline"); } });
+  assert.equal(broken.tr("picker_cancel"), "Cancel", "a file that cannot be fetched");
+
+  // Storage that will not answer is the default, and so is no storage at all.
+  const base = install("zh_CN");
+  const deaf = vm.createContext({ chrome: Object.assign({}, base, { storage: { sync: { get: async () => { throw new Error("no"); } } } }) });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "i18n.js"), "utf8"), deaf);
+  await vm.runInContext("i18nReady", deaf);
+  assert.equal(deaf.tr("picker_cancel"), "取消");
+  install("en");
+});
+
+test("a message the chosen language lacks is the browser's, and one nobody has is its own name", async () => {
+  const partial = await speak("en", "zh_CN", {
+    fetch: async () => ({ ok: true, json: async () => ({ picker_cancel: { message: "放弃" } }) })
+  });
+  assert.equal(partial.tr("picker_cancel"), "放弃");
+  assert.equal(partial.tr("picker_download"), "Download");
+  assert.equal(partial.tr("no_such_message"), "no_such_message");
+});
+
+test("of two choices made close together the later one is the language spoken", async () => {
+  const waiting = {};
+  const context = await speak("en", undefined, {
+    fetch: (url) => new Promise((resolve) => {
+      waiting[/_locales\/([^/]+)\//.exec(url)[1]] = () =>
+        ownFiles("godm-extension-id")(url).then(resolve);
+    })
+  });
+  const first = vm.runInContext('useLanguage("zh_CN")', context);
+  const second = vm.runInContext('useLanguage("en")', context);
+  waiting.en();
+  await second;
+  waiting.zh_CN(); // the first one's file comes in after the second one has been used
+  await first;
+  assert.equal(context.tr("picker_cancel"), "Cancel");
+});
+
+test("a page is written in the browser's language at once and again in the chosen one", async () => {
+  const label = { dataset: { i18n: "picker_cancel" }, textContent: "" };
+  const tip = { dataset: { i18nTitle: "picker_toggle_tip" }, title: "" };
+  const hint = { dataset: { i18nPh: "picker_filter_ph" }, placeholder: "" };
+  const document = {
+    documentElement: {},
+    querySelectorAll: (sel) => (sel === "[data-i18n]" ? [label] : sel === "[data-i18n-title]" ? [tip] : [hint])
+  };
+  const base = install("en");
+  const chrome = Object.assign({}, base, {
+    storage: { sync: { get: async (d) => Object.assign({}, d, { language: "zh_CN" }) } },
+    runtime: { getURL: (p) => "chrome-extension://godm-extension-id/" + p }
+  });
+  const context = vm.createContext({ chrome, document, fetch: ownFiles("godm-extension-id"), console });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "i18n.js"), "utf8"), context);
+  assert.equal(label.textContent, "Cancel", "before the choice is read the page has words in it");
+  assert.equal(document.documentElement.lang, "en");
+  await vm.runInContext("i18nReady", context);
+  assert.equal(label.textContent, "取消");
+  assert.equal(tip.title, "选择所有显示的链接");
+  assert.equal(hint.placeholder, "按名称、文本或地址筛选");
+  assert.equal(document.documentElement.lang, "zh-CN");
+  install("en");
+});
+
+test("i18n.js lists the languages by the folders the extension has", () => {
+  const folders = fs.readdirSync(path.join(__dirname, "_locales")).sort();
+  const { LANGUAGES } = require("./i18n.js");
+  assert.deepEqual([...LANGUAGES].sort(), folders);
+});
+
+test("a choice made while the saved one is still being read is not undone by it", async () => {
+  // A worker that has only just woken reads the setting while the options page
+  // is saving a new one; the read answers late, with what it saw first.
+  let answer;
+  const late = new Promise((resolve) => (answer = resolve));
+  const chrome = Object.assign({}, install("en"), {
+    storage: { sync: { get: () => late } },
+    runtime: { getURL: (p) => "chrome-extension://godm-extension-id/" + p }
+  });
+  const context = vm.createContext({ chrome, fetch: ownFiles("godm-extension-id"), console });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "i18n.js"), "utf8"), context);
+  await vm.runInContext('useLanguage("zh_CN")', context);
+  answer({ language: "auto" });
+  await vm.runInContext("i18nReady", context);
+  assert.equal(context.tr("picker_cancel"), "取消");
+  install("en");
 });

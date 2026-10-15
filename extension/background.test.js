@@ -11,7 +11,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { install } = require("./fakechrome.test.js");
+const { install, ownFiles } = require("./fakechrome.test.js");
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -65,21 +65,25 @@ const WEB_PAGE = {
 
 // start loads background.js into a fresh worker. options.host answers what the
 // native host is asked, and options.cookies what the cookie jar holds.
-// options.session is what the worker's session storage holds already, and
-// options.page what the links in the page of a tab are found to be.
+// options.browser is the language the browser is set to, options.session what
+// the worker's session storage holds already, options.page what the links in
+// the page of a tab are found to be, and options.fetch replaces the worker's
+// reading of its own files.
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {}, session: {} }, options);
   const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: {} };
-  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [] };
+  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [] };
   const events = {
     determining: event(),
     removed: event(),
     message: event(),
-    menu: event()
+    menu: event(),
+    installed: event(),
+    storage: event()
   };
   let nextWindow = 100;
 
-  const chrome = Object.assign({}, install("en"), {
+  const chrome = Object.assign({}, install(opts.browser || "en"), {
     runtime: {
       id: "godm-extension-id",
       getURL: (p) => "chrome-extension://godm-extension-id/" + p,
@@ -88,11 +92,16 @@ function start(options) {
         seen.host.push(message);
         Promise.resolve(opts.host(message)).then(callback);
       },
-      onInstalled: event(),
+      onInstalled: events.installed,
       onStartup: event(),
       onMessage: events.message
     },
-    storage: { session: area(data.session), sync: area(data.sync), local: area(data.local) },
+    storage: {
+      session: area(data.session),
+      sync: area(data.sync),
+      local: area(data.local),
+      onChanged: events.storage
+    },
     downloads: {
       onDeterminingFilename: events.determining,
       cancel: async (id) => seen.cancelled.push(id),
@@ -119,7 +128,11 @@ function start(options) {
       onActivated: event()
     },
     webRequest: { onHeadersReceived: event() },
-    contextMenus: { removeAll: (cb) => cb && cb(), create() {}, onClicked: events.menu },
+    contextMenus: {
+      removeAll: (cb) => cb && cb(),
+      create: (o) => seen.menus.push(o.title),
+      onClicked: events.menu
+    },
     cookies: { getAll: async (q) => opts.cookies(q) },
     notifications: { create: (n) => seen.notices.push(n) },
     scripting: { executeScript: async () => (opts.page ? [{ result: clone(opts.page) }] : []) }
@@ -129,6 +142,7 @@ function start(options) {
     chrome,
     navigator: { userAgent: "test-agent" },
     URL,
+    fetch: opts.fetch || ownFiles("godm-extension-id"),
     console: { debug() {}, log() {}, warn() {}, error() {} },
     // Nothing waits on a timer in these tests, and a real one would keep the
     // test run from ending. The delays asked for are kept, so a test can see
@@ -649,6 +663,7 @@ test("other downloads, and a .torrent left to Chrome, are answered without waiti
 // ---------- the videos a page played, in the link picker ----------
 
 const { mediaEntry } = require("./sniff.js");
+const { messagesFor, ownFiles: ownFilesFor } = require("./fakechrome.test.js");
 
 const PLAYER_TAB = { id: 7, url: "https://video.test/watch/1", title: "The Film - video.test" };
 const PAGE_LINKS = {
@@ -774,4 +789,113 @@ test("a picked batch can say a stream, and nothing else about what an item is", 
     ],
     "a torrent or a page for yt-dlp is not what a batch is for; an address that is not http is dropped"
   );
+});
+
+// ---------- the language ----------
+
+const messageIn = (locale, key) => messagesFor(locale)[key].message;
+
+// hostDown makes the host fail its ping, which a download answers with a notice.
+const hostDown = (m) => (m.type === "ping" ? { ok: false, error: "gone" } : { ok: true });
+
+test("the notices are in the browser's language until another is chosen", async () => {
+  for (const [browser, language] of [["en", undefined], ["zh_CN", undefined], ["en", "auto"], ["zh_CN", "auto"]]) {
+    const w = start({ host: hostDown, browser, settings: language ? { language } : {} });
+    await w.download(ITEM);
+    assert.equal(w.seen.notices.length, 1);
+    assert.equal(w.seen.notices[0].title, messageIn(browser, "notify_host_down_title"), browser + " " + language);
+  }
+});
+
+test("a language that is chosen is the language of the notices, whatever the browser says", async () => {
+  for (const [browser, language] of [["en", "zh_CN"], ["zh_CN", "en"], ["en", "en"], ["zh_CN", "zh_CN"]]) {
+    const w = start({ host: hostDown, browser, settings: { language } });
+    await w.download(ITEM);
+    assert.equal(w.seen.notices[0].title, messageIn(language, "notify_host_down_title"), browser + " " + language);
+  }
+});
+
+test("a pick with nothing in it, and an unknown request, are answered in the chosen language", async () => {
+  const w = start({ browser: "en", settings: { language: "zh_CN" } });
+  const empty = await w.message({ type: "godm-batch", items: [] });
+  assert.equal(empty.error, messageIn("zh_CN", "err_nothing_selected"));
+  const stranger = await w.fromPage({ type: "ping" });
+  assert.equal(stranger.error, messageIn("zh_CN", "err_unknown_request"));
+});
+
+// The language is read from a file when the worker wakes, and an event can be
+// there before it is. Nothing may answer, or take a download over, in the
+// meantime and in the wrong language.
+test("nothing is said before the chosen language has been read", async () => {
+  const release = later();
+  const real = ownFilesFor("godm-extension-id");
+  const w = start({
+    host: hostDown,
+    settings: { language: "zh_CN" },
+    fetch: async (url) => {
+      await release.promise;
+      return real(url);
+    }
+  });
+  let answered = false;
+  const asked = w.message({ type: "godm-batch", items: [] }).then((r) => ((answered = true), r));
+  const downloading = w.download(ITEM);
+  const clickedMenu = w.menu({ menuItemId: "godm-link", linkUrl: "https://example.test/a.zip" }, { url: "https://example.test/" });
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(answered, false, "a page asking is made to wait");
+  assert.deepEqual(w.seen.notices, [], "and so is a notice");
+  assert.deepEqual(w.seen.host, [], "and nothing reached the host");
+
+  release.resolve();
+  const reply = await asked;
+  await downloading;
+  await clickedMenu;
+  assert.equal(reply.error, messageIn("zh_CN", "err_nothing_selected"));
+  assert.ok(w.seen.notices.length >= 1);
+  for (const n of w.seen.notices) assert.match(n.title + n.message, /[一-鿿]/, JSON.stringify(n));
+});
+
+test("the right-click menu is made in the language that is spoken, and again when it is changed", async () => {
+  const titles = (locale) => ["menu_link", "menu_page_links", "menu_selection_links"].map((k) => messageIn(locale, k));
+  const rest = async () => {
+    for (let i = 0; i < 5; i++) await settle();
+  };
+  const w = start({ browser: "en" });
+  await w.events.installed.fns[0]();
+  await rest();
+  assert.deepEqual(w.seen.menus, titles("en"));
+
+  // The options page saves a language; the running worker is told.
+  w.data.sync.language = "zh_CN";
+  w.seen.menus.length = 0;
+  w.events.storage.fns[0]({ language: { oldValue: "auto", newValue: "zh_CN" } }, "sync");
+  await rest();
+  assert.deepEqual(w.seen.menus, titles("zh_CN"), "the menu follows the choice");
+
+  // And what the worker says from then on.
+  const down = start({ host: hostDown, browser: "en" });
+  down.data.sync.language = "zh_CN";
+  down.events.storage.fns[0]({ language: { newValue: "zh_CN" } }, "sync");
+  await rest();
+  await down.download(ITEM);
+  assert.equal(down.seen.notices[0].title, messageIn("zh_CN", "notify_host_down_title"));
+
+  // Back to following the browser.
+  w.seen.menus.length = 0;
+  w.events.storage.fns[0]({ language: { oldValue: "zh_CN" } }, "sync");
+  await rest();
+  assert.deepEqual(w.seen.menus, titles("en"));
+});
+
+test("only a change to the language, in the settings that sync, remakes the menu", async () => {
+  const w = start();
+  for (const [changes, area] of [
+    [{ enabled: { newValue: false } }, "sync"],
+    [{ language: { newValue: "zh_CN" } }, "local"],
+    [{ language: { newValue: "zh_CN" } }, "session"]
+  ]) {
+    w.events.storage.fns[0](changes, area);
+    for (let i = 0; i < 5; i++) await settle();
+  }
+  assert.deepEqual(w.seen.menus, []);
 });

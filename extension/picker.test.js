@@ -11,7 +11,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { install } = require("./fakechrome.test.js");
+const { install, ownFiles } = require("./fakechrome.test.js");
 
 const IDS = ["title", "page", "chips", "rows", "empty", "toggleShown", "count", "go", "search", "selAll", "selNone", "selFiles", "cancel", "status", "conns"];
 
@@ -54,8 +54,8 @@ const LINKS = [
 const DATA = { page: PAGE, title: "The Film - video.test", links: LINKS, videos: SNIFFED };
 
 // open runs the picker with this list of links and videos, as the worker would
-// have left it.
-async function open(data) {
+// have left it. language is what the options page saved, if anything.
+async function open(data, language) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -68,10 +68,11 @@ async function open(data) {
   const closed = [];
   const chrome = Object.assign({}, install("en"), {
     storage: {
-      sync: { get: async (defaults) => defaults },
+      sync: { get: async (defaults) => Object.assign({}, defaults, language ? { language } : {}) },
       session: { get: async (key) => ({ [key]: data }), remove: () => {} }
     },
     runtime: {
+      getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
       sendMessage: async (message) => {
         sent.push(message);
         return { ok: true, ids: message.items.map((_, i) => "t" + i) };
@@ -84,6 +85,8 @@ async function open(data) {
     location: { search: "?k=pick-1" },
     URLSearchParams,
     URL,
+    fetch: ownFiles("abcdefghijklmnop"),
+    console: { warn() {} },
     window: { close: () => closed.push("window.close") },
     setTimeout: (fn) => fn
   });
@@ -222,6 +225,13 @@ test("a file the page links to and also played is listed once, as the video it i
   assert.deepEqual(urls(p), [HLS, CLIP, ZIP, ABOUT]);
   assert.equal(rows(p)[1].type, "FILE");
   assert.equal(chips(p)[0].count, 2);
+});
+
+test("everything in it is said in the language that was chosen", async () => {
+  const p = await open(DATA, "zh_CN");
+  assert.equal(chips(p)[0].label, "此页面播放过的视频");
+  assert.equal(rows(p)[0].text, "HLS 流 · 最高清晰度");
+  assert.equal(p.ui.go.textContent, "下载 2 个文件");
 });
 
 test("a list that has expired says so", async () => {

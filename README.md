@@ -300,7 +300,8 @@ download:
   Documents, Programs and Images, under the download folder, each name editable.
   A folder chosen in the download dialog always wins.
 - **Language**: follow Windows, English, or 简体中文. The extension follows the
-  browser's language.
+  browser's language unless its options page names English or 简体中文 (the
+  name on the browser's extensions page always follows the browser).
 - **After a torrent finishes**: stop uploading, seed to ratio 1.0, or keep seeding.
 - **Video sites (yt-dlp)**: the installed and the newest version, a button to
   check and one to update; see *Keeping yt-dlp current* above. These two act at

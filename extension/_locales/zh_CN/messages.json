@@ -365,6 +365,15 @@
   "options_conns_hint": {
     "message": "仅当服务器返回 206 Partial Content 时才会分段下载。"
   },
+  "options_language": {
+    "message": "语言"
+  },
+  "options_language_hint": {
+    "message": "工具栏弹窗、本页面、下载确认窗口、链接选择窗口和通知所用的语言。“自动”即跟随浏览器。浏览器扩展管理页上的扩展名称始终跟随浏览器的语言。"
+  },
+  "options_lang_auto": {
+    "message": "自动（跟随浏览器）"
+  },
   "options_save": {
     "message": "保存"
   },

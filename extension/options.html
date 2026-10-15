@@ -16,7 +16,7 @@
   label { display: block; margin-bottom: 14px; }
   label span.t { display: block; font-weight: 600; margin-bottom: 3px; }
   label span.h { display: block; color: var(--muted); font-size: 12px; margin-bottom: 5px; }
-  input[type=text], textarea, input[type=number] {
+  input[type=text], textarea, input[type=number], select {
     width: 100%; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px;
     font: inherit; font-size: 13px; background: transparent; color: inherit;
   }
@@ -76,6 +76,18 @@
     <span class="t" data-i18n="options_conns"></span>
     <span class="h" data-i18n="options_conns_hint"></span>
     <input type="number" id="connections" min="1" max="32">
+  </label>
+</fieldset>
+
+<fieldset>
+  <legend data-i18n="options_language"></legend>
+  <label>
+    <span class="h" data-i18n="options_language_hint"></span>
+    <select id="language">
+      <option value="auto" data-i18n="options_lang_auto"></option>
+      <option value="en">English</option>
+      <option value="zh_CN">简体中文</option>
+    </select>
   </label>
 </fieldset>
 

@@ -177,7 +177,9 @@ async function loadConfig() {
   render();
 }
 
-(async function init() {
+// Everything the page says is said in the language the person chose, which is
+// known a moment after it loads.
+i18nReady.then(async function init() {
   const held = heldKey ? (await chrome.storage.session.get(heldKey))[heldKey] : null;
   if (!held) {
     finish(tr("err_request_expired"));
@@ -197,4 +199,4 @@ async function loadConfig() {
 
   render();
   loadConfig();
-})();
+});

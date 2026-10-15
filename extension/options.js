@@ -9,17 +9,25 @@ const DEFAULTS = {
   extensions:
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst",
   blocklist: "",
-  takeTorrents: true
+  takeTorrents: true,
+  // Which language the extension speaks; see i18n.js.
+  language: LANGUAGE_DEFAULT
 };
 
-const fields = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist"];
+const fields = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist", "language"];
+
+// languageOf is a language the extension has, or else the default: a value
+// that synced in from a newer version, say, must not leave the box empty.
+function languageOf(value) {
+  return LANGUAGES.includes(value) ? value : LANGUAGE_DEFAULT;
+}
 
 function load() {
   chrome.storage.sync.get(DEFAULTS, (cfg) => {
     for (const f of fields) {
       const el = document.getElementById(f);
       if (el.type === "checkbox") el.checked = cfg[f];
-      else el.value = cfg[f];
+      else el.value = f === "language" ? languageOf(cfg[f]) : cfg[f];
     }
   });
 }
@@ -50,43 +58,65 @@ document.getElementById("save").addEventListener("click", () => {
       // Show what was kept, so the field never says one thing while storage
       // holds another.
       el.value = out[f];
-    } else out[f] = el.value.trim();
+    } else if (f === "language") out[f] = languageOf(el.value);
+    else out[f] = el.value.trim();
   }
   chrome.storage.sync.set(out, () => {
     const s = document.getElementById("status");
-    s.textContent = tr("options_saved");
-    setTimeout(() => (s.textContent = ""), 1600);
+    // The page changes language here and now, and says "Saved" in it. What it
+    // worked out for itself in the old one is worked out again.
+    useLanguage(out.language).then(() => {
+      showProbe();
+      showSelfTest();
+      s.textContent = tr("options_saved");
+      setTimeout(() => (s.textContent = ""), 1600);
+    });
   });
 });
 
 document.getElementById("extid").textContent = chrome.runtime.id;
 document.getElementById("cmd").textContent = "godm install --ext-id " + chrome.runtime.id;
 
-chrome.runtime.sendMessage({ type: "ping" }, (resp) => {
+let probe = null; // what the native host answered to the ping, once it has
+let selfTest = null; // what the startup self-test found, once it is read
+
+function showProbe() {
+  if (!probe) return;
   const el = document.getElementById("probe");
-  if (resp && resp.ok) {
+  if (probe.ok) {
     el.textContent = tr("options_probe_ok");
     el.className = "good";
   } else {
-    el.textContent = (resp && resp.error) || tr("options_probe_none");
+    el.textContent = probe.error || tr("options_probe_none");
     el.className = "bad";
   }
-});
+}
 
 // Show the startup self-test too: it runs without the user triggering a
 // download, so it tells them whether the next download will actually work.
-chrome.storage.local.get({ lastPing: null }, (s) => {
+function showSelfTest() {
   const el = document.getElementById("lastping");
-  if (!el) return;
-  if (!s.lastPing) {
+  if (!el || !selfTest) return;
+  if (!selfTest.lastPing) {
     el.textContent = tr("options_ping_never");
     return;
   }
-  const when = new Date(s.lastPing.at).toLocaleString();
-  el.textContent = s.lastPing.ok
-    ? tr("options_ping_ok", when)
-    : tr("options_ping_bad", [s.lastPing.error, when]);
-  el.className = s.lastPing.ok ? "good" : "bad";
+  const last = selfTest.lastPing;
+  const when = new Date(last.at).toLocaleString();
+  el.textContent = last.ok ? tr("options_ping_ok", when) : tr("options_ping_bad", [last.error, when]);
+  el.className = last.ok ? "good" : "bad";
+}
+
+// These say things in words, so they wait for the language; see i18n.js.
+i18nReady.then(() => {
+  chrome.runtime.sendMessage({ type: "ping" }, (resp) => {
+    probe = resp || {};
+    showProbe();
+  });
+  chrome.storage.local.get({ lastPing: null }, (s) => {
+    selfTest = s;
+    showSelfTest();
+  });
 });
 
 load();

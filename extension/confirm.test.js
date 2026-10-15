@@ -12,7 +12,7 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { install } = require("./fakechrome.test.js");
+const { install, messagesFor, ownFiles } = require("./fakechrome.test.js");
 
 const IDS = ["form", "url", "name", "size", "dir", "browse", "conns", "dontAsk", "status", "cancel", "start"];
 
@@ -59,7 +59,9 @@ function later() {
 }
 
 // open runs the dialog page. reply answers the messages it sends to the worker.
-async function open(reply) {
+// language is what the options page saved, if anything, and held what the worker
+// left under the dialog's key (the download, unless it says otherwise).
+async function open(reply, language, held = HELD) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -71,8 +73,12 @@ async function open(reply) {
   const closed = [];
   const timers = [];
   const chrome = Object.assign({}, install("en"), {
-    storage: { session: { get: async (key) => ({ [key]: HELD }) } },
+    storage: {
+      session: { get: async (key) => ({ [key]: held }) },
+      sync: { get: async (defaults) => Object.assign({}, defaults, language ? { language } : {}) }
+    },
     runtime: {
+      getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
       sendMessage: async (message) => {
         sent.push(message);
         return reply(message);
@@ -85,6 +91,8 @@ async function open(reply) {
     location: { search: "?k=" + encodeURIComponent("confirm:1-abc") },
     URLSearchParams,
     chrome,
+    fetch: ownFiles("abcdefghijklmnop"),
+    console: { warn() {} },
     window: { close: () => closed.push("window.close") },
     setTimeout: (fn, ms) => timers.push({ fn, ms })
   });
@@ -205,4 +213,24 @@ test("a failed send leaves the dialog usable: Start again, or Cancel", async () 
   assert.equal(d.ui.status.textContent, "try again");
   assert.equal(d.ui.start.disabled, false);
   assert.equal(d.ui.cancel.disabled, false);
+});
+
+test("the dialog says what is wrong in the language that was chosen", async () => {
+  const mistake = async (language) => {
+    const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }), language);
+    d.ui.name.value = "";
+    d.ui.name.fire("input");
+    return d.ui.status.textContent;
+  };
+  assert.equal(await mistake(undefined), messagesFor("en").val_name_empty.message);
+  assert.equal(await mistake("zh_CN"), messagesFor("zh_CN").val_name_empty.message);
+  assert.notEqual(messagesFor("zh_CN").val_name_empty.message, messagesFor("en").val_name_empty.message);
+});
+
+// The dialog says something as soon as it starts when what it was for has gone,
+// and that is the first thing it has to say in the chosen language.
+test("what the dialog says as it starts is already in the language that was chosen", async () => {
+  const gone = await open((m) => ({ ok: true }), "zh_CN", null);
+  assert.equal(gone.ui.status.textContent, messagesFor("zh_CN").err_request_expired.message);
+  assert.equal(gone.ui.cancel.textContent, messagesFor("zh_CN").confirm_close.message);
 });

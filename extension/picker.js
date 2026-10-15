@@ -233,7 +233,9 @@ function linksOf(data) {
   return links;
 }
 
-(async function init() {
+// Everything the page says is said in the language the person chose, which is
+// known a moment after it loads.
+i18nReady.then(async function init() {
   const key = new URLSearchParams(location.search).get("k");
   const cfg = await chrome.storage.sync.get(DEFAULTS);
   state.fileTypes = new Set(String(cfg.extensions).split(/[\s,]+/).map((s) => s.trim().toLowerCase().replace(/^\./, "")).filter(Boolean));
@@ -261,4 +263,4 @@ function linksOf(data) {
   document.title = data.title ? "godm — " + data.title : tr("picker_title");
   renderChips();
   render();
-})();
+});

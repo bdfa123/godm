@@ -365,6 +365,15 @@
   "options_conns_hint": {
     "message": "Segments are only used when the server answers with 206 Partial Content."
   },
+  "options_language": {
+    "message": "Language"
+  },
+  "options_language_hint": {
+    "message": "The language of the toolbar popup, this page, the download window, the link picker and the notices. Automatic follows the browser. The extension's name on the browser's extensions page always follows the browser."
+  },
+  "options_lang_auto": {
+    "message": "Automatic (follow the browser)"
+  },
   "options_save": {
     "message": "Save"
   },

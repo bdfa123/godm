@@ -10,9 +10,9 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { install } = require("./fakechrome.test.js");
+const { install, ownFiles } = require("./fakechrome.test.js");
 
-const FIELDS = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist"];
+const FIELDS = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist", "language"];
 const BOXES = ["enabled", "takeAll", "confirmDownload", "takeTorrents"];
 const NUMBERS = ["minSize", "connections"];
 const OTHERS = ["save", "status", "extid", "cmd", "probe", "lastping"];
@@ -35,16 +35,28 @@ class FakeElement {
   }
 }
 
-// open runs the options page with these values in storage already.
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+// open runs the options page with these values in storage already. The page
+// has one element that is worded from the messages, as the real one has many.
 function open(stored) {
   const ui = {};
   for (const id of FIELDS.concat(OTHERS)) ui[id] = new FakeElement(id);
-  const doc = { getElementById: (id) => ui[id], querySelectorAll: () => [], documentElement: {} };
+  const worded = { dataset: { i18n: "options_save" }, textContent: "" };
+  const doc = {
+    getElementById: (id) => ui[id],
+    querySelectorAll: (sel) => (sel === "[data-i18n]" ? [worded] : []),
+    documentElement: {}
+  };
   const saved = {};
   const chrome = Object.assign({}, install("en"), {
     storage: {
       sync: {
-        get: (defaults, cb) => cb(Object.assign({}, defaults, stored)),
+        get: (defaults, cb) => {
+          const got = Object.assign({}, defaults, stored);
+          if (cb) cb(got);
+          return Promise.resolve(got);
+        },
         set: (obj, cb) => {
           Object.assign(saved, obj);
           if (cb) cb();
@@ -52,13 +64,23 @@ function open(stored) {
       },
       local: { get: (defaults, cb) => cb(defaults) }
     },
-    runtime: { id: "abcdefghijklmnop", sendMessage: (m, cb) => cb({ ok: true }) }
+    runtime: {
+      id: "abcdefghijklmnop",
+      getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
+      sendMessage: (m, cb) => cb({ ok: true })
+    }
   });
-  const context = vm.createContext({ document: doc, chrome, setTimeout: () => 0 });
+  const context = vm.createContext({
+    document: doc,
+    chrome,
+    fetch: ownFiles("abcdefghijklmnop"),
+    console: { warn() {} },
+    setTimeout: () => 0
+  });
   for (const file of ["i18n.js", "options.js"]) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, file), "utf8"), context, { filename: file });
   }
-  return { ui, saved };
+  return { ui, saved, doc, worded };
 }
 
 // press types into a number field and presses Save.
@@ -124,4 +146,67 @@ test("saving leaves the text and tick-box fields as they were", () => {
   assert.strictEqual(p.saved.extensions, "zip,iso");
   assert.strictEqual(p.saved.blocklist, "b.test");
   assert.strictEqual(p.saved.takeAll, true);
+});
+
+test("the extension follows the browser's language until another is chosen", async () => {
+  const fresh = open({});
+  assert.strictEqual(fresh.ui.language.value, "auto", "the box says so when nothing has been saved");
+  fresh.ui.save.fire("click");
+  assert.strictEqual(fresh.saved.language, "auto");
+  await settle();
+  assert.strictEqual(fresh.ui.probe.textContent, "native host and daemon are reachable");
+  assert.strictEqual(fresh.doc.documentElement.lang, "en");
+});
+
+test("a language that is chosen is the one the page speaks, and Save keeps it", async () => {
+  const p = open({ language: "zh_CN" });
+  assert.strictEqual(p.ui.language.value, "zh_CN", "the page shows what was saved");
+  await settle();
+  assert.match(p.ui.probe.textContent, /可连接/, "the page's own words, not the browser's");
+  assert.strictEqual(p.worded.textContent, "保存");
+  assert.strictEqual(p.doc.documentElement.lang, "zh-CN");
+  p.ui.save.fire("click");
+  assert.strictEqual(p.saved.language, "zh_CN");
+});
+
+test("choosing another language changes this page at once, and the Saved notice is in it", async () => {
+  const p = open({});
+  await settle();
+  assert.strictEqual(p.worded.textContent, "Save");
+  p.ui.language.value = "zh_CN";
+  p.ui.save.fire("click");
+  assert.strictEqual(p.saved.language, "zh_CN");
+  await settle();
+  assert.strictEqual(p.ui.status.textContent, "已保存");
+  assert.strictEqual(p.worded.textContent, "保存");
+  assert.match(p.ui.probe.textContent, /可连接/, "what the page worked out in English is worked out again");
+
+  p.ui.language.value = "en";
+  p.ui.save.fire("click");
+  await settle();
+  assert.strictEqual(p.saved.language, "en");
+  assert.strictEqual(p.ui.status.textContent, "Saved");
+  assert.strictEqual(p.ui.probe.textContent, "native host and daemon are reachable");
+});
+
+test("a language this version does not have is shown and saved as automatic", () => {
+  for (const stored of ["fr", "", 7, null]) {
+    const p = open({ language: stored });
+    assert.strictEqual(p.ui.language.value, "auto", "stored " + JSON.stringify(stored));
+    p.ui.language.value = "fr";
+    p.ui.save.fire("click");
+    assert.strictEqual(p.saved.language, "auto", "chosen fr");
+  }
+});
+
+test("the options page offers automatic and every language there is", () => {
+  const html = fs.readFileSync(path.join(__dirname, "options.html"), "utf8");
+  const select = /<select id="language">([\s\S]*?)<\/select>/.exec(html);
+  assert.ok(select, "no box for the language");
+  const values = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+  const { LANGUAGES, LANGUAGE_DEFAULT } = require("./i18n.js");
+  assert.deepEqual(values, [LANGUAGE_DEFAULT].concat(LANGUAGES));
+  for (const lang of LANGUAGES) {
+    assert.ok(fs.existsSync(path.join(__dirname, "_locales", lang, "messages.json")), lang);
+  }
 });
