@@ -168,14 +168,17 @@ the extension was loaded need reloading first.
   ("Update"): a copy installed with winget (it lives under
   `...\WinGet\Packages\yt-dlp.yt-dlp_*`) is updated with `winget upgrade --id
   yt-dlp.yt-dlp`, and so is Deno with `DenoLand.Deno` when that came from winget
-  too, since yt-dlp asks for a newer Deno from time to time; any other release
+  too, since yt-dlp asks for a newer Deno from time to time (so **Update** stays
+  available when yt-dlp is the newest but Deno is not); any other release
   binary (`yt-dlp.exe` downloaded from GitHub) updates itself with `yt-dlp -U`;
   a copy from pip, Scoop, Chocolatey, Homebrew or another package manager is
   left alone and the page gives the command to run. winget's list follows
   GitHub's by a day or so, and then the page says that the newest release is
   not in winget yet. An update is refused while a yt-dlp download or a page
   being read is running (Windows cannot replace a running `yt-dlp.exe`), and
-  downloads that start while one is under way wait for it. When a yt-dlp
+  downloads that start while one is under way wait for it. Quitting godm from
+  the tray while an update runs waits for it, for up to two minutes, rather
+  than cut winget or `yt-dlp -U` off halfway through replacing the file. When a yt-dlp
   download or inspection fails and the installed version is older than the
   newest release godm knows of, the reason ends with a note that yt-dlp may be
   out of date, and where to update it. It says nothing when the versions
@@ -307,8 +310,8 @@ notes*).
 
 | Request | What it does |
 |---|---|
-| `GET /api/ytdlp` | What is known without asking anyone: whether yt-dlp was found and where, how it was installed (`winget`, `standalone`, `scoop`, `chocolatey`, `brew`, `pipx`, `pip` or `package`), whether godm updates that kind (`can_update`) or else the `command` to run by hand, the `version` and `latest` found so far (with `version_error` and `latest_error` when looking failed), `outdated` (`true`, `false`, or `null` when the two cannot be compared), `busy` while yt-dlp is in use, and `updating` with the `step` and, afterwards, the `result` of the last update. |
-| `POST /api/ytdlp/check` | Reads the installed version and asks GitHub for the newest release, unless that was done within the last six hours; `?force=1` always looks again. Answers like `GET /api/ytdlp`. |
+| `GET /api/ytdlp` | What is known without asking anyone: whether yt-dlp was found and where, how it was installed (`winget`, `standalone`, `scoop`, `chocolatey`, `brew`, `pipx`, `pip` or `package`), whether godm updates that kind (`can_update`) or else the `command` to run by hand, the `version` and `latest` found so far (with `version_error` and `latest_error` when looking failed), `deno_via_winget` where an update brings Deno along, `outdated` (`true`, `false`, or `null` when the two cannot be compared), `busy` while yt-dlp is in use, and `updating` with the `step` and, afterwards, for half an hour, the `result` of the last update. Every error is in English; where godm worded it itself it comes with an `..._error_code` and an `..._error_arg` as well (`latest_error_code`, `error_code` of the result, ...), for a page to word it again in its own language. |
+| `POST /api/ytdlp/check` | Reads the installed version and asks GitHub for the newest release, unless that was done within the last six hours; `?force=1` always looks again, and forgets how the last update went. Answers like `GET /api/ytdlp`. |
 | `POST /api/ytdlp/update` | Starts an update in the background and answers at once with the status; follow it with `GET /api/ytdlp`. When it cannot start it answers `{"ok": false, "reason": ..., "error": ...}`, the reason being `missing`, `manual`, `winget`, `busy` or `updating`. |
 
 ## Commands

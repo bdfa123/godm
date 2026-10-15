@@ -216,6 +216,7 @@ function fetch(path, opts) {
   const h = routes[path.split("?")[0]];
   if (!h) return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("no route " + path) });
   const out = h(calls[calls.length - 1].body, path);
+  if (out && out.__http) return Promise.resolve({ ok: false, status: out.__http, text: () => Promise.resolve("HTTP " + out.__http) });
   return Promise.resolve({ ok: true, json: () => Promise.resolve(out), text: () => Promise.resolve(JSON.stringify(out)) });
 }
 const sel = {
@@ -659,10 +660,10 @@ scenarios.ytsettings = async function () {
   tasks = [];
   const status = (extra) => Object.assign({ ok: true, found: true, path: "C:\\y\\yt-dlp.exe", install: "winget", can_update: true,
     version: "2026.06.01", latest: "2026.09.15", outdated: true, busy: false, updating: false }, extra);
-  let st = status({}), updateReply = status({ updating: true, step: "yt-dlp" });
+  let st = status({}), updateReply = status({ updating: true, step: "yt-dlp" }), down = false;
   routes["/api/settings"] = () => ({ ok: true, keep_awake: true, can_keep_awake: true, after_all: "nothing",
     after_all_options: ["nothing"], sort_by_type: false, folders: {}, out_dir: "C:\\d", language: "auto" });
-  routes["/api/ytdlp"] = () => st;
+  routes["/api/ytdlp"] = () => (down ? { __http: 500 } : st);
   routes["/api/ytdlp/check"] = () => st;
   routes["/api/ytdlp/update"] = () => updateReply;
   await boot();
@@ -680,7 +681,7 @@ scenarios.ytsettings = async function () {
   same(count("/api/ytdlp"), 1, "the dialog asks what is known once");
   same(count("/api/ytdlp/check"), 1, "and has it look");
   assert(calls.filter((c) => c.path.indexOf("/api/ytdlp/check") === 0)[0].path.indexOf("force") < 0, "opening the dialog forces a look");
-  assert(said().indexOf(words("A newer yt-dlp is available: 2026.06.01 → 2026.09.15.", "有更新的 yt-dlp：2026.06.01 → 2026.09.15。")) >= 0, "a newer release: " + said());
+  assert(said().indexOf(words("A newer yt-dlp is available: 2026.06.01 → 2026.09.15.", "有新版 yt-dlp 可用：2026.06.01 → 2026.09.15。")) >= 0, "a newer release: " + said());
   same(kind(), "warn", "a newer release is a notice, not an error");
   same(els.ytUpdate.disabled, false, "there is something to update");
   same(els.ytCheck.disabled, false, "the check button");
@@ -798,6 +799,72 @@ scenarios.ytsettings = async function () {
     await tick();
     assert(said().indexOf(want) >= 0 && kind() === "err", reason + ": " + said());
   }
+
+  // The reasons godm worded itself come in the page's language, and what another
+  // program said is shown as it came.
+  const checked = async (extra) => {
+    st = status(Object.assign({ latest: "", outdated: null }, extra));
+    dispatch(els.ytCheck, "click");
+    await tick();
+    return said();
+  };
+  r = await checked({ latest_error: "GitHub answered 502 Bad Gateway", latest_error_code: "gh-status", latest_error_arg: "502 Bad Gateway" });
+  assert(r.indexOf(words("GitHub answered 502 Bad Gateway", "GitHub 返回了 502 Bad Gateway")) >= 0, "a reason in the page's language: " + r);
+  r = await checked({ latest_error: "GitHub's limit; try again in 7 minutes", latest_error_code: "gh-limit", latest_error_arg: "7" });
+  assert(r.indexOf(words("try again in 7 minutes", "请 7 分钟后再试")) >= 0, "a reason with a number: " + r);
+  r = await checked({ latest_error: "GitHub's limit", latest_error_code: "gh-limit" });
+  assert(r.indexOf(words("limit on requests", "限制了此地址的请求次数")) >= 0 && r.indexOf("{arg}") < 0, "the same without the number: " + r);
+  r = await checked({ latest_error: "something new that godm worded", latest_error_code: "no-such-code-yet" });
+  assert(r.indexOf("something new that godm worded") >= 0, "a code the page has no words for falls back to the text: " + r);
+  r = await checked({ version: "", version_error: "yt-dlp did not say its version in time", version_error_code: "version-timeout" });
+  assert(r.indexOf(words("did not say its version in time", "没有及时给出版本号")) >= 0, "the version timing out: " + r);
+  r = await shown({ ok: false, from: "2026.06.01", error: "yt-dlp is in use by another program: close it, then try again", error_code: "winget-inuse" });
+  assert(r.indexOf(words("close it, then try again", "请先关闭它，再重试")) >= 0 && kind() === "err", "winget's refusal in the page's language: " + r);
+  r = await shown({ ok: false, from: "2026.06.01", error: "winget did not finish in 10 minutes", error_code: "timeout-winget", error_arg: "10" });
+  assert(r.indexOf(words("did not finish in 10 minutes", "没有在 10 分钟内完成")) >= 0, "a time out: " + r);
+  r = await shown({ ok: false, from: "2026.06.01", error: "after", error_code: "after-version", error_arg: "ModuleNotFoundError: x" });
+  assert(r.indexOf("ModuleNotFoundError: x") >= 0 && r.indexOf("{arg}") < 0, "the reason inside the wording: " + r);
+  r = await shown({ ok: true, from: "2026.06.01", to: "2026.09.15", changed: true, deno: "failed", deno_error: "Deno is in use", deno_error_code: "winget-inuse" });
+  assert(r.indexOf(words("close it, then try again", "请先关闭它，再重试")) >= 0 && kind() === "warn", "Deno's refusal in the page's language: " + r);
+
+  // yt-dlp being the newest is not all there is to update where winget brings
+  // Deno too, and the page says what the button would do.
+  st = status({ version: "2026.09.15", outdated: false, deno_via_winget: true });
+  await open();
+  same(els.ytUpdate.disabled, false, "Deno may be behind while yt-dlp is not");
+  assert(said().indexOf(words("Update also checks Deno", "还会一并检查 Deno")) >= 0, "what the update would do: " + said());
+  r = await shown({ ok: true, from: "2026.09.15", to: "2026.09.15", changed: false, behind: false, deno: "current" }, { deno_via_winget: true });
+  assert(r.indexOf(words("Deno is up to date too.", "Deno 也已是最新版本。")) >= 0, "Deno's part of an update that changed nothing: " + r);
+  st = status({ version: "2026.09.15", outdated: false });
+  await open();
+  same(els.ytUpdate.disabled, true, "with no Deno of winget's there is nothing to update");
+
+  // A request for how the update is getting on that fails once is asked again,
+  // and one that keeps failing is said so and gives the buttons back, rather
+  // than leaving the page on "updating" with both of them off.
+  st = status({});
+  updateReply = status({ updating: true, step: "yt-dlp" });
+  await open();
+  dispatch(els.ytUpdate, "click");
+  await tick();
+  down = true;
+  runTimers();
+  await tick();
+  assert(said().indexOf(words("Updating yt-dlp", "正在更新 yt-dlp")) >= 0, "one lost answer: " + said());
+  down = false;
+  st = status({ version: "2026.09.15", outdated: false, result: { ok: true, from: "2026.06.01", to: "2026.09.15", changed: true, behind: false } });
+  runTimers();
+  await tick();
+  assert(said().indexOf(words("Updated yt-dlp", "已更新 yt-dlp")) >= 0, "the update was followed on after the lost answer: " + said());
+  st = status({});
+  await open();
+  dispatch(els.ytUpdate, "click");
+  await tick();
+  down = true;
+  for (let i = 0; i < 5; i++) { runTimers(); await tick(); }
+  assert(said().indexOf(words("Lost touch with godm", "与 godm 失去联系")) >= 0 && kind() === "err", "answers that keep failing: " + said());
+  same(els.ytCheck.disabled, false, "the check button comes back");
+  down = false;
 
   // Opening the dialog during an update follows it instead of looking.
   st = status({ updating: true, step: "yt-dlp" });

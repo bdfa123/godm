@@ -540,6 +540,7 @@ I18N.en = {
   "yt.updating.deno": "Updating Deno, which YouTube needs…",
   "yt.notfound": "yt-dlp is not installed. To install it, run winget install yt-dlp.yt-dlp in a terminal; godm finds it without a restart.",
   "yt.current": "yt-dlp is up to date.",
+  "yt.current.deno": "yt-dlp is up to date. Update also checks Deno, which YouTube needs.",
   "yt.available": "A newer yt-dlp is available: {have} → {newest}.",
   "yt.cannotCompare": "The installed version, {have}, cannot be compared with the newest release, {newest}.",
   "yt.checkFailed": "Could not check for the newest version: {why}",
@@ -548,6 +549,7 @@ I18N.en = {
   "yt.alreadyNewest": "yt-dlp is already the newest version available ({to}).",
   "yt.behind": "The newest release is {newest}, which winget does not have yet.",
   "yt.deno.updated": "Deno was updated too.",
+  "yt.deno.current": "Deno is up to date too.",
   "yt.deno.failed": "Deno could not be updated: {why}",
   "yt.failed": "Update failed: {why}",
   "yt.busy": "yt-dlp is in use by a download or by a page being read. Pause it or wait until it is done, then update.",
@@ -555,6 +557,23 @@ I18N.en = {
   "yt.nowinget": "winget was not found on this computer. Run winget upgrade --id yt-dlp.yt-dlp in a terminal to update.",
   "yt.manual": "godm does not update this copy of yt-dlp itself. Update it the way you installed it, for example with {cmd}",
   "yt.manual.named": "This copy of yt-dlp came from {name}, which godm does not run. Update it with {cmd}",
+  "yt.lost": "Lost touch with godm while following the update: {why}",
+  "yt.why.ghUnreachable": "could not reach GitHub",
+  "yt.why.ghTimeout": "GitHub did not answer in time",
+  "yt.why.ghLimit": "GitHub's limit on requests from this address was reached",
+  "yt.why.ghLimit.arg": "GitHub's limit on requests from this address was reached; try again in {arg} minutes",
+  "yt.why.ghStatus": "GitHub answered {arg}",
+  "yt.why.ghUnreadable": "GitHub's answer could not be read",
+  "yt.why.ghTag": "GitHub names the latest release \"{arg}\", which is not a yt-dlp version",
+  "yt.why.versionTimeout": "yt-dlp did not say its version in time",
+  "yt.why.afterVersion": "yt-dlp does not say its version after the update: {arg}",
+  "yt.why.wingetInuse": "yt-dlp is in use by another program: close it, then try again",
+  "yt.why.wingetNopackage": "winget does not know this copy of yt-dlp as one it installed",
+  "yt.why.wingetAgreement": "winget wants its source agreement accepted first: run winget upgrade once in a terminal",
+  "yt.why.wingetAdmin": "winget needs administrator rights to update this copy of yt-dlp: update it from a terminal opened as administrator",
+  "yt.why.wingetElevated": "godm is running with administrator rights, and winget will not update a copy of yt-dlp installed for one user from there: quit godm and start it again without them",
+  "yt.why.timeoutWinget": "winget did not finish in {arg} minutes",
+  "yt.why.timeoutUpdate": "yt-dlp -U did not finish in {arg} minutes",
 
   "time.s": "{s}s",
   "time.ms": "{m}m {s}s",
@@ -749,7 +768,8 @@ I18N.zh = {
   "yt.updating.deno": "正在更新 Deno（YouTube 需要它）…",
   "yt.notfound": "未安装 yt-dlp。请在终端运行 winget install yt-dlp.yt-dlp 安装；godm 无需重启即可找到它。",
   "yt.current": "yt-dlp 已是最新版本。",
-  "yt.available": "有更新的 yt-dlp：{have} → {newest}。",
+  "yt.current.deno": "yt-dlp 已是最新版本。点“更新”还会一并检查 Deno（YouTube 需要它）。",
+  "yt.available": "有新版 yt-dlp 可用：{have} → {newest}。",
   "yt.cannotCompare": "已安装的版本 {have} 无法与最新版本 {newest} 比较。",
   "yt.checkFailed": "无法检查最新版本：{why}",
   "yt.versionFailed": "无法读取已安装的版本：{why}",
@@ -757,6 +777,7 @@ I18N.zh = {
   "yt.alreadyNewest": "yt-dlp 已是可获得的最新版本（{to}）。",
   "yt.behind": "最新版本 {newest} 已发布，但 winget 暂时还没有。",
   "yt.deno.updated": "Deno 也已更新。",
+  "yt.deno.current": "Deno 也已是最新版本。",
   "yt.deno.failed": "Deno 无法更新：{why}",
   "yt.failed": "更新失败：{why}",
   "yt.busy": "yt-dlp 正被下载任务或网页解析占用。请先暂停它或等它结束，再更新。",
@@ -764,6 +785,23 @@ I18N.zh = {
   "yt.nowinget": "此电脑上找不到 winget。请在终端运行 winget upgrade --id yt-dlp.yt-dlp 进行更新。",
   "yt.manual": "godm 不会自己更新这份 yt-dlp。请用当初安装它的方式更新，例如：{cmd}",
   "yt.manual.named": "这份 yt-dlp 来自 {name}，godm 不会代为运行它。请用 {cmd} 更新。",
+  "yt.lost": "跟踪更新进度时与 godm 失去联系：{why}",
+  "yt.why.ghUnreachable": "无法连接 GitHub",
+  "yt.why.ghTimeout": "GitHub 没有及时响应",
+  "yt.why.ghLimit": "GitHub 限制了此地址的请求次数",
+  "yt.why.ghLimit.arg": "GitHub 限制了此地址的请求次数，请 {arg} 分钟后再试",
+  "yt.why.ghStatus": "GitHub 返回了 {arg}",
+  "yt.why.ghUnreadable": "无法读取 GitHub 的回复",
+  "yt.why.ghTag": "GitHub 把最新版本称作“{arg}”，这不是 yt-dlp 的版本号",
+  "yt.why.versionTimeout": "yt-dlp 没有及时给出版本号",
+  "yt.why.afterVersion": "更新之后 yt-dlp 无法给出版本号：{arg}",
+  "yt.why.wingetInuse": "yt-dlp 正被其他程序使用：请先关闭它，再重试",
+  "yt.why.wingetNopackage": "winget 不认得这份 yt-dlp，它不是 winget 安装的",
+  "yt.why.wingetAgreement": "winget 需要先接受它的源协议：请在终端运行一次 winget upgrade",
+  "yt.why.wingetAdmin": "winget 需要管理员权限才能更新这份 yt-dlp：请在以管理员身份打开的终端里更新",
+  "yt.why.wingetElevated": "godm 正以管理员身份运行，而 winget 不允许在这种身份下更新只为当前用户安装的 yt-dlp：请退出 godm，不用管理员身份重新启动",
+  "yt.why.timeoutWinget": "winget 没有在 {arg} 分钟内完成",
+  "yt.why.timeoutUpdate": "yt-dlp -U 没有在 {arg} 分钟内完成",
 
   "time.s": "{s}秒",
   "time.ms": "{m}分{s}秒",
@@ -1667,11 +1705,30 @@ document.getElementById("setGo").addEventListener("click", function () {
 // so while one runs the page asks how it is getting on once a second, for as
 // long as the dialog is open. These buttons act at once and have nothing to do
 // with Save.
-var YT = { st: null, seq: 0, wait: "", note: "", noteKind: "", polling: false };
+var YT = { st: null, seq: 0, wait: "", note: "", noteKind: "", polling: false, lost: 0 };
 // The reasons the daemon gives for not starting an update, in the page's words.
 var YT_REFUSED = { busy: "yt.busy", updating: "yt.already", winget: "yt.nowinget", missing: "yt.notfound" };
 
 function ytv(v) { return v || tr("yt.unknown"); }
+// The wording of each reason the daemon gives a code for, and for those that
+// have a number or a name to say, the wording for when it is given. ytWhy gives a
+// reason in the page's language when godm worded it; what another program said
+// is shown as it came, and so is a code this page does not know yet.
+var YT_WHY = {
+  "gh-unreachable": "yt.why.ghUnreachable", "gh-timeout": "yt.why.ghTimeout", "gh-limit": "yt.why.ghLimit",
+  "gh-status": "yt.why.ghStatus", "gh-unreadable": "yt.why.ghUnreadable", "gh-tag": "yt.why.ghTag",
+  "version-timeout": "yt.why.versionTimeout", "after-version": "yt.why.afterVersion",
+  "winget-inuse": "yt.why.wingetInuse", "winget-nopackage": "yt.why.wingetNopackage",
+  "winget-agreement": "yt.why.wingetAgreement", "winget-admin": "yt.why.wingetAdmin",
+  "winget-elevated": "yt.why.wingetElevated", "timeout-winget": "yt.why.timeoutWinget",
+  "timeout-update": "yt.why.timeoutUpdate"
+};
+var YT_WHY_ARG = { "gh-limit": "yt.why.ghLimit.arg" };
+function ytWhy(code, arg, text) {
+  var own = function (t) { return Object.prototype.hasOwnProperty.call(t, code); };
+  var key = own(YT_WHY) ? (arg && own(YT_WHY_ARG) ? YT_WHY_ARG[code] : YT_WHY[code]) : "";
+  return key ? tr(key, { arg: arg || "" }) : (text || "");
+}
 // ytManual says how to update a yt-dlp that godm leaves to whatever installed it.
 function ytManual(st) {
   return st.install_name ? tr("yt.manual.named", { name: st.install_name, cmd: st.command || "" })
@@ -1685,18 +1742,19 @@ function ytSaying(st) {
   if (YT.wait) return { text: tr(YT.wait), kind: "" };
   if (YT.note) return { text: YT.note, kind: YT.noteKind };
   if (r) {
-    if (!r.ok) return { text: tr("yt.failed", { why: r.error || "" }), kind: "err" };
+    if (!r.ok) return { text: tr("yt.failed", { why: ytWhy(r.error_code, r.error_arg, r.error) }), kind: "err" };
     parts.push(r.changed ? tr("yt.updated", { from: ytv(r.from), to: ytv(r.to) }) : tr("yt.alreadyNewest", { to: ytv(r.to) }));
     if (r.behind && st.install === "winget") parts.push(tr("yt.behind", { newest: st.latest || "" }));
     if (r.deno === "updated") parts.push(tr("yt.deno.updated"));
-    if (r.deno === "failed") parts.push(tr("yt.deno.failed", { why: r.deno_error || "" }));
+    if (r.deno === "current") parts.push(tr("yt.deno.current"));
+    if (r.deno === "failed") parts.push(tr("yt.deno.failed", { why: ytWhy(r.deno_error_code, r.deno_error_arg, r.deno_error) }));
     return { text: parts.join(" "), kind: r.deno === "failed" ? "warn" : "ok" };
   }
   if (!st.found) return { text: tr("yt.notfound"), kind: "warn" };
-  if (st.version_error) { parts.push(tr("yt.versionFailed", { why: st.version_error })); kind = "err"; }
-  else if (st.latest_error && st.outdated !== true) { parts.push(tr("yt.checkFailed", { why: st.latest_error })); kind = "err"; }
+  if (st.version_error) { parts.push(tr("yt.versionFailed", { why: ytWhy(st.version_error_code, st.version_error_arg, st.version_error) })); kind = "err"; }
+  else if (st.latest_error && st.outdated !== true) { parts.push(tr("yt.checkFailed", { why: ytWhy(st.latest_error_code, st.latest_error_arg, st.latest_error) })); kind = "err"; }
   else if (st.outdated === true) { parts.push(tr("yt.available", { have: st.version, newest: st.latest })); kind = "warn"; }
-  else if (st.outdated === false) { parts.push(tr("yt.current")); kind = "ok"; }
+  else if (st.outdated === false) { parts.push(tr(st.deno_via_winget ? "yt.current.deno" : "yt.current")); kind = "ok"; }
   else if (st.version && st.latest) parts.push(tr("yt.cannotCompare", { have: st.version, newest: st.latest }));
   if (!st.can_update) parts.push(ytManual(st));
   return { text: parts.join(" "), kind: kind };
@@ -1711,9 +1769,10 @@ function ytRender() {
   line.className = say.kind;
   var working = !!(st.updating || YT.wait);
   document.getElementById("ytCheck").disabled = working;
-  // Nothing to update when it is the newest, unless that is not known.
+  // Nothing to update when it is the newest, unless that is not known, or the
+  // update takes Deno along, which can be behind while yt-dlp is not.
   document.getElementById("ytUpdate").disabled = working || !st.found || !st.can_update ||
-    (st.outdated === false && !st.latest_error);
+    (st.outdated === false && !st.latest_error && !st.deno_via_winget);
 }
 function ytShow(st) {
   YT.st = st;
@@ -1772,10 +1831,21 @@ function ytFollow() {
     YT.polling = false;
     if (document.getElementById("setDlg").hidden) return;
     api("/api/ytdlp").then(function (st) {
+      YT.lost = 0;
       YT.st = st;
       ytRender();
       if (st.updating) ytFollow();
-    }).catch(function () {});
+    }).catch(function (e) {
+      // One answer lost (the daemon restarting, a dropped request) is not the end
+      // of the update, and the page is not to be left on "updating" with its
+      // buttons off for good: it asks again a few times, then says so.
+      if (++YT.lost < 5) { ytFollow(); return; }
+      YT.lost = 0;
+      if (YT.st) YT.st.updating = false;
+      YT.note = tr("yt.lost", { why: e && e.message ? e.message : String(e) });
+      YT.noteKind = "err";
+      ytRender();
+    });
   }, 1000);
 }
 document.getElementById("ytCheck").addEventListener("click", function () { ytCheck(true); });
