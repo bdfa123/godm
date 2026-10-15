@@ -33,6 +33,18 @@ func TestMain(m *testing.M) {
 	// What the machine running the tests has installed since it last started
 	// is not for a test to find: the system's PATH is read from its registry.
 	currentSystemPath = func() []string { return nil }
+	// Each run of yt-dlp makes a temporary folder and takes it away when it ends,
+	// and a test that ends a run does not wait for that: the last test of the
+	// package left an empty folder in the machine's temporary folder every time.
+	// The tests keep theirs in one of their own, removed when they are all done.
+	if temp, err := os.MkdirTemp("", "godm-test-"); err == nil {
+		for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+			os.Setenv(name, temp)
+		}
+		code := m.Run()
+		os.RemoveAll(temp)
+		os.Exit(code)
+	}
 	os.Exit(m.Run())
 }
 
