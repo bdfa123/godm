@@ -315,15 +315,3 @@ func TestAResumedYTDLPTaskForgetsWhereTheLastRunGotTo(t *testing.T) {
 		t.Errorf("stage = %q at the start of a run that has said nothing yet", v.Stage)
 	}
 }
-
-// What the card shows for the stage has to be a word the page knows.
-func TestThePageHasAWordForTheProcessingStage(t *testing.T) {
-	for _, key := range []string{`"meta.processing": "putting it together"`, `"meta.processing": "正在合并处理"`} {
-		if !strings.Contains(uiHTML, key) {
-			t.Errorf("the page has no %s", key)
-		}
-	}
-	if !strings.Contains(uiHTML, `t.stage === "processing"`) {
-		t.Error("the page does not show the stage")
-	}
-}

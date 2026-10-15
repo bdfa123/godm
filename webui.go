@@ -761,6 +761,10 @@ function kindOf(ext) {
 }
 function nameOf(t) {
   if (t.filename) return t.filename;
+  // yt-dlp names the file after the page's title, once it has read the page.
+  // Until then the last piece of the address ("watch", for a video on YouTube)
+  // says nothing about the video, and the address at least says which one.
+  if (t.kind === "yt-dlp") return t.url;
   try { var p = new URL(t.url).pathname.split("/").pop(); return decodeURIComponent(p) || t.url; } catch (e) { return t.url; }
 }
 function hostOf(u) { try { return new URL(u).host; } catch (e) { return ""; } }

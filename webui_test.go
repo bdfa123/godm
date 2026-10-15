@@ -64,6 +64,15 @@ func TestAddLinksKeepsAndExplainsWhatTheDaemonRejects(t *testing.T) {
 	}
 }
 
+// A yt-dlp download is named by its address until yt-dlp has read the page, is
+// offered neither a speed limit nor connections from the start, and says when
+// it is putting its streams together.
+func TestTheCardOfAYTDLPDownload(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "ytdlp", lang) })
+	}
+}
+
 func TestSpeedsUnderOneKilobyteAreWholeNumbers(t *testing.T) {
 	runPage(t, "slow", "en")
 }
@@ -603,6 +612,35 @@ scenarios.cap = async function () {
   const plain = toast().textContent;
   assert(plain.indexOf("6") >= 0 && plain.indexOf(words("Saved", "已保存")) >= 0 && plain.indexOf(words("allows", "允许")) < 0,
     "the answer to choosing 6 of a server that takes 8: " + plain);
+};
+
+scenarios.ytdlp = async function () {
+  await boot();
+  // The stand-in for the browser has no URL, and a card falls back to the whole
+  // address without one: the last piece of an address is what a browser gives.
+  ctx.URL = URL;
+  const html = (t) => page("card(" + JSON.stringify(t) + ")");
+  const text = (t) => html(t).replace(/<[^>]*>/g, " ");
+  const nameOnCard = (t) => (/<span class="name"[^>]*>(.*?)<\/span>/.exec(html(t)) || [])[1];
+
+  // Before yt-dlp has read the page it has no title, and the last piece of the
+  // address says nothing about the video.
+  const waiting = task("y", { kind: "yt-dlp", url: "https://www.youtube.com/watch?v=abc", filename: "", size: -1, received: 0, speed: 0, conns: 0, resumable: false });
+  same(nameOnCard(waiting), "https://www.youtube.com/watch?v=abc", "a yt-dlp download without a title is named by its address");
+  // Neither does it take a speed limit or a number of connections.
+  assert(html(waiting).indexOf("data-speed") < 0 && html(waiting).indexOf("data-conns") < 0,
+    "a yt-dlp download is offered a speed limit or a number of connections");
+
+  // Once the title is known the card goes by it.
+  const titled = task("t", { kind: "yt-dlp", url: "https://www.youtube.com/watch?v=abc", filename: "A Film", size: 1000, received: 500, speed: 10, conns: 0, stage: "video", resumable: false });
+  same(nameOnCard(titled), "A Film", "the title should replace the address");
+  assert(text(titled).indexOf(words("video track", "视频轨道")) >= 0, "the stream should be named: " + text(titled));
+
+  // With every stream in and the merge under way, the card says so.
+  const merging = task("m", { kind: "yt-dlp", url: "https://www.youtube.com/watch?v=abc", filename: "A Film", size: 1000, received: 1000, speed: 0, conns: 0, stage: "processing", resumable: false });
+  assert(text(merging).indexOf(words("putting it together", "正在合并处理")) >= 0, "the card of a merge should say so: " + text(merging));
+  assert(text(merging).indexOf(words("video track", "视频轨道")) < 0 && text(merging).indexOf(words("audio track", "音频轨道")) < 0,
+    "the card of a merge should not name a stream: " + text(merging));
 };
 
 const run = scenarios[which];
