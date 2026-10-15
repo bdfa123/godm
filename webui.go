@@ -378,6 +378,7 @@ I18N.en = {
   "meta.single": "single connection · server cannot resume",
   "meta.videoTrack": "video track",
   "meta.audioTrack": "audio track",
+  "meta.processing": "putting it together",
   "meta.inLine": "#{n} in line",
   "meta.starting": "starting",
   "meta.kept": "{size} already downloaded",
@@ -558,6 +559,7 @@ I18N.zh = {
   "meta.single": "单连接 · 服务器不支持断点续传",
   "meta.videoTrack": "视频轨道",
   "meta.audioTrack": "音频轨道",
+  "meta.processing": "正在合并处理",
   "meta.inLine": "排队第 {n} 位",
   "meta.starting": "正在启动",
   "meta.kept": "已下载 {size}",
@@ -1035,6 +1037,7 @@ function metaLine(t) {
       // the bar looks like it started over for no reason.
       if (t.stage === "video") bits.push(tr("meta.videoTrack"));
       else if (t.stage === "audio") bits.push(tr("meta.audioTrack"));
+      else if (t.stage === "processing") bits.push(tr("meta.processing"));
       break;
     case "queued":
       var pos = queuePosition(t);

@@ -198,6 +198,10 @@ type managedTask struct {
 	lastRecv int64
 	lastAt   time.Time
 	speedEMA float64
+	// ytAt is when yt-dlp last said anything about its progress. It says nothing
+	// while it extracts, between two streams or while it merges, and a speed
+	// that stays on the screen through all of that is not true.
+	ytAt time.Time
 
 	// play lets a media player read the file before it has finished.
 	play Playback
@@ -215,9 +219,18 @@ type managedTask struct {
 	mapMu  sync.Mutex
 }
 
+// ytdlpSpeedStale is how long yt-dlp may go without a word about its progress
+// before the speed it last gave is taken to be over. While it downloads it
+// reports many times a second. It is a variable so that a test need not sit
+// through it.
+var ytdlpSpeedStale = 4 * time.Second
+
 func (t *managedTask) snapshot() TaskView {
 	t.mu.Lock()
 	v := t.view
+	if v.Speed > 0 && v.Kind == "yt-dlp" && !t.ytAt.IsZero() && time.Since(t.ytAt) > ytdlpSpeedStale {
+		v.Speed = 0
+	}
 	t.mu.Unlock()
 	// Where a player reads is the engine's to know, from one read to the next,
 	// so it is looked up for each copy rather than kept in the view.
@@ -291,15 +304,28 @@ func (t *managedTask) ytProgress(gen int, p YTProgress) {
 	if t.gen != gen {
 		return
 	}
-	t.view.Received = p.Downloaded
-	t.view.Size = p.Total
-	t.view.Speed = p.Speed
-	t.view.Stage = p.Stage
+	t.ytAt = time.Now()
 	t.view.Kind = "yt-dlp"
 	// Neither a connection count nor a segment map means anything here: the
 	// external tool decides how it fetches.
 	t.view.Resumable = false
 	t.view.Active, t.view.Conns, t.view.ConnsWanted = 0, 0, 0
+	if p.Stage == ytProcessing {
+		// Everything is in and yt-dlp is putting it together. The bar stays where
+		// the last stream left it, and nothing is arriving.
+		t.view.Stage = p.Stage
+		t.view.Speed = 0
+		return
+	}
+	t.view.Received = p.Downloaded
+	t.view.Size = p.Total
+	t.view.Stage = p.Stage
+	t.view.Speed = p.Speed
+	if p.Status == "finished" {
+		// The speed that comes with the last line of a stream is its average
+		// over the whole of it, and nothing is moving until the next begins.
+		t.view.Speed = 0
+	}
 }
 
 func (t *managedTask) hlsStart(gen int, si HLSStart) {
@@ -567,6 +593,11 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 		// Shown as a torrent while it waits in line; it counts peers, not
 		// connections.
 		mt.view.Kind, mt.view.Conns, mt.view.ConnsWanted = "bt", 0, 0
+	} else if isYTDLPJob(req) {
+		// And a yt-dlp download as one, from the start: until it first reports
+		// progress, a few seconds in, it would be taken for a plain file and
+		// offered a speed limit and a number of connections that do nothing.
+		mt.view.Kind, mt.view.Conns, mt.view.ConnsWanted = "yt-dlp", 0, 0
 	}
 
 	m.mu.Lock()
@@ -623,6 +654,12 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	mt.view.Speed, mt.view.Active, mt.view.ServerCap = 0, 0, 0
 	mt.view.RefreshUntil = time.Time{}
 	mt.lastAt, mt.lastRecv, mt.speedEMA = time.Time{}, 0, 0
+	if isYTDLPJob(mt.req) {
+		// Which stream it is on, or that it was putting them together, is what the
+		// last run got to, and yt-dlp is some seconds in finding its way back.
+		mt.view.Stage = ""
+		mt.ytAt = time.Time{}
+	}
 	req, outDir, refresh, id := mt.req, mt.outDir, mt.relinked, mt.view.ID
 	filename := req.Filename
 	if mt.view.Path != "" {
@@ -1752,6 +1789,10 @@ func (m *Manager) restore(list savedList) {
 			// For a torrent this is the seeds it is connected to, as in Add,
 			// and nothing restored from the list is connected to anybody.
 			v.Conns, v.ConnsWanted = 0, 0
+		}
+		if isYTDLPJob(st.Req) {
+			// And a yt-dlp download has no connections of godm's at all.
+			v.Kind, v.Conns, v.ConnsWanted = "yt-dlp", 0, 0
 		}
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit

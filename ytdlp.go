@@ -95,7 +95,10 @@ type YTStart struct {
 }
 
 type YTProgress struct {
-	Stage      string // "video", "audio" or "media"
+	// Stage is "video" or "audio" for a stream being downloaded, "media" for
+	// one that is both, and ytProcessing once everything is downloaded and
+	// yt-dlp is putting it together.
+	Stage      string
 	Status     string // yt-dlp's own: downloading, finished, error
 	Downloaded int64
 	Total      int64
@@ -103,12 +106,19 @@ type YTProgress struct {
 	ETA        int64
 }
 
-// progressMarker, titleMarker and fileMarker prefix the three things we ask
-// yt-dlp to print, so its lines can be picked out of everything else it says.
+// ytProcessing is the stage after the last stream has arrived: merging the
+// streams into one file, converting, moving the result into place. Nothing
+// is downloading, and for a long film it takes a while.
+const ytProcessing = "processing"
+
+// progressMarker, titleMarker, fileMarker and processingMarker prefix the
+// things we ask yt-dlp to print, so its lines can be picked out of everything
+// else it says.
 const (
-	progressMarker = "godm-progress|"
-	titleMarker    = "godm-title|"
-	fileMarker     = "godm-file|"
+	progressMarker   = "godm-progress|"
+	titleMarker      = "godm-title|"
+	fileMarker       = "godm-file|"
+	processingMarker = "godm-processing|"
 )
 
 const ytProgressTemplate = progressMarker +
@@ -302,6 +312,11 @@ func ytdlpArgs(o YTDLPOptions) []string {
 		// break in it would let it pose as the line below that names the file,
 		// and a title that is missing comes out as a bare NA rather than text.
 		"--print", "before_dl:" + titleMarker + "%(title)j",
+		// Once every stream is in, before they are put together: the part of a
+		// big download in which nothing arrives and yt-dlp says nothing. The
+		// field is only there because a template with none is taken for a
+		// field's name.
+		"--print", "post_process:" + processingMarker + "%(id)s",
 		"--print", "after_move:" + fileMarker + "%(filepath)s",
 		"--retries", "10",
 		"--fragment-retries", "10",
@@ -425,10 +440,17 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		path  string
 		tail  []string
 		stage string
+		noJS  string // yt-dlp's complaint that it has no JavaScript runtime
 	)
 	eachLine(pr, func(line string) {
 		if got, ok := strings.CutPrefix(line, fileMarker); ok {
 			path = strings.TrimSpace(got)
+			return
+		}
+		if strings.HasPrefix(line, processingMarker) {
+			if o.OnUpdate != nil {
+				o.OnUpdate(YTProgress{Stage: ytProcessing, Status: "processing"})
+			}
 			return
 		}
 		if up, ok := parseYTProgress(line); ok {
@@ -453,6 +475,9 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			}
 			return
 		}
+		if noJS == "" && isNoJSRuntime(line) {
+			noJS = line
+		}
 		// Keep the last few lines: when yt-dlp fails, its reason is in them.
 		tail = append(tail, line)
 		if len(tail) > 12 {
@@ -465,12 +490,18 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		// Stopped on request, however far it had got.
 		return "", ctx.Err()
 	}
+	failed := tail
+	if noJS != "" {
+		// The complaint comes early and the failure it led to late; it is not
+		// to scroll out of the lines kept.
+		failed = append([]string{noJS}, tail...)
+	}
 	if waitErr != nil {
-		return "", fmt.Errorf("yt-dlp failed: %s", ytdlpReason(tail, waitErr))
+		return "", fmt.Errorf("yt-dlp failed: %s", ytdlpReason(failed, waitErr))
 	}
 	if path == "" {
 		return "", fmt.Errorf("yt-dlp finished but said nothing about where the file went: %s",
-			ytdlpReason(tail, nil))
+			ytdlpReason(failed, nil))
 	}
 	return path, nil
 }
@@ -528,6 +559,20 @@ func ytNum(s string) int64 {
 // ytdlpReason turns the tail of the output into one line worth showing. Its
 // own ERROR line is the useful one when there is one.
 func ytdlpReason(tail []string, waitErr error) string {
+	reason := ytdlpReasonLine(tail, waitErr)
+	for _, line := range tail {
+		if isNoJSRuntime(line) {
+			// Without a JavaScript runtime YouTube hands out no formats, and what
+			// yt-dlp goes on to say is that the video is not available, which it
+			// is, and which sends the reader looking at the video.
+			return reason + " (yt-dlp found no JavaScript runtime, which YouTube needs: " +
+				"install Deno with winget install DenoLand.Deno, then try again)"
+		}
+	}
+	return reason
+}
+
+func ytdlpReasonLine(tail []string, waitErr error) string {
 	for i := len(tail) - 1; i >= 0; i-- {
 		if s := strings.TrimSpace(tail[i]); strings.HasPrefix(s, "ERROR:") {
 			return strings.TrimSpace(strings.TrimPrefix(s, "ERROR:"))
@@ -542,6 +587,13 @@ func ytdlpReason(tail []string, waitErr error) string {
 		return waitErr.Error()
 	}
 	return "no output"
+}
+
+// isNoJSRuntime recognises yt-dlp's warning that it cannot find a JavaScript
+// runtime to run YouTube's own code in.
+func isNoJSRuntime(line string) bool {
+	s := strings.TrimSpace(line)
+	return strings.HasPrefix(s, "WARNING:") && strings.Contains(strings.ToLower(s), "javascript runtime")
 }
 
 // ---------- inspection ----------
@@ -571,7 +623,9 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 		}
 		bin = found
 	}
-	args := append(ytdlpConfigArgs(), "--encoding", "utf-8", "-J", "--no-playlist", "--no-warnings")
+	// Warnings are left on: they are written to stderr, which is only read when
+	// the inspection fails, and a failure may well be explained by one.
+	args := append(ytdlpConfigArgs(), "--encoding", "utf-8", "-J", "--no-playlist")
 	for k, v := range o.Headers {
 		if v == "" {
 			continue

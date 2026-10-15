@@ -121,9 +121,13 @@ func playYTDLP(scene string, args []string) int {
 		}
 		progress("downloading", 1<<20, 8<<20, 500000, 14, "avc1.4d401f")
 		progress("downloading", 4<<20, 8<<20, 900000, 4, "avc1.4d401f")
-		progress("finished", 8<<20, 8<<20, 0, 0, "avc1.4d401f")
+		// The line that ends a stream carries its average speed, as yt-dlp's does.
+		progress("finished", 8<<20, 8<<20, 700000, 0, "avc1.4d401f")
 		progress("downloading", 1<<19, 2<<20, 400000, 3, "none")
-		progress("finished", 2<<20, 2<<20, 0, 0, "none")
+		progress("finished", 2<<20, 2<<20, 350000, 0, "none")
+		if asked(args, "post_process:"+processingMarker+"%(id)s") {
+			say("%s%s", processingMarker, "xyz")
+		}
 		if !quiet {
 			say("[Merger] Merging formats into \"%s\"", filepath.Join(dir, title+".mp4"))
 		}
@@ -141,6 +145,23 @@ func playYTDLP(scene string, args []string) int {
 	case "unavailable":
 		say("[youtube] Extracting URL: https://example.test/watch")
 		say("ERROR: [youtube] xyz: Video unavailable. This video is private")
+		return 1
+	case "nojs":
+		// What yt-dlp says on a machine where it cannot find Deno: a warning,
+		// and then the error that follows from it, which does not mention it.
+		complaint := "WARNING: [youtube] No supported JavaScript runtime could be found. Only deno is enabled by default"
+		failure := "ERROR: [youtube] xyz: This video is not available"
+		out := os.Stdout
+		if contains(args, "-J") {
+			out = os.Stderr
+		}
+		fmt.Fprintln(out, complaint)
+		for i := range 30 {
+			// More than the last few lines kept, so that the complaint is long gone
+			// from them when the failure comes.
+			fmt.Fprintf(out, "[youtube] xyz: Downloading webpage %d\n", i)
+		}
+		fmt.Fprintln(out, failure)
 		return 1
 	case "path":
 		// The PATH the child was given, reported as if it were the file.
@@ -844,7 +865,7 @@ func TestRunYTDLPReportsBothHalvesAndTheFinalFile(t *testing.T) {
 	defer mu.Unlock()
 	want := []string{
 		"video:downloading", "video:downloading", "video:finished",
-		"audio:downloading", "audio:finished",
+		"audio:downloading", "audio:finished", "processing:processing",
 	}
 	if strings.Join(stages, " ") != strings.Join(want, " ") {
 		t.Errorf("stages =\n %v\nwant\n %v", stages, want)
