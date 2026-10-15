@@ -410,6 +410,12 @@
   "picker_media": {
     "message": "媒体"
   },
+  "picker_videos": {
+    "message": "此页面播放过的视频"
+  },
+  "picker_video_hls": {
+    "message": "HLS 流 · 最高清晰度"
+  },
   "picker_empty": {
     "message": "没有匹配的链接。"
   },

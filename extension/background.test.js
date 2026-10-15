@@ -65,9 +65,11 @@ const WEB_PAGE = {
 
 // start loads background.js into a fresh worker. options.host answers what the
 // native host is asked, and options.cookies what the cookie jar holds.
+// options.session is what the worker's session storage holds already, and
+// options.page what the links in the page of a tab are found to be.
 function start(options) {
-  const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {} }, options);
-  const data = { session: {}, sync: Object.assign({}, opts.settings), local: {} };
+  const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {}, session: {} }, options);
+  const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: {} };
   const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [] };
   const events = {
     determining: event(),
@@ -120,7 +122,7 @@ function start(options) {
     contextMenus: { removeAll: (cb) => cb && cb(), create() {}, onClicked: events.menu },
     cookies: { getAll: async (q) => opts.cookies(q) },
     notifications: { create: (n) => seen.notices.push(n) },
-    scripting: {}
+    scripting: { executeScript: async () => (opts.page ? [{ result: clone(opts.page) }] : []) }
   });
 
   const context = vm.createContext({
@@ -642,4 +644,134 @@ test("other downloads, and a .torrent left to Chrome, are answered without waiti
   for (let i = 0; i < 50 && !torrentAnswered; i++) await settle();
   assert.equal(torrentAnswered, 1);
   assert.deepEqual(off.seen.cancelled, []);
+});
+
+// ---------- the videos a page played, in the link picker ----------
+
+const { mediaEntry } = require("./sniff.js");
+
+const PLAYER_TAB = { id: 7, url: "https://video.test/watch/1", title: "The Film - video.test" };
+const PAGE_LINKS = {
+  page: PLAYER_TAB.url,
+  title: PLAYER_TAB.title,
+  links: [{ url: "https://video.test/files/extras.zip", text: "Extras", kind: "link" }]
+};
+
+// found is what the sniffer keeps for a tab: an entry as sniff.js makes it.
+const found = (url, kind, type, size, title) => mediaEntry(url, kind, type, size, title || "", Date.now());
+
+const SNIFFED = [
+  found("https://cdn.test/hls/master.m3u8", "hls", "application/vnd.apple.mpegurl", 0, PLAYER_TAB.title),
+  found("https://cdn.test/dash/manifest.mpd", "dash", "application/dash+xml", 0, PLAYER_TAB.title),
+  found("https://files.test/clip.mp4", "file", "video/mp4", 80 * 1024 * 1024, PLAYER_TAB.title)
+];
+
+// pickedList is the list the worker left for the picker window, once it has
+// opened one.
+const pickedList = (w) => {
+  const key = Object.keys(w.data.session).find((k) => k.startsWith("pick-"));
+  return key && w.data.session[key];
+};
+
+test("the picker is given the videos the page played, the files and the streams but not DASH", async () => {
+  const w = start({
+    session: { "media:7": SNIFFED, "media:8": [found("https://other.test/x.mp4", "file", "video/mp4", 5e6)] },
+    page: PAGE_LINKS
+  });
+  const res = await w.context.pickLinksFromTab(PLAYER_TAB, false);
+  assert.equal(res.ok, true);
+  assert.equal(res.count, 3, "the page's link and the two videos");
+  assert.equal(w.seen.windows.length, 1, "the picker opened");
+  const list = pickedList(w);
+  assert.deepEqual(list.links, PAGE_LINKS.links, "the links in the page's HTML are as they were");
+  assert.deepEqual(
+    list.videos.map((v) => [v.kind, v.url]),
+    [["hls", "https://cdn.test/hls/master.m3u8"], ["file", "https://files.test/clip.mp4"]],
+    "another tab's video is not this page's"
+  );
+  assert.equal(list.videos[1].size, 80 * 1024 * 1024);
+  assert.equal(list.videos[0].title, PLAYER_TAB.title);
+});
+
+test("a page whose HTML has no links is still worth picking from when it played a video", async () => {
+  const w = start({ session: { "media:7": SNIFFED }, page: { page: PLAYER_TAB.url, title: PLAYER_TAB.title, links: [] } });
+  const res = await w.context.pickLinksFromTab(PLAYER_TAB, false);
+  assert.equal(res.ok, true);
+  assert.equal(w.seen.windows.length, 1);
+  assert.equal(pickedList(w).videos.length, 2);
+  assert.deepEqual(w.seen.notices, [], "nothing is said about links there are none of");
+
+  const nothing = start({ page: { page: PLAYER_TAB.url, title: "", links: [] } });
+  assert.equal((await nothing.context.pickLinksFromTab(PLAYER_TAB, false)).ok, false);
+  assert.equal(nothing.seen.windows.length, 0);
+  assert.equal(nothing.seen.notices.length, 1, "told there is nothing to pick");
+});
+
+test("a selection asks for the links inside it and is not given the page's videos", async () => {
+  const w = start({ session: { "media:7": SNIFFED }, page: PAGE_LINKS });
+  const res = await w.context.pickLinksFromTab(PLAYER_TAB, true);
+  assert.equal(res.ok, true);
+  assert.deepEqual(pickedList(w).videos, []);
+
+  const none = start({ session: { "media:7": SNIFFED }, page: { page: PLAYER_TAB.url, title: "", links: [] } });
+  assert.equal((await none.context.pickLinksFromTab(PLAYER_TAB, true)).ok, false, "no links selected is still nothing to pick");
+});
+
+test("the right-click menu brings the videos as the popup's button does", async () => {
+  const w = start({ session: { "media:7": SNIFFED }, page: PAGE_LINKS });
+  await w.menu({ menuItemId: "godm-page-links" }, PLAYER_TAB);
+  assert.equal(pickedList(w).videos.length, 2);
+});
+
+// ---------- streams in a picked batch ----------
+
+const batches = (w) => w.seen.host.filter((m) => m.type === "batch");
+
+test("a stream that was picked goes to the host as one, and a file as before", async () => {
+  const w = start({ cookies: (q) => [{ name: "who", value: new URL(q.url).hostname }] });
+  const resp = await w.message({
+    type: "godm-batch",
+    referrer: PLAYER_TAB.url,
+    connections: 6,
+    items: [
+      { url: "https://cdn.test/play?id=7", kind: "hls", filename: "The Film" },
+      { url: "https://files.test/clip.mp4" },
+      { url: "https://video.test/files/extras.zip", filename: "" }
+    ]
+  });
+  assert.equal(resp.ok, true);
+  assert.equal(batches(w).length, 1);
+  const sent = batches(w)[0];
+  assert.equal(sent.referrer, PLAYER_TAB.url);
+  assert.equal(sent.connections, 6);
+  assert.deepEqual(sent.items, [
+    { url: "https://cdn.test/play?id=7", filename: "The Film", cookie: "who=cdn.test", kind: "hls" },
+    { url: "https://files.test/clip.mp4", filename: "", cookie: "who=files.test" },
+    { url: "https://video.test/files/extras.zip", filename: "", cookie: "who=video.test" }
+  ]);
+  assert.ok(!("variant" in sent), "no quality is named, so the best is taken");
+});
+
+test("a picked batch can say a stream, and nothing else about what an item is", async () => {
+  const w = start();
+  await w.message({
+    type: "godm-batch",
+    items: [
+      { url: "https://t.test/get?id=1", kind: "bt" },
+      { url: "https://v.test/watch", kind: "yt-dlp" },
+      { url: "https://v.test/x", kind: "HLS" },
+      { url: "ftp://v.test/y.m3u8", kind: "hls" },
+      { url: "https://v.test/z", kind: "hls" }
+    ]
+  });
+  assert.deepEqual(
+    batches(w)[0].items.map((i) => [i.url, i.kind]),
+    [
+      ["https://t.test/get?id=1", undefined],
+      ["https://v.test/watch", undefined],
+      ["https://v.test/x", undefined],
+      ["https://v.test/z", "hls"]
+    ],
+    "a torrent or a page for yt-dlp is not what a batch is for; an address that is not http is dropped"
+  );
 });

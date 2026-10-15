@@ -119,3 +119,75 @@ func TestASavedStreamKeepsTheQualityItWasBegunIn(t *testing.T) {
 		t.Errorf("restored with variant %d, want 0, the first one listed, which is what it was saved as", mt.req.Variant)
 	}
 }
+
+// The extension's link picker lists the streams a page played with its links
+// and sends them in one batch, each stream marked as one. The daemon has always
+// read a kind for every item of a batch, as it does for a single download, and
+// this is what the picker relies on: a playlist that is not known by an address
+// ending in .m3u8 (a player is as often given /play?id=7) goes to the stream
+// engine only because the item says so, and takes the best quality as a stream
+// added with no choice does. The items are judged one by one, so a stream the
+// daemon will not take is refused with the same words as a single download
+// would be, and the rest of the batch still goes through.
+func TestABatchItemCanBeAStream(t *testing.T) {
+	hls := newHLSServer(t, makeSegments(4))
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/play" {
+			r.URL.Path = "/master.m3u8"
+		}
+		hls.serve(w, r)
+	}))
+	t.Cleanup(front.Close)
+	play := front.URL + "/play?id=7"
+
+	postBatch := func(m *Manager, body string) (ids, errs []string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		(&server{mgr: m}).handleBatch(rec, httptest.NewRequest(http.MethodPost, "/api/batch", strings.NewReader(body)))
+		var out struct {
+			IDs    []string `json:"ids"`
+			Errors []string `json:"errors"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("/api/batch answered %d %q", rec.Code, rec.Body.String())
+		}
+		return out.IDs, out.Errors
+	}
+
+	t.Run("marked as a stream", func(t *testing.T) {
+		m := NewManager(t.TempDir(), 2)
+		m.announce = nil
+		ids, errs := postBatch(m, `{"items":[`+
+			`{"url":"ftp://files.test/film.m3u8","kind":"hls"},`+
+			`{"url":"`+play+`","kind":"hls","filename":"The Film","connections":4}]}`)
+		if len(ids) != 1 || len(errs) != 1 {
+			t.Fatalf("ids = %v, errors = %v; want the stream taken and the ftp address refused", ids, errs)
+		}
+		if !strings.Contains(errs[0], "only http and https URLs are supported") {
+			t.Errorf("the refusal reads %q, not as a single download's does", errs[0])
+		}
+		waitFor(t, 30*time.Second, "the stream to finish", stateIs(m, ids[0], StateDone))
+		v, _ := findTask(m, ids[0])
+		if v.Kind != "hls" || v.Quality != "1080p · 5.2 Mbps" {
+			t.Errorf("kind = %q, quality = %q; want the stream engine and the best quality", v.Kind, v.Quality)
+		}
+		if got, want := filepath.Base(v.Path), "The Film.ts"; got != want {
+			t.Errorf("saved as %q, want %q", got, want)
+		}
+	})
+
+	t.Run("not marked", func(t *testing.T) {
+		// What the same address is without the mark: a plain file, the playlist
+		// itself. It is why the mark has to survive the way here.
+		m := NewManager(t.TempDir(), 2)
+		m.announce = nil
+		ids, _ := postBatch(m, `{"items":[{"url":"`+play+`"}]}`)
+		if len(ids) != 1 {
+			t.Fatalf("ids = %v", ids)
+		}
+		waitFor(t, 30*time.Second, "the download to finish", stateIs(m, ids[0], StateDone))
+		if v, _ := findTask(m, ids[0]); v.Kind == "hls" {
+			t.Errorf("an address that does not say it is a stream was run as one")
+		}
+	})
+}

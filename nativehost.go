@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 )
 
 // Chrome caps a single browser-to-host message at 64 MB and a host-to-browser
@@ -46,6 +47,23 @@ type batchItem struct {
 	URL      string `json:"url"`
 	Filename string `json:"filename"`
 	Cookie   string `json:"cookie"`
+	// Kind is "hls" for a stream playlist the page played, which the picker
+	// lists beside the page's links, and empty for a file. See batchKind.
+	Kind string `json:"kind"`
+}
+
+// batchKind is the kind an item of a batch is passed on with. A batch is links
+// picked in bulk from a page, and the one thing in it that is not a plain file
+// is a stream the page played. Anything else a message could name (a torrent, a
+// page for yt-dlp) is not what a batch is for, so it is passed on as an ordinary
+// download rather than as what the message claims; a download that wants one of
+// those has a message of its own. An item with no kind, as an extension from
+// before this field sends it, is a file.
+func batchKind(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), "hls") {
+		return "hls"
+	}
+	return ""
 }
 
 type nativeResponse struct {
@@ -182,7 +200,12 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	case "batch":
 		jobs := make([]jobRequest, 0, len(req.Items))
 		for _, it := range req.Items {
-			jobs = append(jobs, req.job(it.URL, it.Filename, it.Cookie))
+			// The kind belongs to the item. The message's own would make every
+			// link of a mixed batch the same thing, and a stream has no quality
+			// to choose here: with none named the daemon takes the best.
+			job := req.job(it.URL, it.Filename, it.Cookie)
+			job.Kind = batchKind(it.Kind)
+			jobs = append(jobs, job)
 		}
 		ids, errs, err := c.submitBatch(jobs)
 		if err != nil {

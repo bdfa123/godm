@@ -201,6 +201,96 @@ func TestNativeDownloadCarriesTheDialogsChoices(t *testing.T) {
 	}
 }
 
+// sentBatch forwards a batch and returns the jobs that reached the daemon.
+func sentBatch(t *testing.T, req nativeRequest) []jobRequest {
+	t.Helper()
+	var body struct {
+		Items []jobRequest `json:"items"`
+	}
+	c, last := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("daemon got bad json: %v", err)
+		}
+		ids := make([]string, len(body.Items))
+		for i := range ids {
+			ids[i] = "t" + strconv.Itoa(i)
+		}
+		writeJSON(w, map[string]any{"ok": true, "ids": ids})
+	})
+	req.Type = "batch"
+	resp := forwardNative(c, req)
+	if !resp.OK || len(resp.IDs) != len(req.Items) {
+		t.Fatalf("got %+v", resp)
+	}
+	if last.URL.Path != "/api/batch" {
+		t.Errorf("reached the daemon at %s", last.URL.Path)
+	}
+	return body.Items
+}
+
+// The picker lists the streams a page played beside its links, and sends them
+// in the same batch. A stream has to reach the daemon as one: a playlist served
+// from a plain address like /play?id=7 is not known by its name, and would be
+// saved as a text file. The files in the same batch stay files, each with the
+// cookies of its own host, and the stream asks for no quality: the daemon takes
+// the best.
+func TestNativeBatchCarriesAStreamsKind(t *testing.T) {
+	var req nativeRequest
+	wire := `{"type":"batch","referrer":"https://video.test/watch/1","connections":4,"items":[
+		{"url":"https://files.test/a.zip","filename":"","cookie":"a=1"},
+		{"url":"https://cdn.test/play?id=7","filename":"The Film","cookie":"b=2","kind":"hls"},
+		{"url":"https://files.test/b.zip","kind":""}]}`
+	if err := json.Unmarshal([]byte(wire), &req); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs := sentBatch(t, req)
+
+	if len(jobs) != 3 {
+		t.Fatalf("%d jobs reached the daemon, want 3", len(jobs))
+	}
+	wantKind := []string{"", "hls", ""}
+	for i, j := range jobs {
+		if j.Kind != wantKind[i] {
+			t.Errorf("item %d (%s) reached the daemon as kind %q, want %q", i, j.URL, j.Kind, wantKind[i])
+		}
+		if j.Variant != -1 {
+			t.Errorf("item %d asked for variant %d, want -1, the best the playlist has", i, j.Variant)
+		}
+		if j.Connections != 4 || j.Referrer != "https://video.test/watch/1" || j.Headers["Referer"] != "https://video.test/watch/1" {
+			t.Errorf("item %d lost what the batch shares: %+v", i, j)
+		}
+	}
+	if jobs[1].Filename != "The Film" || jobs[1].Headers["Cookie"] != "b=2" || jobs[0].Headers["Cookie"] != "a=1" {
+		t.Errorf("the items did not keep their own names and cookies: %+v", jobs)
+	}
+}
+
+// A batch may hold files and streams and nothing else. The extension can ask
+// for a torrent or a yt-dlp download in a message of their own; a batch item
+// that claims to be one is only a link, and neither a kind named on the
+// message as a whole nor one an item names in other letters gets past that.
+func TestNativeBatchPassesOnNoKindButHLS(t *testing.T) {
+	jobs := sentBatch(t, nativeRequest{
+		Kind: "bt", // the message's own, which must not turn the whole batch into torrents
+		Items: []batchItem{
+			{URL: "https://t.test/get?id=1", Kind: "bt"},
+			{URL: "https://v.test/watch", Kind: "yt-dlp"},
+			{URL: "https://v.test/x.m3u8", Kind: " HLS "},
+			{URL: "https://v.test/y", Kind: "hls"},
+			{URL: "https://v.test/z", Kind: "something new"},
+			{URL: "https://v.test/w"},
+		},
+	})
+	var got []string
+	for _, j := range jobs {
+		got = append(got, j.Kind)
+	}
+	if want := []string{"", "", "hls", "hls", "", ""}; !reflect.DeepEqual(got, want) {
+		t.Errorf("kinds that reached the daemon = %q, want %q", got, want)
+	}
+}
+
 // The token is what stands between the browser and the daemon's API. The host
 // holds it so that the extension does not have to: nothing the host answers
 // may carry it, in an address or anywhere else, because whatever the extension

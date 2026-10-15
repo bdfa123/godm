@@ -121,7 +121,10 @@ downloads nothing. "Don't ask again" turns it off, and the options page turns
 it back on. Links picked in bulk skip the dialog.
 
 Right-click a page or a selection to pick several links at once, filtered by
-type, and queue them in one go.
+type, and queue them in one go. The list also holds the videos the page played
+while you watched it, which are not in its HTML: files and HLS streams, in a
+group of their own at the top (a selection leaves them out). A stream is
+queued at its best quality, as one added without a choice is.
 
 A magnet link never turns into a download the extension could see, so a small
 script in every page watches for a click on one. It acts only on a click you

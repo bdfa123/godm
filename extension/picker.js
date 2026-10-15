@@ -7,11 +7,34 @@ const DEFAULTS = {
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst"
 };
 
-const state = { page: "", links: [], selected: new Set(), types: new Set(), query: "", fileTypes: new Set() };
+const state = { page: "", title: "", links: [], selected: new Set(), types: new Set(), query: "", fileTypes: new Set() };
 
 // What a link with no file type is filed under. It is only an identity: the chip
 // that shows it is labelled in the person's language.
 const NO_TYPE = "(none)";
+// The group of the videos the page played, which are not in its HTML but were
+// seen going by. Like NO_TYPE it is an identity, and cannot be mistaken for a
+// file type, which is letters and digits.
+const VIDEOS = "(video)";
+
+function isVideo(link) {
+  return link.kind === "video";
+}
+
+// groupOf is the chip a link is filed under.
+function groupOf(link) {
+  return isVideo(link) ? VIDEOS : link.ext || NO_TYPE;
+}
+
+function human(n) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  return (i === 0 ? n : n.toFixed(1)) + " " + units[i];
+}
 
 function baseOf(url) {
   try {
@@ -46,7 +69,7 @@ function esc(s) {
 function shown() {
   const q = state.query;
   return state.links.filter((l) => {
-    if (state.types.size && !state.types.has(l.ext || NO_TYPE)) return false;
+    if (state.types.size && !state.types.has(groupOf(l))) return false;
     if (!q) return true;
     return l.name.toLowerCase().includes(q) || l.text.toLowerCase().includes(q) || l.url.toLowerCase().includes(q);
   });
@@ -55,17 +78,19 @@ function shown() {
 function renderChips() {
   const counts = new Map();
   for (const l of state.links) {
-    const k = l.ext || NO_TYPE;
+    const k = groupOf(l);
     counts.set(k, (counts.get(k) || 0) + 1);
   }
-  // File types first, then the rest by frequency, so "zip 12" beats "html 80".
+  // The videos the page played first, then file types, then the rest by
+  // frequency, so "zip 12" beats "html 80".
+  const rank = (k) => (k === VIDEOS ? 0 : state.fileTypes.has(k) ? 1 : 2);
   const keys = [...counts.keys()].sort((a, b) => {
-    const fa = state.fileTypes.has(a) ? 0 : 1, fb = state.fileTypes.has(b) ? 0 : 1;
-    return fa - fb || counts.get(b) - counts.get(a) || a.localeCompare(b);
+    return rank(a) - rank(b) || counts.get(b) - counts.get(a) || a.localeCompare(b);
   });
+  const label = (k) => (k === VIDEOS ? tr("picker_videos") : k === NO_TYPE ? tr("picker_none") : k);
   document.getElementById("chips").innerHTML = keys.map((k) =>
     '<button class="chip' + (state.types.has(k) ? " on" : "") + '" data-type="' + esc(k) + '">' +
-    "<b>" + esc(k === NO_TYPE ? tr("picker_none") : k) + "</b><span>" + counts.get(k) + "</span></button>").join("");
+    "<b>" + esc(label(k)) + "</b><span>" + counts.get(k) + "</span></button>").join("");
 }
 
 function render() {
@@ -77,7 +102,7 @@ function render() {
       '<td><div class="name">' + esc(l.name) + "</div>" +
       (l.text && l.text !== l.name ? '<div class="text">' + esc(l.text) + "</div>" : "") +
       '<div class="url">' + esc(l.url) + "</div></td>" +
-      '<td class="ext">' + esc(l.ext || (l.kind === "media" ? tr("picker_media") : "")) + "</td></tr>";
+      '<td class="ext">' + esc(isVideo(l) ? l.format.toUpperCase() : l.ext || (l.kind === "media" ? tr("picker_media") : "")) + "</td></tr>";
   }).join("");
   document.getElementById("empty").hidden = list.length > 0;
 
@@ -146,9 +171,19 @@ document.getElementById("selFiles").addEventListener("click", () => {
 });
 document.getElementById("cancel").addEventListener("click", () => window.close());
 
+// itemFor is what the worker is sent for a link. A stream the page played says
+// it is one, so that godm runs it as a stream whatever its address looks like,
+// and is named for the page, since a playlist is nearly always called
+// index.m3u8. It names no quality: the best is taken, and the picker has no row
+// to choose one in. A video that is a file is a file like any other link.
+function itemFor(link) {
+  if (!isVideo(link) || link.format !== "hls") return { url: link.url };
+  return { url: link.url, kind: "hls", filename: link.title || state.title };
+}
+
 document.getElementById("go").addEventListener("click", async () => {
   // Keep page order: that is the order the queue will download in.
-  const items = state.links.filter((l) => state.selected.has(l.url)).map((l) => ({ url: l.url }));
+  const items = state.links.filter((l) => state.selected.has(l.url)).map(itemFor);
   if (!items.length) return;
   const go = document.getElementById("go");
   go.disabled = true;
@@ -164,6 +199,39 @@ document.getElementById("go").addEventListener("click", async () => {
     go.disabled = false;
   }
 });
+
+// linksOf is the list the picker shows: the videos the page played, then the
+// links in its HTML. A video the page also links to, a <video src> the sniffer
+// saw being fetched, is listed once, as the video it is, because a row is told
+// from the others by its address.
+function linksOf(data) {
+  const links = [];
+  const seen = new Set();
+  for (const v of data.videos || []) {
+    if (seen.has(v.url)) continue;
+    seen.add(v.url);
+    const stream = v.kind === "hls";
+    const link = { url: v.url, kind: "video", format: stream ? "hls" : "file", title: v.title || "" };
+    // A playlist is called index.m3u8 or master.m3u8 by nearly every site, so
+    // what the page is called says more about it, as it does in the popup.
+    link.name = (stream && link.title) || nameFor(link);
+    link.text = stream
+      ? tr("picker_video_hls")
+      : [v.type, v.size > 0 ? human(v.size) : ""].filter(Boolean).join(" · ");
+    // A file is filed by its type as any link is, and a stream has none.
+    link.ext = stream ? "" : extOf(link);
+    links.push(link);
+  }
+  for (const l of data.links || []) {
+    if (seen.has(l.url)) continue;
+    seen.add(l.url);
+    const link = { url: l.url, text: l.text || "", kind: l.kind };
+    link.name = nameFor(link);
+    link.ext = extOf(link);
+    links.push(link);
+  }
+  return links;
+}
 
 (async function init() {
   const key = new URLSearchParams(location.search).get("k");
@@ -181,13 +249,11 @@ document.getElementById("go").addEventListener("click", async () => {
   }
 
   state.page = data.page;
-  state.links = data.links.map((l) => {
-    const link = { url: l.url, text: l.text || "", kind: l.kind };
-    link.name = nameFor(link);
-    link.ext = extOf(link);
-    return link;
-  });
+  state.title = data.title || "";
+  state.links = linksOf(data);
   // Start with what godm would have taken over anyway: real files, not pages.
+  // A stream is left for the person to pick: a page can play several, and one
+  // may be many gigabytes.
   state.selected = new Set(state.links.filter((l) => state.fileTypes.has(l.ext)).map((l) => l.url));
 
   document.getElementById("title").textContent = data.title || tr("picker_heading");

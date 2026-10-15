@@ -3,7 +3,7 @@
 // Run with: node --test extension/
 const test = require("node:test");
 const assert = require("node:assert");
-const { classifyMedia, mediaEntry, shouldRecord } = require("./sniff.js");
+const { classifyMedia, mediaEntry, pickableMedia, shouldRecord } = require("./sniff.js");
 
 const MB = 1 << 20;
 
@@ -82,4 +82,30 @@ test("plain files stand on their own", () => {
   const list = [entry("https://files.example/one.mp4", "file")];
   assert.equal(shouldRecord(list, entry("https://files.example/two.mp4", "file")), true);
   assert.equal(shouldRecord(list, entry("https://files.example/one.mp4", "file")), false);
+});
+
+// ---------- what the link picker is given ----------
+
+test("the picker is given the files and the streams, and not what godm cannot download", () => {
+  const found = [
+    mediaEntry("https://v.example/hls/master.m3u8", "hls", "application/vnd.apple.mpegurl", 0, "The Film", 1000),
+    mediaEntry("https://v.example/dash/manifest.mpd", "dash", "application/dash+xml", 0, "The Film", 1001),
+    mediaEntry("https://files.example/clip.mp4", "file", "video/mp4", 50 * MB, "The Film", 1002),
+    mediaEntry("blob:https://v.example/1234", "file", "video/mp4", 50 * MB, "", 1003)
+  ];
+  assert.deepEqual(pickableMedia(found), [
+    { url: "https://v.example/hls/master.m3u8", kind: "hls", type: "application/vnd.apple.mpegurl", size: 0, title: "The Film" },
+    { url: "https://files.example/clip.mp4", kind: "file", type: "video/mp4", size: 50 * MB, title: "The Film" }
+  ]);
+});
+
+test("the picker is given nothing when nothing was found", () => {
+  assert.deepEqual(pickableMedia([]), []);
+  assert.deepEqual(pickableMedia(undefined), []);
+  assert.deepEqual(pickableMedia([mediaEntry("https://v.example/a.mpd", "dash", "", 0, "", 1)]), []);
+});
+
+test("the picker is given no more of an entry than it shows or sends", () => {
+  const [one] = pickableMedia([mediaEntry("https://f.example/a.mp4", "file", "video/mp4", 2 * MB, "T", 5)]);
+  assert.deepEqual(Object.keys(one).sort(), ["kind", "size", "title", "type", "url"]);
 });

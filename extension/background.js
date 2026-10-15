@@ -749,11 +749,20 @@ async function pickLinksFromTab(tab, selectionOnly) {
     chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
     return { ok: false, error: msg };
   }
-  if (!result || !result.links.length) {
+  // The page's HTML only says what it links to. The videos it fetched while it
+  // played are what the sniffer saw, and are listed beside the links. They
+  // belong to the page as a whole, so a selection, which asks for the links
+  // inside it, does not take them along.
+  const videos = selectionOnly ? [] : pickableMedia(await mediaFor(tab.id));
+  if (!result && videos.length) {
+    result = { page: tab.url || "", title: tab.title || "", links: [] };
+  }
+  if (!result || (!result.links.length && !videos.length)) {
     const msg = tr(selectionOnly ? "notify_no_selection" : "notify_no_links");
     chrome.notifications.create({ type: "basic", iconUrl: "icons/128.png", title: "godm", message: msg });
     return { ok: false, error: msg };
   }
+  result.videos = videos;
   // The picker is a separate extension page; hand it the list through session
   // storage rather than a URL, which would leak every link into history.
   const key = "pick-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
@@ -764,17 +773,22 @@ async function pickLinksFromTab(tab, selectionOnly) {
     width: 920,
     height: 700
   });
-  return { ok: true, count: result.links.length };
+  return { ok: true, count: result.links.length + videos.length };
 }
 
 // submitPicked sends the chosen links as one batch. Cookies are looked up per
-// link because a single page often links to several hosts.
+// link because a single page often links to several hosts. A stream the page
+// played goes with its kind, so that godm runs it as one; it names no quality,
+// and the best is taken. Nothing else is passed on as a kind: that is all the
+// host would let through.
 async function submitPicked(msg) {
   const cfg = await getConfig();
   const items = [];
   for (const it of msg.items || []) {
     if (!/^https?:\/\//i.test(it.url || "")) continue;
-    items.push({ url: it.url, filename: it.filename || "", cookie: await cookieHeader(it.url) });
+    const item = { url: it.url, filename: it.filename || "", cookie: await cookieHeader(it.url) };
+    if (it.kind === "hls") item.kind = "hls";
+    items.push(item);
   }
   if (!items.length) return { ok: false, error: tr("err_nothing_selected") };
   const resp = await callHost({

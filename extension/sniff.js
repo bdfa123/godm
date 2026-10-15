@@ -90,6 +90,22 @@ function mediaEntry(url, kind, contentType, length, title, now) {
   };
 }
 
+// pickableMedia is what the link picker lists of the media found in a tab: the
+// files and the HLS streams, which godm can download, and only as much of each
+// as the picker shows or sends. A DASH manifest is left out, since godm cannot
+// download one, and so is anything that is not an http(s) address.
+function pickableMedia(list) {
+  return (list || [])
+    .filter((m) => (m.kind === "file" || m.kind === "hls") && /^https?:\/\//i.test(m.url || ""))
+    .map((m) => ({
+      url: m.url,
+      kind: m.kind,
+      type: m.type || "",
+      size: m.size > 0 ? m.size : 0,
+      title: m.title || ""
+    }));
+}
+
 // Node runs this file directly to test the rules; a service worker has no
 // module object and skips it.
 if (typeof module !== "undefined" && module.exports) {
@@ -100,6 +116,7 @@ if (typeof module !== "undefined" && module.exports) {
     mediaEntry,
     originOf,
     pathOf,
+    pickableMedia,
     shouldRecord,
     streamGroup
   };

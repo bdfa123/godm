@@ -410,6 +410,12 @@
   "picker_media": {
     "message": "media"
   },
+  "picker_videos": {
+    "message": "Videos this page played"
+  },
+  "picker_video_hls": {
+    "message": "HLS stream · best quality"
+  },
   "picker_empty": {
     "message": "No links match."
   },
