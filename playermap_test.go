@@ -463,7 +463,7 @@ func TestATorrentBeingStreamedHasAMapOfItsPieces(t *testing.T) {
 	if _, err := io.ReadFull(resp.Body, make([]byte, 32<<10)); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, 40*time.Second, "completion", stateIs(m, id, StateDone))
+	waitTorrentDone(t, m, id, seed, 40*time.Second)
 	// All of the film and nothing of the files beside it.
 	waitFor(t, 5*time.Second, "a map of the whole film", func() bool {
 		return readMap(file, &pm) && pm.Complete && fmt.Sprint(pm.Have) == fmt.Sprintf("[[0 %d]]", size)

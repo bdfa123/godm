@@ -156,6 +156,40 @@ func taskOf(m *Manager, id string) *managedTask {
 }
 
 // waitLoaded waits for a task's torrent to be in godm's client.
+// waitTorrentDone waits for a torrent task to finish, and when it does not,
+// fails with what the torrent and its seeder were doing: a stall on a CI
+// runner, which has not been seen anywhere else, then says whether the
+// connection went (no peers), or stayed and moved nothing.
+func waitTorrentDone(t *testing.T, m *Manager, id string, seed *peer, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	var trace strings.Builder
+	next := time.Now()
+	for !stateIs(m, id, StateDone)() {
+		now := time.Now()
+		if !now.Before(next) {
+			v, _ := findTask(m, id)
+			line := fmt.Sprintf("\n  %s: task %s %q", now.Format("15:04:05.0"), v.State, v.Error)
+			if mt := taskOf(m, id); mt != nil {
+				if tor := m.bt.loadedFor(mt); tor != nil {
+					s := tor.Stats()
+					line += fmt.Sprintf(", %d bytes done, %d active peers, %d pending, %d half-open, %d chunks read",
+						tor.BytesCompleted(), s.ActivePeers, s.PendingPeers, s.HalfOpenPeers, s.ChunksReadUseful.Int64())
+				}
+			}
+			if seed != nil {
+				line += fmt.Sprintf("; seeder sent %d, %d peers", seed.uploaded(), seed.t.Stats().ActivePeers)
+			}
+			trace.WriteString(line)
+			next = now.Add(2 * time.Second)
+		}
+		if now.After(deadline) {
+			t.Fatalf("timed out waiting for completion:%s", trace.String())
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+}
+
 func waitLoaded(t *testing.T, m *Manager, id string) *torrent.Torrent {
 	t.Helper()
 	var tor *torrent.Torrent
