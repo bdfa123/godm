@@ -23,6 +23,9 @@ import (
 
 const stubEnv = "GODM_YTDLP_STUB"
 
+// standInVideo is what the stand-in puts in the file it says it saved.
+const standInVideo = "the bytes of a video"
+
 func TestMain(m *testing.M) {
 	if scene := os.Getenv(stubEnv); scene != "" {
 		os.Exit(playYTDLP(scene, os.Args[1:]))
@@ -124,7 +127,17 @@ func playYTDLP(scene string, args []string) int {
 		if !quiet {
 			say("[Merger] Merging formats into \"%s\"", filepath.Join(dir, title+".mp4"))
 		}
-		say("%s%s", fileMarker, filepath.Join(dir, title+".mp4"))
+		// The file is made, unless it is there already: --no-overwrites then
+		// says nothing of it being "already downloaded" under --print, and goes
+		// on to report it as if it had made it.
+		final := filepath.Join(dir, title+".mp4")
+		if _, err := os.Stat(final); err != nil {
+			if err := os.WriteFile(final, []byte(standInVideo), 0o600); err != nil {
+				say("ERROR: %v", err)
+				return 1
+			}
+		}
+		say("%s%s", fileMarker, final)
 	case "unavailable":
 		say("[youtube] Extracting URL: https://example.test/watch")
 		say("ERROR: [youtube] xyz: Video unavailable. This video is private")
@@ -339,7 +352,8 @@ func goneQuiet(beat string) bool {
 // standInOptions is what the stand-in makes of its command line and of the
 // configuration files that go with it.
 type standInOptions struct {
-	home  string // the -P folder
+	home  string // the -P folder, where what is finished goes
+	temp  string // the -P temp: folder, where the rest is kept; the home folder without one
 	title string // the file's name without its extension, from -o
 }
 
@@ -368,7 +382,11 @@ func readStandInOptions(args []string) (standInOptions, error) {
 		}
 		switch args[i] {
 		case "-P":
-			o.home = strings.TrimPrefix(value(), "home:")
+			if v := value(); strings.HasPrefix(v, "temp:") {
+				o.temp = strings.TrimPrefix(v, "temp:")
+			} else {
+				o.home = strings.TrimPrefix(v, "home:")
+			}
 		case "-o":
 			template = value()
 		case "--ignore-config", "--no-config":
@@ -400,6 +418,9 @@ func readStandInOptions(args []string) (standInOptions, error) {
 	}
 	if template == "" {
 		template = "A Video Title.%(ext)s"
+	}
+	if o.temp == "" {
+		o.temp = o.home
 	}
 	o.title = strings.TrimSuffix(template, ".%(ext)s")
 	return o, nil

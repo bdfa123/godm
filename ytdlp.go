@@ -76,8 +76,13 @@ func YTDLPAvailable() bool {
 }
 
 type YTDLPOptions struct {
-	URL      string
+	URL string
+	// OutDir is where the finished files go. TempDir, when there is one, is
+	// where everything yt-dlp has not finished with is kept meanwhile: the
+	// parts of a stream, the streams waiting to be merged, the merge itself.
+	// Left out, those share OutDir with the result.
 	OutDir   string
+	TempDir  string
 	Headers  map[string]string
 	Format   string // yt-dlp format selector; empty means its own default
 	Binary   string // overrides discovery
@@ -87,9 +92,6 @@ type YTDLPOptions struct {
 
 type YTStart struct {
 	Title string
-	// File is the file yt-dlp said it is about to write, when that is what
-	// named the title: one stream of the video. See ytdlpDestination.
-	File string
 }
 
 type YTProgress struct {
@@ -305,6 +307,11 @@ func ytdlpArgs(o YTDLPOptions) []string {
 		"--fragment-retries", "10",
 		"-P", o.OutDir,
 	}
+	if o.TempDir != "" {
+		// What is not finished stays here, and only the result is moved to -P
+		// when it is whole; see ytdlpPlace.
+		args = append(args, "-P", "temp:"+o.TempDir)
+	}
 	args = append(ytdlpConfigArgs(), args...)
 	if o.Format != "" {
 		args = append(args, "-f", o.Format)
@@ -344,6 +351,11 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	// to be spelled out in full or it would be made inside yt-dlp's.
 	if abs, err := filepath.Abs(o.OutDir); err == nil {
 		o.OutDir = abs
+	}
+	if o.TempDir != "" {
+		if abs, err := filepath.Abs(o.TempDir); err == nil {
+			o.TempDir = abs
+		}
 	}
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return "", err
@@ -441,9 +453,6 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			}
 			return
 		}
-		if f := ytdlpDestination(line); f != "" && o.OnStart != nil {
-			o.OnStart(YTStart{File: f})
-		}
 		// Keep the last few lines: when yt-dlp fails, its reason is in them.
 		tail = append(tail, line)
 		if len(tail) > 12 {
@@ -514,19 +523,6 @@ func ytNum(s string) int64 {
 		return int64(f)
 	}
 	return 0
-}
-
-// ytdlpDestination is the file yt-dlp announces it is about to download into:
-// one stream of the video, kept as that name with ".part" added until the
-// stream is whole, and until then the only word there is of where an
-// unfinished download's files are. Unlike the title, it is taken only from
-// yt-dlp's own announcement at the start of a line. Other lines carry words
-// that are the site's, and this is a name files get deleted by.
-func ytdlpDestination(line string) string {
-	if rest, ok := strings.CutPrefix(line, "[download] Destination: "); ok {
-		return strings.TrimSpace(rest)
-	}
-	return ""
 }
 
 // ytdlpReason turns the tail of the output into one line worth showing. Its

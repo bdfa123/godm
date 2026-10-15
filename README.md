@@ -150,7 +150,12 @@ the extension was loaded need reloading first.
   say) is found at once: godm reads the system's PATH again from the registry
   when it does not find it on its own, and gives yt-dlp that PATH, so the Deno
   and ffmpeg that winget installs beside it are found too. No restart of the
-  browser is needed.
+  browser is needed. Each download works in a folder of its own,
+  `.godm-<task id>`, inside the download folder, and the finished file is moved
+  out of it under a name nobody is using (`name (1).ext` if there is one, as
+  for any other download). What yt-dlp leaves in that folder besides the
+  result (the streams `--keep-video` asks it to keep, say) is deleted with it
+  when the download is done.
 - DRM-protected streams (Widevine, PlayReady, FairPlay) and live streams are
   refused with a reason.
 
@@ -334,8 +339,8 @@ download:
 - **Never overwrites**: an existing file gets a numbered name, `name (1).ext`.
 - **Removing with the file**: if another program has the file open, godm keeps
   trying for 15 seconds and keeps the `.godm` sidecar until the file is gone. An
-  unfinished yt-dlp download is cleaned up too, with its `.part` and fragment
-  files.
+  unfinished yt-dlp download is cleaned up too: its folder, with the `.part`
+  and fragment files in it, is removed as a whole.
 - **Durability**: the data is flushed to disk before the sidecar that says it is
   there, about every 2 seconds. After a crash or power cut a resume may fetch up
   to that much again, and never trusts bytes that did not reach the disk.

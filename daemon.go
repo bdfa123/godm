@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -195,12 +194,6 @@ type managedTask struct {
 	// while it waits in the queue, or whose first request fails, never gets
 	// that far, and the run after it has to know all the same.
 	relinked bool
-	// ytFiles are the files yt-dlp has said it is writing for this download,
-	// one to a stream. Until the download is done they are all there is to go
-	// by when it is removed with its files: the task has no path of its own
-	// before then. Saved with the task, since yt-dlp says nothing a second
-	// time about a stream it finished in an earlier run.
-	ytFiles []string
 
 	lastRecv int64
 	lastAt   time.Time
@@ -276,9 +269,8 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 	t.view.Resumable = si.Resumable
 }
 
-// ytStart names the task after what yt-dlp has begun on. file is the file it
-// announced with that, if it is one to remember; see ytOwnFile.
-func (t *managedTask) ytStart(gen int, si YTStart, file string) {
+// ytStart names the task after the video yt-dlp has begun on.
+func (t *managedTask) ytStart(gen int, si YTStart) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.gen != gen {
@@ -287,36 +279,6 @@ func (t *managedTask) ytStart(gen int, si YTStart, file string) {
 	if si.Title != "" && t.view.Path == "" {
 		t.view.Filename = si.Title
 	}
-	if file != "" && !slices.Contains(t.ytFiles, file) {
-		t.ytFiles = append(t.ytFiles, file)
-	}
-}
-
-// ytOwnFile is file, which yt-dlp has just said it is about to write, as the
-// task remembers it for deleting later, or "" if it is not to be remembered.
-// yt-dlp's output is not all yt-dlp's own words, a title being the site's,
-// and deleting goes by this name. So it has to be inside the download's own
-// folder, and it must not be there yet: yt-dlp begins every stream under the
-// name with ".part" added, and a file already under the name itself is
-// somebody's finished file.
-func ytOwnFile(outDir, file string) string {
-	if file == "" {
-		return ""
-	}
-	dir, err := filepath.Abs(outDir)
-	if err != nil {
-		return ""
-	}
-	file = filepath.Clean(file)
-	// A name that is not spelled out in full fails here too: yt-dlp is given
-	// the folder in full and is not started in it.
-	if rel, err := filepath.Rel(dir, file); err != nil || !filepath.IsLocal(rel) {
-		return ""
-	}
-	if _, err := os.Lstat(file); err == nil {
-		return ""
-	}
-	return file
 }
 
 // ytProgress takes yt-dlp's own speed rather than working one out from the
@@ -661,7 +623,7 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	mt.view.Speed, mt.view.Active, mt.view.ServerCap = 0, 0, 0
 	mt.view.RefreshUntil = time.Time{}
 	mt.lastAt, mt.lastRecv, mt.speedEMA = time.Time{}, 0, 0
-	req, outDir, refresh := mt.req, mt.outDir, mt.relinked
+	req, outDir, refresh, id := mt.req, mt.outDir, mt.relinked, mt.view.ID
 	filename := req.Filename
 	if mt.view.Path != "" {
 		// Later runs must land on the same partial file, whatever name the
@@ -693,15 +655,19 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	case isBTJob(req):
 		donePath, err = m.runTorrent(ctx, mt, gen)
 	case isYTDLPJob(req):
+		place := ytdlpPlaceFor(outDir, id)
 		donePath, err = RunYTDLP(ctx, YTDLPOptions{
-			URL:     req.URL,
-			OutDir:  outDir,
+			URL: req.URL,
+			// yt-dlp works in a folder of its own, and what it finishes is moved
+			// into the download folder after; see ytdlpPlace.
+			OutDir:  place.files,
+			TempDir: place.work,
 			Headers: req.Headers,
 			// For yt-dlp the variant is a picture height, not a position in a
 			// list of streams.
 			Format: ytdlpFormatFor(req.Variant),
 			OnStart: func(si YTStart) {
-				mt.ytStart(gen, si, ytOwnFile(outDir, si.File))
+				mt.ytStart(gen, si)
 				m.dirty.Store(true)
 			},
 			OnUpdate: func(p YTProgress) {
@@ -709,6 +675,13 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 				m.dirty.Store(true)
 			},
 		})
+		if err == nil {
+			donePath, err = mt.settleYTDLP(place, outDir, donePath)
+			if errors.Is(err, errRemovedWithFiles) {
+				cancel()
+				err = ctx.Err()
+			}
+		}
 		if err != nil {
 			donePath = ""
 		}
@@ -872,11 +845,47 @@ func (m *Manager) release() {
 func (m *Manager) afterRun(mt *managedTask) {
 	mt.mu.Lock()
 	mt.inFlight = false
-	del, path, parts := mt.deleteAfter && len(mt.players) == 0, mt.view.Path, mt.ytFiles
+	del, path := mt.deleteAfter && len(mt.players) == 0, mt.view.Path
 	mt.mu.Unlock()
 	if del {
 		deleteDownload(path)
-		deleteYTFiles(parts)
+		mt.discardYTDLP()
+	}
+}
+
+// errRemovedWithFiles says a download finished just as it was removed along
+// with its files.
+var errRemovedWithFiles = errors.New("removed along with its files")
+
+// settleYTDLP moves what yt-dlp finished into the download folder, see
+// ytdlpPlace.settle, unless the download has been removed with its files in
+// the meantime. Moving the file out then would only give afterRun, which clears
+// the folder, a file it does not know of.
+func (t *managedTask) settleYTDLP(place ytdlpPlace, outDir, path string) (string, error) {
+	t.mu.Lock()
+	gone := t.deleteAfter
+	t.mu.Unlock()
+	if gone {
+		return "", errRemovedWithFiles
+	}
+	final, err := place.settle(outDir, path)
+	if err != nil {
+		return "", err
+	}
+	// From here a removal with the file knows which file to delete, and one that
+	// came while the file was being moved gets its way too: afterRun reads the
+	// path when the run ends.
+	t.mu.Lock()
+	t.view.Path = final
+	t.mu.Unlock()
+	return final, nil
+}
+
+// discardYTDLP removes the folder a yt-dlp download works in, with the parts
+// of it that are not finished. It is nothing for any other kind of download.
+func (t *managedTask) discardYTDLP() {
+	if isYTDLPJob(t.req) {
+		ytdlpPlaceFor(t.outDir, t.view.ID).discard()
 	}
 }
 
@@ -921,9 +930,6 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		if haveFinalSize {
 			mt.view.Size = finalSize
 		}
-		// yt-dlp has put its streams together and cleared up after itself;
-		// from here on the download is the one file at its path.
-		mt.ytFiles = nil
 		mt.view.EndedAt = now
 		mt.view.Received = mt.view.Size
 		mt.view.Segments = nil
@@ -1043,7 +1049,7 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 	if w := mt.mapRun; w != nil {
 		w.end()
 	}
-	cancel, path, parts := mt.cancel, mt.view.Path, mt.ytFiles
+	cancel, path := mt.cancel, mt.view.Path
 	busy := mt.inFlight || len(mt.players) > 0
 	bt := isBTJob(mt.req)
 	if deleteFile {
@@ -1070,7 +1076,7 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 		go m.forgetTorrent(mt, deleteFile)
 	} else if deleteFile && !busy {
 		deleteDownload(path)
-		deleteYTFiles(parts)
+		mt.discardYTDLP()
 	}
 	m.dirty.Store(true)
 	return true
@@ -1147,44 +1153,6 @@ func keepDeleting(try func() error, after func()) {
 			}
 		}
 	}()
-}
-
-// deleteYTFiles deletes what an unfinished yt-dlp download leaves behind, given
-// the files yt-dlp said it was writing. Each is there under its own name if
-// that stream was finished and waiting to be merged, and otherwise as what
-// yt-dlp keeps while a stream arrives: the name with ".part" added, a ".ytdl"
-// of notes beside it, and one ".part-Frag" file to a piece when the stream
-// comes in fragments. The processes that wrote them have been ended by now,
-// but may not have let go of them yet, so this keeps trying as deleteDownload
-// does.
-func deleteYTFiles(files []string) {
-	if len(files) == 0 {
-		return
-	}
-	keepDeleting(func() error {
-		var failed error
-		remove := func(p string) {
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && failed == nil {
-				failed = err
-			}
-		}
-		for _, f := range files {
-			remove(f)
-			remove(f + ".part")
-			remove(f + ".ytdl")
-			// The fragments are found by reading the folder, not by a
-			// pattern: a title is free to hold the characters a pattern
-			// gives a meaning to.
-			dir, name := filepath.Split(f)
-			entries, _ := os.ReadDir(dir)
-			for _, e := range entries {
-				if strings.HasPrefix(e.Name(), name+".part-Frag") {
-					remove(filepath.Join(dir, e.Name()))
-				}
-			}
-		}
-		return failed
-	}, func() {})
 }
 
 // removeTree is os.RemoveAll, repeated in the background for as long as
@@ -1520,8 +1488,6 @@ type savedTask struct {
 	// Relinked is the task's relinked: an address changed while godm was
 	// closed, or just before it, is still a changed address afterwards.
 	Relinked bool `json:"relinked,omitempty"`
-	// YTFiles is the task's ytFiles.
-	YTFiles []string `json:"yt_files,omitempty"`
 }
 
 type savedList struct {
@@ -1572,7 +1538,6 @@ func (m *Manager) save() error {
 		}
 		list.Tasks = append(list.Tasks, savedTask{
 			View: v, Req: t.req, OutDir: t.outDir, Relinked: t.relinked,
-			YTFiles: slices.Clone(t.ytFiles),
 		})
 		t.mu.Unlock()
 	}
@@ -1792,7 +1757,7 @@ func (m *Manager) restore(list savedList) {
 		v.SpeedLimit = st.Req.SpeedLimit
 		mt := &managedTask{
 			view: v, req: st.Req, outDir: st.OutDir,
-			relinked: st.Relinked, ytFiles: st.YTFiles,
+			relinked: st.Relinked,
 		}
 		mt.connLimit.Store(int32(st.Req.Connections))
 		mt.speed.SetRate(st.Req.SpeedLimit)
