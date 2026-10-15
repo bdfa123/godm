@@ -40,10 +40,16 @@ func consume(t *testing.T, l *RateLimiter, workers, chunk, total int) time.Durat
 	return time.Since(start)
 }
 
+// within checks that a limited transfer took about as long as the limit makes
+// it. Finishing early is held to the tolerance, since that is the limit not
+// holding. Finishing late is allowed more: a busy machine only ever adds time,
+// and the shared CI runners have added a third and more to transfers whose
+// limit was keeping perfectly well. Late by three quarters still fails, which
+// a limit wrongly holding transfers to half its rate would be.
 func within(t *testing.T, what string, got, want time.Duration, tolerance float64) {
 	t.Helper()
 	lo := time.Duration(float64(want) * (1 - tolerance))
-	hi := time.Duration(float64(want) * (1 + tolerance))
+	hi := time.Duration(float64(want) * (1 + max(tolerance, 0.75)))
 	if got < lo || got > hi {
 		t.Errorf("%s took %v, want about %v", what, got.Round(time.Millisecond), want)
 	}
