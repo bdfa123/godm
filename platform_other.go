@@ -58,6 +58,10 @@ func startTree(cmd *exec.Cmd) (release func(), err error) {
 	return func() {}, nil
 }
 
+// hideWindow has nothing to do where a program does not open a window by
+// being started.
+func hideWindow(cmd *exec.Cmd) {}
+
 // On macOS and Linux the manifest is a file in a per-browser directory rather
 // than a registry value.
 func nativeHostDirs() []string {

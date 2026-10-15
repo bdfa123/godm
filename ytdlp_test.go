@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 	// What the machine running the tests has installed since it last started
 	// is not for a test to find: the system's PATH is read from its registry.
 	currentSystemPath = func() []string { return nil }
+	// Nor is the network, nor the package manager, for a test that does not say
+	// otherwise: see untouchable in ytupdate_test.go.
+	untouchable()
 	// Each run of yt-dlp makes a temporary folder and takes it away when it ends,
 	// and a test that ends a run does not wait for that: the last test of the
 	// package left an empty folder in the machine's temporary folder every time.
@@ -49,6 +52,9 @@ func TestMain(m *testing.M) {
 }
 
 func playYTDLP(scene string, args []string) int {
+	if scene == "ytool" || scene == "winget" || scene == "refuse" {
+		return playUpdater(scene, args)
+	}
 	out := os.Stdout
 	say := func(format string, a ...any) { fmt.Fprintf(out, format+"\n", a...) }
 	progress := func(status string, done, total, speed, eta int64, vcodec string) {

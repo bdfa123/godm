@@ -32,6 +32,14 @@ func (e *YTDLPMissingError) Error() string {
 		"yt-dlp.exe next to godm.exe, then try again"
 }
 
+// YTDLPFailedError is yt-dlp having run and said it could not do what it was
+// asked, as opposed to godm not being able to run it. Only the first can be
+// because yt-dlp is out of date, which is what a caller that wants to say so
+// asks about.
+type YTDLPFailedError struct{ Msg string }
+
+func (e *YTDLPFailedError) Error() string { return e.Msg }
+
 // ytdlpNames are tried in order on PATH.
 var ytdlpNames = []string{"yt-dlp", "yt-dlp.exe", "yt-dlp_x86.exe"}
 
@@ -375,6 +383,13 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return "", err
 	}
+	// An update of yt-dlp is not started while this runs, and this does not start
+	// while one is under way: the file it would run is being replaced. Stopping
+	// ends the wait.
+	if err := ytdlpGate.enter(ctx); err != nil {
+		return "", err
+	}
+	defer ytdlpGate.leave()
 	cmd := newYTDLPCmd(ctx, bin, ytdlpArgs(o))
 	runFromOwnFolder(cmd)
 	cleanUp := prepareEnv(cmd)
@@ -497,11 +512,11 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		failed = append([]string{noJS}, tail...)
 	}
 	if waitErr != nil {
-		return "", fmt.Errorf("yt-dlp failed: %s", ytdlpReason(failed, waitErr))
+		return "", &YTDLPFailedError{"yt-dlp failed: " + ytdlpReason(failed, waitErr)}
 	}
 	if path == "" {
-		return "", fmt.Errorf("yt-dlp finished but said nothing about where the file went: %s",
-			ytdlpReason(failed, nil))
+		return "", &YTDLPFailedError{"yt-dlp finished but said nothing about where the file went: " +
+			ytdlpReason(failed, nil)}
 	}
 	return path, nil
 }
@@ -640,6 +655,13 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 		}
 	}
 	args = append(args, "--", o.URL)
+	// Not while yt-dlp is being updated, and no update while this is running; an
+	// inspection is short and its caller is waiting, so it is told rather than
+	// kept waiting.
+	if err := ytdlpGate.tryEnter(); err != nil {
+		return nil, err
+	}
+	defer ytdlpGate.leave()
 	cmd := newYTDLPCmd(ctx, bin, args)
 	runFromOwnFolder(cmd)
 	cleanUp := prepareEnv(cmd)
@@ -661,14 +683,14 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return nil, fmt.Errorf("yt-dlp could not read that page: %s",
-				ytdlpReason(strings.Split(stderr.String(), "\n"), err))
+			return nil, &YTDLPFailedError{"yt-dlp could not read that page: " +
+				ytdlpReason(strings.Split(stderr.String(), "\n"), err)}
 		}
 		return nil, err
 	}
 	var doc ytdlpJSON
 	if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
-		return nil, fmt.Errorf("yt-dlp returned something unreadable: %w", err)
+		return nil, &YTDLPFailedError{"yt-dlp returned something unreadable: " + err.Error()}
 	}
 	info := &StreamInfo{Kind: "yt-dlp", Duration: doc.Duration, Best: -1, Title: doc.Title}
 	seen := map[int]bool{}

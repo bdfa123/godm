@@ -457,6 +457,10 @@ type Manager struct {
 	mapLinger time.Duration
 
 	bt btEngine // torrents, in bt.go
+
+	// yt is what is known about the yt-dlp on this computer: its version, the
+	// newest release, and an update under way. See ytupdate.go.
+	yt ytTool
 }
 
 func NewManager(outDir string, parallel int) *Manager {
@@ -797,7 +801,13 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	case errors.As(err, &expired), errors.As(err, &mismatch):
 		m.finishRun(mt, gen, StateNeedsRefresh, err.Error(), "")
 	default:
-		m.finishRun(mt, gen, StateError, err.Error(), "")
+		reason := err.Error()
+		if isYTDLPJob(req) {
+			// A yt-dlp that is older than the newest release is the likeliest
+			// reason a site it knew stops working, and its error does not say so.
+			reason = m.ytdlpFailureText(err)
+		}
+		m.finishRun(mt, gen, StateError, reason, "")
 	}
 }
 
@@ -1965,6 +1975,9 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/stream/", s.guard(s.handleStream))
 	mux.HandleFunc("/api/torrent", s.guard(post(s.handleTorrentFile)))
 	mux.HandleFunc("/api/seeding", s.guard(s.handleSeeding))
+	mux.HandleFunc("/api/ytdlp", s.guard(s.handleYTDLP))
+	mux.HandleFunc("/api/ytdlp/check", s.guard(post(s.handleYTDLPCheck)))
+	mux.HandleFunc("/api/ytdlp/update", s.guard(post(s.handleYTDLPUpdate)))
 	return mux
 }
 
@@ -2072,7 +2085,11 @@ func (s *server) handleInspect(w http.ResponseWriter, r *http.Request) {
 		info, err = InspectHLS(ctx, HLSOptions{URL: req.URL, Headers: req.Headers})
 	}
 	if err != nil {
-		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		reason := err.Error()
+		if isYTDLPJob(req) && ctx.Err() == nil {
+			reason = s.mgr.ytdlpFailureText(err)
+		}
+		writeJSON(w, map[string]any{"ok": false, "error": reason})
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "info": info})

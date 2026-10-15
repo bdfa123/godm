@@ -176,6 +176,18 @@ func startTree(cmd *exec.Cmd) (release func(), err error) {
 	}, nil
 }
 
+// hideWindow keeps a console program started by cmd from opening a console
+// window of its own. The daemon has no console, being detached from the one it
+// was started from, and so a console program it starts would be given one that
+// is shown: for the minute a package manager takes, say.
+func hideWindow(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
+	cmd.SysProcAttr.CreationFlags |= createNoWindow
+}
+
 // spawnApp starts the manager window. Unlike spawnDetached it must not ask for
 // a hidden window: that flag applies to the first window the process shows,
 // which here is the window the user asked for.
