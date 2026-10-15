@@ -426,9 +426,9 @@ func TestPlayOpensTheFileOrTheStream(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string
 	old := launchPlayer
-	launchPlayer = func(target, title string) error {
+	launchPlayer = func(p playerLaunch) error {
 		mu.Lock()
-		opened = append(opened, target)
+		opened = append(opened, p.Target)
 		mu.Unlock()
 		return nil
 	}
@@ -456,7 +456,12 @@ func TestPlayOpensTheFileOrTheStream(t *testing.T) {
 		t.Fatalf("play a finished file: %v", r)
 	}
 	running, _ := m.Add(jobRequest{URL: slow.URL + "/film.mkv", Connections: 2})
-	waitFor(t, 10*time.Second, "the second download to run", stateIs(m, running, StateRunning))
+	// Running, and past its first request: the stream link carries the file's
+	// name, which the download only learns from the server.
+	waitFor(t, 10*time.Second, "the second download to run", func() bool {
+		v, _ := findTask(m, running)
+		return v.State == StateRunning && v.Path != ""
+	})
 	if r := play(running); r["ok"] != true {
 		t.Fatalf("play a download in progress: %v", r)
 	}
@@ -484,9 +489,9 @@ func TestPlayRefusesWhatCannotBeStreamed(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string
 	old := launchPlayer
-	launchPlayer = func(target, title string) error {
+	launchPlayer = func(p playerLaunch) error {
 		mu.Lock()
-		opened = append(opened, target)
+		opened = append(opened, p.Target)
 		mu.Unlock()
 		return nil
 	}

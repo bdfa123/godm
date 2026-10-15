@@ -517,9 +517,9 @@ func TestAHybridTorrentOfOneFileIsWrittenAsThatFile(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string
 	oldPlayer := launchPlayer
-	launchPlayer = func(target, title string) error {
+	launchPlayer = func(p playerLaunch) error {
 		mu.Lock()
-		opened = append(opened, target)
+		opened = append(opened, p.Target)
 		mu.Unlock()
 		return nil
 	}
@@ -1691,9 +1691,9 @@ func TestTorrentStreamServesARangeBeforeTheDownloadFinishes(t *testing.T) {
 	var mu sync.Mutex
 	var opened []string
 	old := launchPlayer
-	launchPlayer = func(target, title string) error {
+	launchPlayer = func(p playerLaunch) error {
 		mu.Lock()
-		opened = append(opened, target)
+		opened = append(opened, p.Target)
 		mu.Unlock()
 		return nil
 	}

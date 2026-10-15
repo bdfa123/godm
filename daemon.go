@@ -46,20 +46,35 @@ const (
 
 // TaskView is what the UI and the extension see.
 type TaskView struct {
-	ID        string        `json:"id"`
-	URL       string        `json:"url"`
-	Referrer  string        `json:"referrer,omitempty"`
-	Filename  string        `json:"filename"`
-	Path      string        `json:"path"`
-	State     TaskState     `json:"state"`
-	Error     string        `json:"error,omitempty"`
-	Size      int64         `json:"size"`
-	Received  int64         `json:"received"`
-	Speed     int64         `json:"speed"`
-	Conns     int           `json:"conns"`
-	Active    int           `json:"active"`
-	Resumable bool          `json:"resumable"`
-	Segments  []SegmentView `json:"segments,omitempty"`
+	ID       string    `json:"id"`
+	URL      string    `json:"url"`
+	Referrer string    `json:"referrer,omitempty"`
+	Filename string    `json:"filename"`
+	Path     string    `json:"path"`
+	State    TaskState `json:"state"`
+	Error    string    `json:"error,omitempty"`
+	Size     int64     `json:"size"`
+	Received int64     `json:"received"`
+	Speed    int64     `json:"speed"`
+	// Conns is how many connections the download may use right now: the
+	// user's choice, held down to what the server takes once it has turned
+	// connections away. A torrent counts its seeds here instead.
+	Conns int `json:"conns"`
+	// ConnsWanted is the user's choice itself, which the manager's menu
+	// shows, and ServerCap the most connections the server has been seen to
+	// take at once while this run lasts, 0 while it has turned none away. The
+	// cap only holds the download back when it is the smaller of the two.
+	ConnsWanted int           `json:"conns_wanted,omitempty"`
+	ServerCap   int           `json:"server_cap,omitempty"`
+	Active      int           `json:"active"`
+	Resumable   bool          `json:"resumable"`
+	Segments    []SegmentView `json:"segments,omitempty"`
+	// PlayAt is the byte a media player is reading the download from, while
+	// one reads an ordinary download as it arrives (see Playback), and nil
+	// otherwise. It is the player's own read position, which runs ahead of
+	// what is on screen by as much as the player has buffered. It is never
+	// part of the view as it is kept, only of the copies snapshot hands out.
+	PlayAt *int64 `json:"play_at,omitempty"`
 	// SpeedLimit is this download's own limit in bytes per second, 0 for
 	// none. The limit shared by all downloads applies on top of it.
 	SpeedLimit int64 `json:"speed_limit,omitempty"`
@@ -199,12 +214,24 @@ type managedTask struct {
 	// the run.
 	players   map[uint64]func()
 	playerSeq uint64
+	// mapRun keeps the file mpv's map of the download is drawn from, for as
+	// long as players stream it; nil when none does. See playermap.go.
+	// mapMu is held over each write and removal of that file, so that one
+	// writer handing over to the next never deletes what the next has written.
+	mapRun *mapRun
+	mapMu  sync.Mutex
 }
 
 func (t *managedTask) snapshot() TaskView {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.view
+	v := t.view
+	t.mu.Unlock()
+	// Where a player reads is the engine's to know, from one read to the next,
+	// so it is looked up for each copy rather than kept in the view.
+	if at, ok := t.play.focusAt(); ok {
+		v.PlayAt = &at
+	}
+	return v
 }
 
 // queueRun marks the task as waiting to run and returns the generation of the
@@ -230,6 +257,16 @@ func (t *managedTask) onStart(gen int, si StartInfo) {
 	defer t.mu.Unlock()
 	if t.gen != gen {
 		return
+	}
+	if !si.Resumed || si.Path != t.view.Path {
+		// The segments are the last run's, of a file this run does not go on
+		// with. Until it first reports they would say its bytes are on disk,
+		// and the map a player is shown would have the film play on where
+		// there is nothing to play. A file started over has nothing yet.
+		t.view.Segments = nil
+		if !si.Resumed {
+			t.view.Received = 0
+		}
 	}
 	t.view.Path = si.Path
 	t.view.Filename = filepath.Base(si.Path)
@@ -300,7 +337,7 @@ func (t *managedTask) ytProgress(gen int, p YTProgress) {
 	// Neither a connection count nor a segment map means anything here: the
 	// external tool decides how it fetches.
 	t.view.Resumable = false
-	t.view.Active, t.view.Conns = 0, 0
+	t.view.Active, t.view.Conns, t.view.ConnsWanted = 0, 0, 0
 }
 
 func (t *managedTask) hlsStart(gen int, si HLSStart) {
@@ -370,6 +407,7 @@ func (t *managedTask) progress(gen int, p Progress) {
 	t.view.Speed = int64(t.speedEMA)
 	t.view.Active = p.Active
 	t.view.Conns = p.Limit
+	t.view.ServerCap = p.ServerCap
 	t.view.Segments = p.Segments
 }
 
@@ -422,6 +460,13 @@ type Manager struct {
 	streamPiece int64
 	// speed is the limit all downloads share between them.
 	speed RateLimiter
+	// mapDir is where the files mpv's download map is drawn from are kept,
+	// and its script; empty keeps none. mapEvery is how often a map is
+	// rewritten and mapLinger how long it outlives the last player. See
+	// playermap.go; tests shorten the times.
+	mapDir    string
+	mapEvery  time.Duration
+	mapLinger time.Duration
 
 	bt btEngine // torrents, in bt.go
 }
@@ -431,14 +476,16 @@ func NewManager(outDir string, parallel int) *Manager {
 		parallel = 3
 	}
 	m := &Manager{
-		tasks:    map[string]*managedTask{},
-		limit:    clampLimit(parallel),
-		wake:     make(chan struct{}),
-		outDir:   outDir,
-		openURL:  openInBrowser,
-		announce: trayNotify,
-		settings: defaultSettings(),
-		after:    afterNothing,
+		tasks:     map[string]*managedTask{},
+		limit:     clampLimit(parallel),
+		wake:      make(chan struct{}),
+		outDir:    outDir,
+		openURL:   openInBrowser,
+		announce:  trayNotify,
+		settings:  defaultSettings(),
+		after:     afterNothing,
+		mapEvery:  defaultMapEvery,
+		mapLinger: defaultMapLinger,
 	}
 	m.notifyOn.Store(true)
 	return m
@@ -547,8 +594,8 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 		outDir: outDir,
 		view: TaskView{
 			ID: id, URL: req.URL, Referrer: req.Referrer, Filename: req.Filename,
-			State: StateQueued, Size: -1, Conns: req.Connections, AddedAt: time.Now(),
-			SpeedLimit: req.SpeedLimit,
+			State: StateQueued, Size: -1, Conns: req.Connections, ConnsWanted: req.Connections,
+			AddedAt: time.Now(), SpeedLimit: req.SpeedLimit,
 		},
 	}
 	gen := mt.queueRun() // nobody else can see the task yet
@@ -557,7 +604,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 	if req.Kind == "bt" {
 		// Shown as a torrent while it waits in line; it counts peers, not
 		// connections.
-		mt.view.Kind, mt.view.Conns = "bt", 0
+		mt.view.Kind, mt.view.Conns, mt.view.ConnsWanted = "bt", 0, 0
 	}
 
 	m.mu.Lock()
@@ -610,7 +657,8 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	defer cancel()
 	mt.cancel = cancel
 	mt.view.Error = ""
-	mt.view.Speed, mt.view.Active = 0, 0
+	// A server's cap on connections is learnt again by each run.
+	mt.view.Speed, mt.view.Active, mt.view.ServerCap = 0, 0, 0
 	mt.view.RefreshUntil = time.Time{}
 	mt.lastAt, mt.lastRecv, mt.speedEMA = time.Time{}, 0, 0
 	req, outDir, refresh := mt.req, mt.outDir, mt.relinked
@@ -853,7 +901,12 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	}
 	mt.view.State = st
 	mt.view.Error = errMsg
-	mt.view.Speed, mt.view.Active = 0, 0
+	if mt.view.ServerCap > 0 && mt.view.Kind != "bt" {
+		// The server's cap was this run's to learn and goes with it, and the
+		// next run may use what was chosen until the server says otherwise.
+		mt.view.Conns = mt.req.Connections
+	}
+	mt.view.Speed, mt.view.Active, mt.view.ServerCap = 0, 0, 0
 	if mt.view.Kind == "bt" && st != StateDone {
 		// A torrent's Conns is its seeds, and a run that stops short takes
 		// them with it as it does the peers. One that finished may seed on;
@@ -985,6 +1038,11 @@ func (m *Manager) Remove(id string, deleteFile bool) bool {
 
 	mt.mu.Lock()
 	mt.removed = true
+	// The map a player draws goes at once, whether or not the player is cut
+	// off: the download it shows is gone.
+	if w := mt.mapRun; w != nil {
+		w.end()
+	}
 	cancel, path, parts := mt.cancel, mt.view.Path, mt.ytFiles
 	busy := mt.inFlight || len(mt.players) > 0
 	bt := isBTJob(mt.req)
@@ -1322,7 +1380,9 @@ func (m *Manager) ChangeAddress(id, url string) error {
 
 // SetConnections changes how many connections a task may use. A running
 // download picks it up immediately: more connections split the remaining
-// ranges, fewer release connections after their current chunk.
+// ranges, fewer release connections after their current chunk. A server that
+// has been seen to take fewer still holds the download to that many, and the
+// count it may use now says so at once rather than at the next report.
 func (m *Manager) SetConnections(id string, n int) (int, error) {
 	mt := m.get(id)
 	if mt == nil {
@@ -1331,7 +1391,11 @@ func (m *Manager) SetConnections(id string, n int) (int, error) {
 	n = clampConnections(n)
 	mt.mu.Lock()
 	mt.req.Connections = n
+	mt.view.ConnsWanted = n
 	mt.view.Conns = n
+	if c := mt.view.ServerCap; c > 0 && c < n {
+		mt.view.Conns = c
+	}
 	mt.mu.Unlock()
 	mt.connLimit.Store(int32(n))
 	m.dirty.Store(true)
@@ -1477,7 +1541,7 @@ func (m *Manager) save() error {
 		t := m.tasks[id]
 		t.mu.Lock()
 		v := t.view
-		v.Segments, v.Speed, v.Active = nil, 0, 0
+		v.Segments, v.Speed, v.Active, v.ServerCap = nil, 0, 0, 0
 		if v.State == StateRunning {
 			// A run notes the time it took when it ends, and a godm that
 			// dies never sees this one end. The list says how far it had got.
@@ -1695,11 +1759,11 @@ func (m *Manager) restore(list savedList) {
 			continue
 		}
 		st.Req.Connections = requestedConnections(st.Req.Connections)
-		v.Conns = st.Req.Connections
+		v.Conns, v.ConnsWanted, v.ServerCap = st.Req.Connections, st.Req.Connections, 0
 		if v.Kind == "bt" || isBTJob(st.Req) {
 			// For a torrent this is the seeds it is connected to, as in Add,
 			// and nothing restored from the list is connected to anybody.
-			v.Conns = 0
+			v.Conns, v.ConnsWanted = 0, 0
 		}
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit
@@ -1795,6 +1859,7 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	mgr := NewManager(outDir, parallel)
 	mgr.store = filepath.Join(configDir(), "tasks.json")
 	mgr.bt.dir = filepath.Join(configDir(), "bt")
+	mgr.mapDir = filepath.Join(configDir(), "mpv")
 	defer mgr.shutdownBT()
 	if err := mgr.load(); err != nil {
 		log.Printf("the task list could not be read as it was saved: %v", err)
@@ -2088,12 +2153,21 @@ func (s *server) handleConnections(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "n must be a number", http.StatusBadRequest)
 		return
 	}
-	got, err := s.mgr.SetConnections(r.URL.Query().Get("id"), n)
+	id := r.URL.Query().Get("id")
+	got, err := s.mgr.SetConnections(id, n)
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "connections": got})
+	// With the server's cap, so that the answer can say when the server takes
+	// fewer than were just asked for. Without it the page shows the choice
+	// saved and, a moment later, a smaller number in use, which reads as the
+	// choice not having been taken.
+	serverCap := 0
+	if mt := s.mgr.get(id); mt != nil {
+		serverCap = mt.snapshot().ServerCap
+	}
+	writeJSON(w, map[string]any{"ok": true, "connections": got, "server_cap": serverCap})
 }
 
 // handleSpeed sets a speed limit in bytes per second, 0 for none: for one

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -294,6 +295,7 @@ func (s *server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer mt.dropPlayer(player)
+	s.mgr.followPlayers(mt)
 	var f streamFile
 	defer f.Close()
 	if err := f.open(v.Path); err != nil {
@@ -462,7 +464,7 @@ func (s *server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	v := mt.snapshot()
 	name := v.Filename
 	if v.State == StateDone && v.Path != "" {
-		if err := launchPlayer(v.Path, name); err != nil {
+		if err := launchPlayer(playerLaunch{Target: v.Path, Title: name}); err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
@@ -487,11 +489,22 @@ func (s *server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	}
 	link := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
 		s.port, url.PathEscape(id), url.PathEscape(name), url.QueryEscape(s.token))
-	if err := launchPlayer(link, name); err != nil {
+	if err := launchPlayer(s.mgr.streamLaunch(mt, link, name)); err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+// playerLaunch is a media player to be opened on a download.
+type playerLaunch struct {
+	Target string // the file, or the stream of a download still arriving
+	Title  string
+	// MapFile is set for a stream: the file the daemon keeps the map of the
+	// download in while it plays, for mpv to draw (see playermap.go), and
+	// Lang the language the map speaks until that file says otherwise.
+	MapFile string
+	Lang    string
 }
 
 // findPlayer looks for a player that can open an HTTP address and seek in it.
@@ -511,31 +524,55 @@ func findPlayer() (exe string, isMPV bool) {
 }
 
 // launchPlayer is a variable so tests can watch what would be opened.
-var launchPlayer = func(target, title string) error {
+var launchPlayer = func(p playerLaunch) error {
 	exe, isMPV := findPlayer()
 	if exe == "" {
 		return errors.New("no media player found: install mpv (recommended) or VLC")
 	}
-	var args []string
-	if isMPV {
-		args = []string{
-			"--force-window=immediate",
-			"--cache=yes",
-			// Read well ahead: the connections fetch faster than a film plays,
-			// and a deep buffer rides out a connection being moved.
-			"--demuxer-max-bytes=512MiB",
-			// A request can wait a while for bytes the download has not
-			// reached yet; that is not a dead server.
-			"--network-timeout=120",
-			"--title=" + title,
-			"--", target,
+	script := ""
+	if isMPV && p.MapFile != "" {
+		var err error
+		if script, err = installMapScript(filepath.Dir(p.MapFile)); err != nil {
+			// The film plays all the same, only without the map over it.
+			log.Printf("the download map for mpv could not be set up: %v", err)
 		}
-	} else {
-		args = []string{"--network-caching=10000", "--meta-title=" + title, target}
 	}
-	cmd := exec.Command(exe, args...)
+	cmd := exec.Command(exe, playerArgs(isMPV, p, script)...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// playerArgs is the command line a player is opened with. mpv given script,
+// the overlay installMapScript wrote, draws the map of a download it streams.
+// A finished file has nothing to map, and VLC has no such thing.
+func playerArgs(isMPV bool, p playerLaunch, script string) []string {
+	if !isMPV {
+		return []string{"--network-caching=10000", "--meta-title=" + p.Title, p.Target}
+	}
+	args := []string{
+		"--force-window=immediate",
+		"--cache=yes",
+		// Read well ahead: the connections fetch faster than a film plays,
+		// and a deep buffer rides out a connection being moved.
+		"--demuxer-max-bytes=512MiB",
+		// A request can wait a while for bytes the download has not
+		// reached yet; that is not a dead server.
+		"--network-timeout=120",
+		"--title=" + p.Title,
+	}
+	if script != "" && p.MapFile != "" {
+		args = append(args,
+			// One script added to the ones mpv loads anyway, whatever is in
+			// its name.
+			"--script="+script,
+			// Added one at a time to the user's own script options, which
+			// --script-opts would replace, and taken whole: a comma in a
+			// folder's name would split the list form.
+			"--script-opts-append=godm-map-file="+p.MapFile,
+			"--script-opts-append=godm-map-lang="+p.Lang,
+		)
+	}
+	return append(args, "--", p.Target)
 }

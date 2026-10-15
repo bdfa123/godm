@@ -41,7 +41,7 @@ func runPage(t *testing.T, scenario, lang string) {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(node, harness, page, scenario)
-	cmd.Env = append(os.Environ(), "MAX_PARALLEL="+strconv.Itoa(maxParallel))
+	cmd.Env = append(os.Environ(), "MAX_PARALLEL="+strconv.Itoa(maxParallel), "PAGE_LANG="+lang)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s (%s):\n%s", scenario, lang, out)
 	}
@@ -74,6 +74,24 @@ func TestDownloadsAtOnceShowsEveryLimitTheDaemonAllows(t *testing.T) {
 
 func TestPastingALinkWithADialogOpenLeavesTheDialogAlone(t *testing.T) {
 	runPage(t, "paste", "en")
+}
+
+// The card of a download in progress draws the file to scale from its
+// segments: the runs on disk, where the connections work, and where a player
+// reads, with how much it has ahead of it.
+func TestTheCardMapsWhatIsDownloaded(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "map", lang) })
+	}
+}
+
+// A server that takes fewer connections than were chosen must not make the
+// choice look undone: the menu keeps it, and the card and the answer to the
+// change say what the server allows.
+func TestTheConnectionsChosenStayChosenUnderAServersCap(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "cap", lang) })
+	}
 }
 
 // pageHarness is node code with no backtick in it. A scenario is an async
@@ -461,6 +479,130 @@ scenarios.paste = async function () {
   els.addBtn.focus();
   dispatch(els.addBtn, "paste", clip);
   same(els.addText.value, "http://h/first.zip\nhttp://h/pasted.zip", "a link pasted into the open Add dialog should join the others");
+};
+
+// The words a scenario looks for, in the language the page was loaded in.
+const words = (en, zh) => (process.env.PAGE_LANG === "zh" ? zh : en);
+
+scenarios.map = async function () {
+  await boot();
+  // A download a quarter of the way through a file of 1000 bytes, with two
+  // connections at work and the first two segments run together on disk.
+  const segs = [
+    { start: 0, end: 99, done: 100, state: "done" },
+    { start: 100, end: 399, done: 150, state: "active" },
+    { start: 400, end: 699, done: 0, state: "waiting" },
+    { start: 700, end: 999, done: 50, state: "active" },
+  ];
+  const t = task("m", { size: 1000, received: 300, segments: segs, play_at: 120 });
+  same(JSON.stringify(page("haveRuns(" + JSON.stringify(segs) + ")")), "[[0,250],[700,750]]", "the runs on disk");
+  const html = page("card(" + JSON.stringify(t) + ")");
+  const map = (/<div class="bytemap"[^>]*>(.*?)<\/div>/.exec(html) || [])[1];
+  assert(map !== undefined, "no map on the card: " + html);
+  same((map.match(/<i /g) || []).length, 2, "one shape to a run on disk");
+  assert(map.indexOf('left:0.000%;width:25.000%') >= 0 && map.indexOf('left:70.000%;width:5.000%') >= 0, "the runs are drawn to scale: " + map);
+  same((map.match(/<b /g) || []).length, 2, "one mark to a connection at work");
+  assert(map.indexOf('<b style="left:25.000%">') >= 0 && map.indexOf('<b style="left:75.000%">') >= 0, "the connections are marked where they write: " + map);
+  assert(map.indexOf('<u style="left:12.000%">') >= 0, "the player is marked where it reads: " + map);
+  // The player's mark is the colour of the text, dark in the light theme and
+  // light in the dark one, so the tip tells it by its shape.
+  const tip = (/<div class="bytemap" title="([^"]*)"/.exec(html) || [])[1] || "";
+  assert(tip.indexOf(words("thicker line", "较粗的竖线")) >= 0 && !/dark|white|深色|白色/.test(tip),
+    "the tip should tell the player's mark by its shape, not a colour: " + tip);
+  const note = (/<div class="mapnote">(.*?)<\/div>/.exec(html) || [])[1] || "";
+  const plain = note.replace(/<[^>]*>/g, "");
+  assert(plain.indexOf("12.0%") >= 0 && plain.indexOf("130 B") >= 0 &&
+    plain.indexOf(words("has read up to", "已读取到")) >= 0 && plain.indexOf(words("downloaded after that", "此后已下载")) >= 0,
+    "the note should say how far the player has read and what is downloaded after that: " + plain);
+  // The blocks of the connections are with the table of them now.
+  assert(html.indexOf('class="segmap"') < 0, "the card still has the blocks of the connections");
+  page("S.open.m = true");
+  assert(page("card(" + JSON.stringify(t) + ")").indexOf('class="segmap"') >= 0, "the table of connections should have their blocks");
+
+  // A player that has read to where nothing more is on disk. It reads ahead
+  // into its own buffer, so that is where it sits whenever the download is
+  // slower than the film, with the film playing on: the note must not say
+  // that playback waits.
+  const edge = page("card(" + JSON.stringify(Object.assign({}, t, { play_at: 500 })) + ")");
+  const enote = ((/<div class="mapnote">(.*?)<\/div>/.exec(edge) || [])[1] || "").replace(/<[^>]*>/g, "");
+  assert(enote.indexOf("50.0%") >= 0 && enote.indexOf(words("nothing after that is downloaded yet", "再往后还没有下载")) >= 0,
+    "a player with nothing on disk after where it has read: " + enote);
+  assert(enote.indexOf(words("wait", "等待")) < 0, "the note says playback waits: " + enote);
+
+  // Connections that are retrying or have failed are marked where they
+  // stopped, as the blocks of the connections show them.
+  const troubled = page("card(" + JSON.stringify(Object.assign({}, t, { segments: segs.concat([
+    { start: 1000, end: 1099, done: 10, state: "retrying" }, { start: 1100, end: 1199, done: 0, state: "failed" },
+    { start: 1200, end: 1299, done: 0, state: "connecting" },
+  ]), size: 1300 })) + ")");
+  const tmap = (/<div class="bytemap"[^>]*>(.*?)<\/div>/.exec(troubled) || [])[1] || "";
+  assert(/<b class="retrying" style="left:77\.692%">/.test(tmap) && /<b class="failed" style="left:84\.615%">/.test(tmap),
+    "the retrying and failed connections should be marked: " + tmap);
+  same((tmap.match(/<b /g) || []).length, 4, "a mark to each connection at work, retrying or failed, and none to one connecting");
+
+  // No player: no mark and no note.
+  const noPlayer = Object.assign({}, t);
+  delete noPlayer.play_at;
+  const quiet = page("card(" + JSON.stringify(noPlayer) + ")");
+  assert(quiet.indexOf("<u ") < 0 && quiet.indexOf("mapnote") < 0, "a player was shown where none reads");
+  // Nothing to map: a finished file, a stream, a torrent, a download that cannot resume.
+  for (const other of [
+    { state: "done", path: "C:\\m.zip" }, { kind: "hls" }, { kind: "bt" }, { resumable: false },
+  ]) {
+    const h = page("card(" + JSON.stringify(Object.assign({}, t, other)) + ")");
+    assert(h.indexOf("bytemap") < 0, "a map on " + JSON.stringify(other));
+  }
+
+  // The map is drawn by the poll that redraws the list.
+  tasks = [t];
+  await poll();
+  assert(els.list.innerHTML.indexOf("bytemap") >= 0, "the list was drawn without the map");
+};
+
+scenarios.cap = async function () {
+  // Twelve chosen, eight allowed: the engine's count is eight.
+  tasks = [task("c", { conns: 8, conns_wanted: 12, server_cap: 8, active: 8, segments: [{ start: 0, end: 999, done: 100, state: "active" }] })];
+  await boot();
+  const html = els.list.innerHTML;
+  assert(/<option value="12" selected>/.test(html), "the menu should show the 12 chosen: " + (/<select data-conns[^]*?<\/select>/.exec(html) || [""])[0]);
+  const meta = html.replace(/<[^>]*>/g, "");
+  assert(meta.indexOf(words("8 / 12 connections active · the server allows only 8", "8 / 12 个连接活动中 · 服务器只允许 8 个")) >= 0,
+    "the card should say what the server allows: " + meta);
+
+  // No cap: as before, and a cap above the choice holds nothing back.
+  for (const extra of [{ conns: 4, conns_wanted: 4, server_cap: 0 }, { conns: 4, conns_wanted: 4, server_cap: 8 }]) {
+    const h = page("card(" + JSON.stringify(task("d", Object.assign({ active: 3 }, extra))) + ")").replace(/<[^>]*>/g, "");
+    assert(h.indexOf(words("3 of 4 connections active", "3 / 4 个连接活动中")) >= 0 && h.indexOf(words("server", "服务器")) < 0,
+      "without a cap holding it back: " + h);
+  }
+  // A daemon that sends only conns still gets its menu.
+  const older = page("connSelect(" + JSON.stringify(task("e", { conns: 6 })) + ")");
+  assert(/<option value="6" selected>/.test(older), "a view without conns_wanted: " + older);
+
+  // Choosing 12 again: the answer says what the server allows.
+  routes["/api/connections"] = () => ({ ok: true, connections: 12, server_cap: 8 });
+  const sel = child(els.list, "select", { "data-conns": "c" });
+  sel.innerHTML = '<option value="12">12</option>';
+  sel.value = "12";
+  dispatch(sel, "change");
+  await tick();
+  const said = toast().textContent;
+  assert(said.indexOf("12") >= 0 && said.indexOf(words("allows only 8", "只允许 8 个")) >= 0 && said.indexOf(words("Saved", "已保存")) >= 0,
+    "the answer to choosing 12 of a server that takes 8: " + said);
+  // A server that takes one at a time is said in words that fit one.
+  routes["/api/connections"] = () => ({ ok: true, connections: 12, server_cap: 1 });
+  dispatch(sel, "change");
+  await tick();
+  const one = toast().textContent;
+  assert(one.indexOf(words("allows only 1 at a time", "只允许 1 个")) >= 0 && !/\b1 are\b/.test(one),
+    "the answer to choosing 12 of a server that takes 1: " + one);
+  // And when the server takes them all, only that the choice was saved.
+  routes["/api/connections"] = () => ({ ok: true, connections: 6, server_cap: 8 });
+  dispatch(sel, "change");
+  await tick();
+  const plain = toast().textContent;
+  assert(plain.indexOf("6") >= 0 && plain.indexOf(words("Saved", "已保存")) >= 0 && plain.indexOf(words("allows", "允许")) < 0,
+    "the answer to choosing 6 of a server that takes 8: " + plain);
 };
 
 const run = scenarios[which];

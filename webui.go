@@ -133,6 +133,20 @@ const uiHTML = `<!doctype html>
   .seg.failed i { background: var(--err); }
   .seg.connecting { background: repeating-linear-gradient(-45deg, transparent 0 4px, var(--accent-soft) 4px 8px); }
   .seg.retrying { background: repeating-linear-gradient(-45deg, transparent 0 4px, var(--warn-soft) 4px 8px); }
+  .conns .segmap { margin: 2px 0 8px; }
+
+  /* The file to scale: green is on disk, a blue line is where a connection is
+     downloading, amber or red where one is retrying or has failed, and the
+     thicker line is how far a player has read. A run too short to see is
+     still a pixel wide. */
+  .bytemap { position: relative; height: 9px; background: var(--track); border-radius: 3px; overflow: hidden; margin: 2px 0 6px; }
+  .bytemap i { position: absolute; top: 0; bottom: 0; min-width: 1px; background: var(--ok); }
+  .bytemap b { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); }
+  .bytemap b.retrying { background: var(--warn); }
+  .bytemap b.failed { background: var(--err); }
+  .bytemap u { position: absolute; top: 0; bottom: 0; width: 3px; margin-left: -1px; background: var(--text); box-shadow: 0 0 0 1px var(--panel); }
+  .mapnote { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; margin: -2px 0 4px; }
+  .mapnote b { color: var(--text); font-weight: 600; }
 
   .meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; display: flex; flex-wrap: wrap; gap: 2px 14px; }
   .meta b { color: var(--text); font-weight: 600; }
@@ -360,6 +374,7 @@ I18N.en = {
   "meta.sizeOf": "<b>{received}</b> / {size} · {pct}%",
   "meta.left": "{time} left",
   "meta.active": "<b>{active}</b> of {total} connections active",
+  "meta.activeCapped": "<b>{active}</b> / {total} connections active · the server allows only {cap}",
   "meta.single": "single connection · server cannot resume",
   "meta.videoTrack": "video track",
   "meta.audioTrack": "audio track",
@@ -407,6 +422,10 @@ I18N.en = {
   "task.speed.tip": "Speed limit for this download, on top of the overall one. Changing it takes effect immediately.",
   "speed.unlimited": "Unlimited",
 
+  "map.tip": "The whole file: green is downloaded and plays without waiting, a blue line is where a connection is downloading now (amber while it retries, red if it failed), and the thicker line is how far the player has read",
+  "map.ahead": "Player has read up to <b>{pct}</b> · <b>{size}</b> downloaded after that",
+  "map.edge": "Player has read up to <b>{pct}</b> · nothing after that is downloaded yet",
+
   "conn.none": "No connection details yet.",
   "conn.map.tip": "Each block is one connection and the part of the file it downloads",
   "conn.th.range": "Range",
@@ -425,8 +444,9 @@ I18N.en = {
   "toast.player": "Opening the player — the download follows where you watch.",
   "toast.refresh.opened": "Opened {host} — click the same download link there.",
   "toast.refresh.waiting": "Waiting — click the download link again in your browser.",
-  "toast.conns.one": "Using up to {n} connection for this download.",
-  "toast.conns.other": "Using up to {n} connections for this download.",
+  "toast.conns.one": "Saved: up to {n} connection for this download.",
+  "toast.conns.other": "Saved: up to {n} connections for this download.",
+  "toast.conns.capped": "Saved: up to {n} connections for this download. The server allows only {cap} at a time, so that is what is used.",
   "toast.speed.task": "This download is limited to {speed}.",
   "toast.speed.taskNone": "This download has no limit of its own.",
   "toast.speed.all": "All downloads together are limited to {speed}. Downloads made by yt-dlp are not limited.",
@@ -534,6 +554,7 @@ I18N.zh = {
   "meta.sizeOf": "<b>{received}</b> / {size} · {pct}%",
   "meta.left": "剩余 {time}",
   "meta.active": "<b>{active}</b> / {total} 个连接活动中",
+  "meta.activeCapped": "<b>{active}</b> / {total} 个连接活动中 · 服务器只允许 {cap} 个",
   "meta.single": "单连接 · 服务器不支持断点续传",
   "meta.videoTrack": "视频轨道",
   "meta.audioTrack": "音频轨道",
@@ -581,6 +602,10 @@ I18N.zh = {
   "task.speed.tip": "此任务的限速，与总限速同时生效。修改后立即生效。",
   "speed.unlimited": "不限速",
 
+  "map.tip": "整个文件：绿色是已下载、可直接播放的部分，蓝色竖线是连接正在下载的位置（橙色表示正在重试，红色表示失败），较粗的竖线是播放器已读取到的位置",
+  "map.ahead": "播放器已读取到 <b>{pct}</b> 处 · 此后已下载 <b>{size}</b>",
+  "map.edge": "播放器已读取到 <b>{pct}</b> 处 · 再往后还没有下载",
+
   "conn.none": "暂无连接详情。",
   "conn.map.tip": "每个分块对应一个连接及其下载的文件部分",
   "conn.th.range": "范围",
@@ -599,8 +624,9 @@ I18N.zh = {
   "toast.player": "正在打开播放器——下载将跟随您的观看进度。",
   "toast.refresh.opened": "已打开 {host}——请在那里点击相同的下载链接。",
   "toast.refresh.waiting": "等待中——请在浏览器中再次点击下载链接。",
-  "toast.conns.one": "此任务最多使用 {n} 个连接。",
-  "toast.conns.other": "此任务最多使用 {n} 个连接。",
+  "toast.conns.one": "已保存：此任务最多使用 {n} 个连接。",
+  "toast.conns.other": "已保存：此任务最多使用 {n} 个连接。",
+  "toast.conns.capped": "已保存：此任务最多使用 {n} 个连接。服务器同时只允许 {cap} 个，实际只能用这么多。",
   "toast.speed.task": "此任务限速为 {speed}。",
   "toast.speed.taskNone": "此任务没有单独限速。",
   "toast.speed.all": "所有任务合计限速 {speed}。由 yt-dlp 进行的下载不受限制。",
@@ -794,6 +820,69 @@ function segMap(t) {
   return html + "</div>";
 }
 
+// haveRuns is what of a download is on disk, as [from, to) byte runs in order.
+// Each segment holds its bytes as one run from its start, so this is one pass
+// that joins the runs that meet.
+function haveRuns(segs) {
+  var out = [];
+  for (var i = 0; i < segs.length; i++) {
+    var s = segs[i];
+    if (!(s.done > 0)) continue;
+    var from = s.start, to = s.start + s.done;
+    if (s.end >= 0 && to > s.end + 1) to = s.end + 1;
+    var last = out[out.length - 1];
+    if (last && from <= last[1]) { if (to > last[1]) last[1] = to; }
+    else out.push([from, to]);
+  }
+  return out;
+}
+
+// readyAt is how many bytes from off are on disk in one run, what a player
+// reading there gets without waiting.
+function readyAt(runs, off) {
+  for (var i = 0; i < runs.length; i++) if (runs[i][0] <= off && off < runs[i][1]) return runs[i][1] - off;
+  return 0;
+}
+
+// mapped is whether a card has a map of its file: an ordinary download that
+// is not done, whose ranges can be fetched in any order.
+function mapped(t) {
+  return !t.kind && t.state !== "done" && t.size > 0 && t.resumable !== false && (t.segments || []).length > 0;
+}
+
+// byteMap draws a download to scale: what is on disk, where each connection
+// is downloading now, and how far a player has read. It is redrawn with every
+// poll, so it is a handful of plain elements: one to a run on disk, not to a
+// segment. A connection that is retrying or has failed is marked where it
+// stopped, in the colours the blocks of the connections have, so that a
+// server turning connections away shows on the card itself.
+function byteMap(t, runs) {
+  var size = t.size;
+  function at(n) { return (Math.min(Math.max(n, 0), size) / size * 100).toFixed(3) + "%"; }
+  var html = '<div class="bytemap" title="' + esc(tr("map.tip")) + '">';
+  runs.forEach(function (r) { html += '<i style="left:' + at(r[0]) + ";width:" + at(r[1] - r[0]) + '"></i>'; });
+  (t.segments || []).forEach(function (s) {
+    if (s.state !== "active" && s.state !== "retrying" && s.state !== "failed") return;
+    html += "<b" + (s.state === "active" ? "" : ' class="' + s.state + '"') + ' style="left:' + at(s.start + s.done) + '"></b>';
+  });
+  if (t.play_at >= 0) html += '<u style="left:' + at(t.play_at) + '"></u>';
+  return html + "</div>";
+}
+
+// mapNote says, while a player reads the download, how much is on disk after
+// the point it has read to. That is not where the picture is: a player reads
+// ahead into its own buffer, and fed by a download slower than the film it
+// reads up to the edge of what is on disk and waits there while what it has
+// buffered plays on. So the note says how far it has read and what is there
+// after it, and not that playback waits; mpv's own map says where the film is.
+function mapNote(t, runs) {
+  if (!(t.play_at >= 0)) return "";
+  var pct = (t.play_at / t.size * 100).toFixed(1) + "%", ahead = readyAt(runs, t.play_at);
+  return '<div class="mapnote">' + (ahead > 0
+    ? tr("map.ahead", { pct: pct, size: human(ahead) })
+    : tr("map.edge", { pct: pct })) + "</div>";
+}
+
 function connTable(t) {
   var segs = t.segments || [];
   if (!segs.length) return '<div class="conns"><span class="url">' + tr("conn.none") + "</span></div>";
@@ -818,19 +907,29 @@ function connTable(t) {
   var summary = finished
     ? '<div class="url" style="margin-bottom:4px">' + tr("conn.finished", { size: human(finishedBytes) }) + "</div>"
     : "";
-  return '<div class="conns">' + summary + "<table><thead><tr><th>#</th><th>" + tr("conn.th.range") + "</th><th></th><th>" +
+  // The blocks, one to a connection, go with the table of connections; the
+  // card itself shows the file to scale.
+  return '<div class="conns">' + segMap(t) + summary + "<table><thead><tr><th>#</th><th>" + tr("conn.th.range") + "</th><th></th><th>" +
     tr("conn.th.done") + "</th><th>" + tr("conn.th.speed") + "</th><th>" + tr("conn.th.state") + "</th><th></th></tr></thead><tbody>" +
     rows + "</tbody></table></div>";
 }
 
 var CONN_CHOICES = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32];
+// wantedConns is the user's choice of connections. conns is what the download
+// may use now, which a server that takes fewer holds down, and showing that in
+// the menu would undo the choice before their eyes. A daemon from before
+// conns_wanted has only conns.
+function wantedConns(t) { return t.conns_wanted > 0 ? t.conns_wanted : t.conns; }
+// serverCap is how many connections the server allows when that is fewer than
+// were chosen, and 0 when it is not holding the download back.
+function serverCap(t) { return t.server_cap > 0 && t.server_cap < wantedConns(t) ? t.server_cap : 0; }
 function connSelect(t) {
-  var opts = CONN_CHOICES.slice();
-  if (opts.indexOf(t.conns) < 0 && t.conns > 0) opts.push(t.conns);
+  var opts = CONN_CHOICES.slice(), cur = wantedConns(t);
+  if (opts.indexOf(cur) < 0 && cur > 0) opts.push(cur);
   opts.sort(function (a, b) { return a - b; });
   return '<label class="field connsel" title="' + esc(tr("task.conns.tip")) + '">' + esc(tr("task.conns")) + " " +
     '<select data-conns="' + t.id + '">' + opts.map(function (n) {
-      return '<option value="' + n + '"' + (n === t.conns ? " selected" : "") + ">" + n + "</option>";
+      return '<option value="' + n + '"' + (n === cur ? " selected" : "") + ">" + n + "</option>";
     }).join("") + "</select></label>";
 }
 
@@ -927,7 +1026,9 @@ function metaLine(t) {
       if (hasSize && t.speed > 0) bits.push(tr("meta.left", { time: dur((t.size - t.received) / t.speed) }));
       // The resume note is only about plain files: yt-dlp fetches on its own
       // terms, and a stream always resumes by segment.
-      if (t.resumable) bits.push(tr("meta.active", { active: t.active, total: t.conns }));
+      if (t.resumable && serverCap(t)) {
+        bits.push(tr("meta.activeCapped", { active: t.active, total: wantedConns(t), cap: serverCap(t) }));
+      } else if (t.resumable) bits.push(tr("meta.active", { active: t.active, total: t.conns }));
       else if (!t.kind && t.size !== -1) bits.push(tr("meta.single"));
       if (t.quality) bits.push(esc(t.quality));
       // A merged video arrives as two streams, so say which one is running or
@@ -999,6 +1100,7 @@ function card(t) {
   var bt = t.kind === "bt", icon = bt ? extOf(t.media) || "bt" : ext || tr("ico.file");
   var hasSize = t.size > 0;
   var pct = t.state === "done" ? 100 : progressOf(t);
+  var runs = mapped(t) ? haveRuns(t.segments) : null;
   var acts = [];
   if (playable(t, ext)) acts.push(["play", tr(t.state === "done" ? "act.play" : "act.playNow")]);
   if (t.state === "running" || t.state === "queued") acts.push(["pause", tr("act.pause")]);
@@ -1014,7 +1116,7 @@ function card(t) {
       '<div class="row"><span class="name" title="' + esc(name) + '">' + esc(name) + "</span>" +
       '<span class="pill ' + t.state + '">' + esc(stateLabel(t)) + "</span></div>" +
       (t.state === "done" ? "" : '<div class="bar"><div class="fill ' + t.state + '" style="width:' + pct.toFixed(1) + '%"></div></div>') +
-      (t.state === "done" ? "" : segMap(t)) +
+      (runs ? byteMap(t, runs) + mapNote(t, runs) : t.state === "done" ? "" : segMap(t)) +
       '<div class="meta">' + metaLine(t) + "</div>" +
       '<div class="url" title="' + esc(t.url) + '">' + esc(t.url) + "</div>" +
       banner(t) +
@@ -1235,7 +1337,10 @@ document.getElementById("list").addEventListener("change", function (e) {
   sel.blur();
   post("/api/connections?id=" + q(id) + "&n=" + n).then(function (r) {
     if (!r.ok) return toast(r.error, "err");
-    toast(trn("toast.conns", r.connections));
+    // The choice is kept as it was made; a server that takes fewer is said
+    // so, since the count in use goes on showing its number.
+    var cap = r.server_cap > 0 && r.server_cap < r.connections ? r.server_cap : 0;
+    toast(cap ? tr("toast.conns.capped", { n: r.connections, cap: cap }) : trn("toast.conns", r.connections));
     poll();
   }).catch(fail);
 });

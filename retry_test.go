@@ -470,7 +470,7 @@ func TestTheLimitReportedDuringACapTryIsTheCap(t *testing.T) {
 	defer srv.Close()
 
 	var mu sync.Mutex
-	var limits []int
+	var limits, caps []int
 	res, err := Download(context.Background(), Options{
 		URL: srv.URL + "/big.bin", OutDir: t.TempDir(),
 		Connections: 8, MinSplit: 64 << 10, MaxRetries: 1, CapProbe: 300 * time.Millisecond,
@@ -479,6 +479,9 @@ func TestTheLimitReportedDuringACapTryIsTheCap(t *testing.T) {
 			defer mu.Unlock()
 			if n := len(limits); n == 0 || limits[n-1] != p.Limit {
 				limits = append(limits, p.Limit)
+			}
+			if n := len(caps); n == 0 || caps[n-1] != p.ServerCap {
+				caps = append(caps, p.ServerCap)
 			}
 		},
 	})
@@ -499,6 +502,12 @@ func TestTheLimitReportedDuringACapTryIsTheCap(t *testing.T) {
 	}
 	if len(limits) < 2 {
 		t.Fatalf("limit reported over time: %v; the cap was never learned", limits)
+	}
+	// The cap itself is reported too, apart from the eight asked for, so that
+	// the manager can say the server allows only three: none until it is
+	// learned, then three, a try at a fourth notwithstanding.
+	if n := len(caps); n == 0 || caps[n-1] != 3 || n > 2 || (n == 2 && caps[0] != 0) {
+		t.Errorf("the server's cap reported over time: %v, want 0 and then 3", caps)
 	}
 }
 

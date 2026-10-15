@@ -274,7 +274,11 @@ type Progress struct {
 	Total    int64
 	Active   int // connections currently receiving bytes
 	Limit    int // connections allowed right now, not counting a try at the server's cap
-	Segments []SegmentView
+	// ServerCap is the most connections the server has been seen to take at
+	// once, 0 while it has turned none away. It can be more than the
+	// connections asked for, and then holds nothing back.
+	ServerCap int
+	Segments  []SegmentView
 }
 
 // StartInfo is reported once the plan is fixed and before bytes move.
@@ -848,7 +852,10 @@ func (t *task) snapshot() Progress {
 	segs := append([]*Segment(nil), t.segs...)
 	t.segMu.Unlock()
 
-	p := Progress{Received: t.received.Load(), Total: t.probe.Size, Limit: t.standingLimit()}
+	p := Progress{
+		Received: t.received.Load(), Total: t.probe.Size, Limit: t.standingLimit(),
+		ServerCap: int(t.serverCap.Load()),
+	}
 	for _, s := range segs {
 		st := SegmentState(s.state.Load())
 		if s.complete() {

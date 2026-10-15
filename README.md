@@ -172,6 +172,44 @@ played once they finish. Torrents can be played while they download too: the
 largest video in the torrent is served, the pieces just ahead of the player
 come first, and only pieces whose hash has been checked reach the player.
 
+### What is downloaded already
+
+When the download is slower than the film, it matters which parts play
+without waiting. In mpv, godm draws a map of the file over the film, a slim
+bar just above mpv's own controls, and above the subtitles while there are
+any: green is on disk, blue marks where the connections are downloading now
+(what they bring in over the next few seconds), dark grey is still to come,
+and the white tick is the playhead. The line above it says how far the film
+plays from here without waiting ("Plays without waiting to 1:23:45 (4:12 from
+here)"), or that this part is still downloading, and the download speed
+against the rate the film needs, marked when it is too slow. It shows while
+the film is paused or waiting for data, for a few seconds after the mouse
+moves or a seek, and all the time while switched on with **h** (mpv binds
+nothing to `h` by default; in your `input.conf` it is
+`script-binding godm_map/toggle`, and a binding of your own for `h` comes
+first). It speaks the language godm is set to.
+
+- The bar is the file in bytes, and the playhead is the byte mpv is playing.
+  The times are close rather than exact: the bytes on disk ahead of the
+  playhead are taken to play at the film's average rate, and a film's
+  bitrate varies. What mpv has already buffered counts too. Once the film
+  has stopped to wait for data, the line says so, whatever is on disk
+  further on.
+- The overlay is a script godm writes to `%LOCALAPPDATA%\godm\mpv\` and passes
+  to mpv with `--script`, alongside your own scripts and settings. It reads
+  one small file there that godm rewrites about once a second while mpv
+  streams the download and deletes afterwards; the script makes no network
+  requests and is given no token.
+- A torrent gets the same map, from its checked pieces. VLC gets none, and a
+  finished file opened with Play has nothing to map.
+
+The manager draws the same map on the card of an ordinary download that is
+not done, and while a player reads it, how far the player has read and how
+much is downloaded after that. A player reads ahead into its own buffer, so
+that is not the picture: where the film itself is, mpv's map shows. The
+card's connection count keeps the number you chose, and says when the server
+allows fewer (PikPak allows eight to a link).
+
 ## Torrents and magnet links
 
 Paste magnet links into **Add links**, pick `.torrent` files with
@@ -343,7 +381,9 @@ The Go suite runs a local HTTP server that serves real `206` responses, hangs up
 mid-segment, rate-limits with `429 Retry-After`, refuses connections past a limit,
 and expires a signed URL mid-transfer, then checks the downloaded bytes against a
 SHA-256 of the source. The playback tests stream ranges from a download in
-progress and check that the connections gather where the player reads.
+progress and check that the connections gather where the player reads. Where
+mpv is installed, one test also runs the download map's script in it, with no
+window and no sound, and asks it over mpv's IPC what it worked out.
 
 ## License
 

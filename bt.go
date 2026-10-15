@@ -1927,6 +1927,7 @@ func (s *server) streamTorrent(w http.ResponseWriter, r *http.Request, mt *manag
 		return
 	}
 	defer mt.dropPlayer(player)
+	s.mgr.followPlayers(mt)
 	r = r.WithContext(ctx)
 
 	if v := mt.snapshot(); v.State == StateDone {
@@ -1967,6 +1968,50 @@ func (s *server) streamTorrent(w http.ResponseWriter, r *http.Request, mt *manag
 	http.ServeContent(w, r, name, time.Time{}, rd)
 }
 
+// torrentPlayerMap is the map of the file a torrent plays (see playermap.go),
+// from its pieces: one that has passed its check is on disk, and one some of
+// which has arrived is being fetched. The pieces run across the torrent's
+// files end to end, so the first and the last of the file's may be partly
+// another file's, and only what is in this one counts. ok is false while the
+// client does not have the torrent, or has no file list for it yet, or there
+// is nothing in it to play.
+func (m *Manager) torrentPlayerMap(mt *managedTask) (pm playerMap, ok bool) {
+	tor := m.bt.loadedFor(mt)
+	if tor == nil || tor.Info() == nil {
+		return pm, false
+	}
+	i, found := torrentMediaIndex(tor.Info())
+	if !found {
+		return pm, false
+	}
+	f := tor.Files()[i]
+	if f.Length() <= 0 || tor.Info().PieceLength <= 0 {
+		return pm, false
+	}
+	return pieceMap(tor.PieceStateRuns(), tor.Info().PieceLength, f.Offset(), f.Length()), true
+}
+
+// pieceMap is the map of the size bytes from offset from in a torrent whose
+// pieces are piece bytes long and stand as runs says, in bytes of that file.
+func pieceMap(runs []torrent.PieceStateRun, piece, from, size int64) playerMap {
+	pm := playerMap{Size: size, Have: [][2]int64{}, Fetching: [][2]int64{}}
+	var at int64 // where the run starts, in the torrent as a whole
+	for _, run := range runs {
+		start, end := at, at+int64(run.Length)*piece
+		at = end
+		a, b := max(start, from)-from, min(end, from+size)-from
+		switch {
+		case a >= b:
+		case run.Complete:
+			pm.Have = addRange(pm.Have, a, b)
+		case run.Partial:
+			pm.Fetching = addRange(pm.Fetching, a, b)
+		}
+	}
+	pm.Complete = len(pm.Have) == 1 && pm.Have[0] == [2]int64{0, size}
+	return pm
+}
+
 // playTorrent opens a torrent's video in a player: straight from disk once it
 // is finished, through the stream endpoint while it is still arriving.
 func (s *server) playTorrent(w http.ResponseWriter, id string, mt *managedTask) {
@@ -1980,22 +2025,23 @@ func (s *server) playTorrent(w http.ResponseWriter, id string, mt *managedTask) 
 		return
 	}
 	name := path.Base(v.Media)
-	target := ""
+	var open playerLaunch
 	if v.State == StateDone {
 		p, err := torrentMediaPath(v)
 		if err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
 		}
-		target = p
+		open = playerLaunch{Target: p, Title: name}
 	} else {
 		if v.State == StatePaused || v.State == StateError {
 			s.mgr.Resume(id)
 		}
-		target = fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
+		link := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
 			s.port, url.PathEscape(id), url.PathEscape(name), url.QueryEscape(s.token))
+		open = s.mgr.streamLaunch(mt, link, name)
 	}
-	if err := launchPlayer(target, name); err != nil {
+	if err := launchPlayer(open); err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
