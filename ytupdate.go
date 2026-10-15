@@ -37,6 +37,26 @@ import (
 // one that pip installed will not be updated by it at all ("You installed
 // yt-dlp from a manual build or with a package manager; Use that to update").
 
+// ---------- reasons ----------
+
+// ytWhy is a reason godm words itself. Msg is the English of it, which is what
+// anything but the page reads; Code names the reason and Arg is the one thing
+// it has to say, so that the page can word it again in its own language. A
+// reason with no Code is somebody else's wording (yt-dlp's, winget's) and is
+// shown as it came.
+type ytWhy struct{ Code, Arg, Msg string }
+
+func (e ytWhy) Error() string { return e.Msg }
+
+// asWhy is the reason in err, whether godm worded it or not.
+func asWhy(err error) ytWhy {
+	var w ytWhy
+	if errors.As(err, &w) {
+		return w
+	}
+	return ytWhy{Msg: err.Error()}
+}
+
 // ---------- versions ----------
 
 // ytVersion is a version of yt-dlp as it writes one: the date of the release,
@@ -222,14 +242,17 @@ func wingetScope(bin string) string {
 
 // wingetUpgradeArgs is winget upgrading one package, without a question to
 // answer: the agreements are accepted in advance, since there is nobody to
-// ask, and the package is named exactly, since winget otherwise takes the
-// name for a search.
+// ask, anything else it might ask is not asked (nobody reads its input, and a
+// question would hold every download of yt-dlp up until the time allowed for
+// an update ran out), and the package is named exactly, since winget otherwise
+// takes the name for a search.
 func wingetUpgradeArgs(id, scope string) []string {
 	args := []string{"upgrade", "--id", id, "--exact", "--source", "winget"}
 	if scope != "" {
 		args = append(args, "--scope", scope)
 	}
-	return append(args, "--silent", "--accept-package-agreements", "--accept-source-agreements")
+	return append(args, "--silent", "--accept-package-agreements", "--accept-source-agreements",
+		"--disable-interactivity")
 }
 
 // The exit codes of winget that are told apart. They are listed in
@@ -240,6 +263,8 @@ const (
 	wingetInUse           = 0x8A150101 // ..._INSTALL_PACKAGE_IN_USE
 	wingetFileInUse       = 0x8A150103 // ..._INSTALL_FILE_IN_USE
 	wingetSourceAgreement = 0x8A150046 // ..._SOURCE_AGREEMENTS_NOT_ACCEPTED
+	wingetNeedsAdmin      = 0x8A150019 // ..._COMMAND_REQUIRES_ADMIN
+	wingetUserScopeAdmin  = 0x8A15007D // ..._ADMIN_CONTEXT_ACTION_PROHIBITED
 )
 
 // exitCodeOf is the code a program ended with, in the unsigned form the
@@ -255,29 +280,36 @@ func exitCodeOf(err error) (code uint32, ok bool) {
 
 // wingetOutcome reads how a winget upgrade went. current means winget has
 // nothing newer than what is installed, which is a result and no failure.
-func wingetOutcome(out string, err error) (ok, current bool, reason string) {
+func wingetOutcome(out string, err error) (ok, current bool, reason ytWhy) {
 	if err == nil {
-		return true, false, ""
+		return true, false, ytWhy{}
 	}
 	code, ran := exitCodeOf(err)
 	switch {
 	case ran && code == wingetNothingNewer:
-		return true, true, ""
+		return true, true, ytWhy{}
 	case ran && (code == wingetInUse || code == wingetFileInUse):
-		return false, false, "yt-dlp is in use by another program: close it, then try again"
+		return false, false, ytWhy{"winget-inuse", "", "yt-dlp is in use by another program: close it, then try again"}
 	case ran && code == wingetNoSuchPackage:
-		return false, false, "winget does not know this copy of yt-dlp as one it installed"
+		return false, false, ytWhy{"winget-nopackage", "", "winget does not know this copy of yt-dlp as one it installed"}
 	case ran && code == wingetSourceAgreement:
-		return false, false, "winget wants its source agreement accepted first: run winget upgrade once in a terminal"
+		return false, false, ytWhy{"winget-agreement", "",
+			"winget wants its source agreement accepted first: run winget upgrade once in a terminal"}
+	case ran && code == wingetNeedsAdmin:
+		return false, false, ytWhy{"winget-admin", "",
+			"winget needs administrator rights to update this copy of yt-dlp: update it from a terminal opened as administrator"}
+	case ran && code == wingetUserScopeAdmin:
+		return false, false, ytWhy{"winget-elevated", "",
+			"godm is running with administrator rights, and winget will not update a copy of yt-dlp installed for one user from there: quit godm and start it again without them"}
 	}
-	reason = lastSaying(out)
-	if reason == "" {
-		reason = err.Error()
+	msg := lastSaying(out)
+	if msg == "" {
+		msg = err.Error()
 	}
 	if ran {
-		reason = fmt.Sprintf("%s (winget exit code %#x)", reason, code)
+		msg = fmt.Sprintf("%s (winget exit code %#x)", msg, code)
 	}
-	return false, false, reason
+	return false, false, ytWhy{Msg: msg}
 }
 
 // progressLine matches the lines winget draws a download with: a bar, a
@@ -287,7 +319,8 @@ var progressLine = regexp.MustCompile(`[█▒░▓]|^\s*[\d.]+\s*[KMG]?i?B\s*/
 // lastSaying is the last thing a program said that is words: winget redraws a
 // spinner and a progress bar over one line with carriage returns, and the
 // reason a run failed is the line after those. It is cut to one line of a
-// length that fits a message.
+// length that fits a message, and never through a character: winget writes in
+// the language of the person who uses it.
 func lastSaying(out string) string {
 	lines := outputLines(out)
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -296,7 +329,7 @@ func lastSaying(out string) string {
 			continue
 		}
 		if len(s) > 300 {
-			s = s[:300] + "…"
+			s = clip(s, 300) + "…"
 		}
 		return s
 	}
@@ -371,38 +404,39 @@ var fetchLatestYTDLP = func(ctx context.Context) (string, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", errors.New("GitHub did not answer in time")
+			return "", ytWhy{"gh-timeout", "", "GitHub did not answer in time"}
 		}
 		var ue *url.Error
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return "", fmt.Errorf("could not reach GitHub: %v", err)
+		return "", ytWhy{"gh-unreachable", "", fmt.Sprintf("could not reach GitHub: %v", err)}
 	}
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusOK:
 	case (resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests) &&
 		resp.Header.Get("X-RateLimit-Remaining") == "0":
-		msg := "GitHub's limit on requests from this address was reached"
+		w := ytWhy{"gh-limit", "", "GitHub's limit on requests from this address was reached"}
 		if secs, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 			if wait := time.Until(time.Unix(secs, 0)); wait > 0 {
-				msg += fmt.Sprintf("; try again in %d minutes", int(wait/time.Minute)+1)
+				w.Arg = strconv.Itoa(int(wait/time.Minute) + 1)
+				w.Msg += fmt.Sprintf("; try again in %s minutes", w.Arg)
 			}
 		}
-		return "", errors.New(msg)
+		return "", w
 	default:
-		return "", fmt.Errorf("GitHub answered %s", resp.Status)
+		return "", ytWhy{"gh-status", resp.Status, "GitHub answered " + resp.Status}
 	}
 	var doc struct {
 		Tag string `json:"tag_name"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&doc); err != nil {
-		return "", fmt.Errorf("GitHub's answer could not be read: %v", err)
+		return "", ytWhy{"gh-unreadable", "", fmt.Sprintf("GitHub's answer could not be read: %v", err)}
 	}
 	tag := strings.TrimSpace(doc.Tag)
 	if _, ok := parseYTVersion(tag); !ok {
-		return "", fmt.Errorf("GitHub names the latest release %q, which is not a yt-dlp version", tag)
+		return "", ytWhy{"gh-tag", tag, fmt.Sprintf("GitHub names the latest release %q, which is not a yt-dlp version", tag)}
 	}
 	return tag, nil
 }
@@ -429,6 +463,11 @@ var (
 	ytHintBudget = 4 * time.Second
 	// ytUpdateTimeout bounds one program of an update.
 	ytUpdateTimeout = 10 * time.Minute
+	// ytResultKeep is how long the page is told how the last update went. After
+	// that it is old news, and a release since then must not be hidden by it.
+	ytResultKeep = 30 * time.Minute
+	// ytQuitWait is as long as quitting godm waits for an update to finish.
+	ytQuitWait = 2 * time.Minute
 )
 
 // ---------- not while it is in use ----------
@@ -514,6 +553,37 @@ func (g *ytGate) beginUpdate() error {
 	}
 	g.updating = true
 	return nil
+}
+
+// isUpdating says whether an update has the gate.
+func (g *ytGate) isUpdating() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.updating
+}
+
+// idle waits until no update has the gate, for at most max, and says whether
+// that is so.
+func (g *ytGate) idle(max time.Duration) bool {
+	limit := time.NewTimer(max)
+	defer limit.Stop()
+	for {
+		g.mu.Lock()
+		if !g.updating {
+			g.mu.Unlock()
+			return true
+		}
+		if g.freed == nil {
+			g.freed = make(chan struct{})
+		}
+		ch := g.freed
+		g.mu.Unlock()
+		select {
+		case <-ch:
+		case <-limit.C:
+			return false
+		}
+	}
 }
 
 func (g *ytGate) endUpdate() {
@@ -605,18 +675,19 @@ type ytTool struct {
 	// failed download can still say its yt-dlp is old.
 	latest      string
 	latestAt    time.Time
-	latestErr   string
+	latestErr   ytWhy // Msg is empty when the last attempt did not fail
 	latestErrAt time.Time
 	flight      chan struct{} // closed when the request in the air is answered
 
 	// The installed version, with what it was read from. A file that has changed
 	// since is read again.
 	seen    ytSeen
-	seenErr string
+	seenErr ytWhy
 
 	updating bool
 	step     string // which program an update is running now
 	result   *ytUpdateResult
+	resultAt time.Time
 }
 
 type ytSeen struct {
@@ -636,13 +707,18 @@ func (t *ytTool) newest(ctx context.Context, force bool) (string, error) {
 	for mine == nil {
 		t.mu.Lock()
 		now := time.Now()
+		failed := t.latestErr.Msg != ""
 		switch {
-		case !force && t.latest != "" && now.Sub(t.latestAt) < ytLatestTTL:
+		// A release learnt lately is the newest, unless a look since then failed
+		// and the time to try again has come: the failure is not left standing as
+		// if it were the latest word, for as long as the answer before it is fresh.
+		case !force && t.latest != "" && now.Sub(t.latestAt) < ytLatestTTL &&
+			(!failed || now.Sub(t.latestErrAt) < ytLatestRetry):
 			tag := t.latest
 			t.mu.Unlock()
 			return tag, nil
-		case !force && t.latestErr != "" && now.Sub(t.latestErrAt) < ytLatestRetry:
-			tag, err := t.latest, errors.New(t.latestErr)
+		case !force && failed && now.Sub(t.latestErrAt) < ytLatestRetry:
+			tag, err := t.latest, t.latestErr
 			t.mu.Unlock()
 			return tag, err
 		case t.flight != nil:
@@ -671,11 +747,11 @@ func (t *ytTool) newest(ctx context.Context, force bool) (string, error) {
 	close(mine)
 	switch {
 	case err == nil:
-		t.latest, t.latestAt, t.latestErr = tag, time.Now(), ""
+		t.latest, t.latestAt, t.latestErr = tag, time.Now(), ytWhy{}
 		return tag, nil
 	case ctx.Err() == nil:
 		// A request that was given up on says nothing about GitHub.
-		t.latestErr, t.latestErrAt = err.Error(), time.Now()
+		t.latestErr, t.latestErrAt = asWhy(err), time.Now()
 	}
 	return t.latest, err
 }
@@ -721,18 +797,18 @@ func (t *ytTool) readVersion(ctx context.Context, bin string) (string, error) {
 
 	keep := func(v string) (string, error) {
 		t.mu.Lock()
-		t.seen, t.seenErr = ytSeen{path: bin, version: v}, ""
+		t.seen, t.seenErr = ytSeen{path: bin, version: v}, ytWhy{}
 		if statErr == nil {
 			t.seen.size, t.seen.mod = fi.Size(), fi.ModTime()
 		}
 		t.mu.Unlock()
 		return v, nil
 	}
-	fail := func(msg string) (string, error) {
+	fail := func(w ytWhy) (string, error) {
 		t.mu.Lock()
-		t.seen, t.seenErr = ytSeen{}, msg
+		t.seen, t.seenErr = ytSeen{}, w
 		t.mu.Unlock()
-		return "", errors.New(msg)
+		return "", w
 	}
 	lines := outputLines(out)
 	// A line that is not a date is taken for a version only from a yt-dlp that ended well.
@@ -743,13 +819,13 @@ func (t *ytTool) readVersion(ctx context.Context, bin string) (string, error) {
 	case ctx.Err() != nil:
 		return "", ctx.Err()
 	case vctx.Err() != nil:
-		return fail("yt-dlp did not say its version in time")
+		return fail(ytWhy{"version-timeout", "", "yt-dlp did not say its version in time"})
 	case err != nil:
-		return fail("yt-dlp --version failed: " + ytdlpReasonLine(lines, err))
+		return fail(ytWhy{Msg: "yt-dlp --version failed: " + ytdlpReasonLine(lines, err)})
 	case len(lines) == 0:
-		return fail("yt-dlp --version printed nothing")
+		return fail(ytWhy{Msg: "yt-dlp --version printed nothing"})
 	}
-	return fail("yt-dlp --version said nothing but a complaint")
+	return fail(ytWhy{Msg: "yt-dlp --version said nothing but a complaint"})
 }
 
 // versionIn picks the version out of what yt-dlp --version printed. That is
@@ -766,7 +842,7 @@ func versionIn(lines []string, lenient bool) (v string, found bool) {
 	for i := len(lines) - 1; lenient && i >= 0; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line != "" && !strings.HasPrefix(line, "WARNING:") && !strings.HasPrefix(line, "ERROR:") {
-			return line[:min(len(line), 60)], true
+			return clip(line, 60), true
 		}
 	}
 	return "", false
@@ -797,12 +873,34 @@ func (t *ytTool) look(ctx context.Context, force bool) (have, newest string, hav
 // outdatedNote is what a failed run of yt-dlp adds to its reason: the version
 // installed and the newest, when the first is older than the second. Nothing is
 // said unless both are known and the installed one is the older. It waits at
-// most ytHintBudget.
+// most ytHintBudget, and the looking goes on after that in the background
+// within a time of its own: the first time yt-dlp.exe is started it can take
+// longer than a failure is to be held up, and a look cut short each time would
+// leave the version unknown for good, and the note never given.
 func (t *ytTool) outdatedNote(ctx context.Context) (have, newest string, outdated bool) {
-	ctx, cancel := context.WithTimeout(ctx, ytHintBudget)
-	defer cancel()
-	have, newest, haveErr, _ := t.look(ctx, false)
-	if haveErr != nil || have == "" || newest == "" {
+	type looked struct {
+		have, newest string
+		haveErr      error
+	}
+	lctx, stop := context.WithTimeout(context.WithoutCancel(ctx), ytCheckBudget)
+	done := make(chan looked, 1)
+	go func() {
+		defer stop()
+		h, n, haveErr, _ := t.look(lctx, false)
+		done <- looked{h, n, haveErr}
+	}()
+	wait := time.NewTimer(ytHintBudget)
+	defer wait.Stop()
+	var l looked
+	select {
+	case l = <-done:
+	case <-wait.C:
+		return "", "", false
+	case <-ctx.Done():
+		return "", "", false
+	}
+	have, newest = l.have, l.newest
+	if l.haveErr != nil || have == "" || newest == "" {
 		return "", "", false
 	}
 	// An error from GitHub with an older answer behind it is still an answer:
@@ -826,15 +924,25 @@ type ytStatus struct {
 	InstallName string `json:"install_name,omitempty"`
 	Command     string `json:"command,omitempty"`
 	CanUpdate   bool   `json:"can_update"`
+	// DenoViaWinget says the Deno yt-dlp will find came from winget as well, and
+	// so an update brings it along: which is something to update even when
+	// yt-dlp itself is the newest.
+	DenoViaWinget bool `json:"deno_via_winget"`
 	// Version is the installed version, empty when it has not been read or could
-	// not be; VersionError says why in the second case.
-	Version      string `json:"version,omitempty"`
-	VersionError string `json:"version_error,omitempty"`
+	// not be; VersionError says why in the second case. Every error comes in
+	// English, and with a code and an argument where godm worded it, so that the
+	// page can word it in its own language (see ytWhy).
+	Version          string `json:"version,omitempty"`
+	VersionError     string `json:"version_error,omitempty"`
+	VersionErrorCode string `json:"version_error_code,omitempty"`
+	VersionErrorArg  string `json:"version_error_arg,omitempty"`
 	// Latest is the newest release godm has learnt, which may be an old
 	// answer if the last attempt failed, and then LatestError says why.
-	Latest      string `json:"latest,omitempty"`
-	LatestAt    string `json:"latest_at,omitempty"`
-	LatestError string `json:"latest_error,omitempty"`
+	Latest          string `json:"latest,omitempty"`
+	LatestAt        string `json:"latest_at,omitempty"`
+	LatestError     string `json:"latest_error,omitempty"`
+	LatestErrorCode string `json:"latest_error_code,omitempty"`
+	LatestErrorArg  string `json:"latest_error_arg,omitempty"`
 	// Outdated is true if the installed version is older than Latest, false if it
 	// is not, and null where either cannot be compared.
 	Outdated *bool `json:"outdated"`
@@ -854,11 +962,15 @@ type ytUpdateResult struct {
 	Changed bool   `json:"changed"`
 	// Behind says a newer release is out than the one installed now: winget's
 	// list follows GitHub's by a day or so.
-	Behind bool   `json:"behind"`
-	Error  string `json:"error,omitempty"`
+	Behind    bool   `json:"behind"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
+	ErrorArg  string `json:"error_arg,omitempty"`
 	// Deno is "updated", "current" or "failed" where Deno came from winget too.
-	Deno      string `json:"deno,omitempty"`
-	DenoError string `json:"deno_error,omitempty"`
+	Deno          string `json:"deno,omitempty"`
+	DenoError     string `json:"deno_error,omitempty"`
+	DenoErrorCode string `json:"deno_error_code,omitempty"`
+	DenoErrorArg  string `json:"deno_error_arg,omitempty"`
 }
 
 // status is what is known, without asking anyone anything: the answer to a page
@@ -874,6 +986,7 @@ func (t *ytTool) status() ytStatus {
 		if !st.CanUpdate {
 			st.Command = inst.Command
 		}
+		st.DenoViaWinget = inst.Kind == ytInstWinget && denoViaWinget()
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -881,31 +994,39 @@ func (t *ytTool) status() ytStatus {
 		st.Version = t.seen.version
 	}
 	if st.Found && st.Version == "" {
-		st.VersionError = t.seenErr
+		st.VersionError, st.VersionErrorCode, st.VersionErrorArg = t.seenErr.Msg, t.seenErr.Code, t.seenErr.Arg
 	}
 	st.Latest = t.latest
 	if !t.latestAt.IsZero() {
 		st.LatestAt = t.latestAt.UTC().Format(time.RFC3339)
 	}
-	st.LatestError = t.latestErr
+	st.LatestError, st.LatestErrorCode, st.LatestErrorArg = t.latestErr.Msg, t.latestErr.Code, t.latestErr.Arg
 	if outdated, known := ytOutdated(st.Version, st.Latest); known {
 		st.Outdated = &outdated
 	}
 	st.Busy = ytdlpGate.inUse() > 0
-	st.Updating, st.Step, st.Result = t.updating, t.step, t.result
+	st.Updating, st.Step = t.updating, t.step
+	if t.result != nil && time.Since(t.resultAt) < ytResultKeep {
+		st.Result = t.result
+	}
 	return st
 }
 
 // check looks at the installed version and the newest release, using what was
 // found within the last few hours unless force says to look again, and answers
-// with the status. Looking at the results of an update is not in its way.
+// with the status. A look that is asked for forgets how the last update went;
+// one that is only the dialog being opened does not, or a person who came back
+// to it would be shown a newer release available and not why the update they
+// had asked for left it so.
 func (t *ytTool) check(ctx context.Context, force bool) ytStatus {
 	t.mu.Lock()
 	if t.updating {
 		t.mu.Unlock()
 		return t.status() // the file is being replaced: nothing to read from it
 	}
-	t.result = nil
+	if force {
+		t.result = nil
+	}
 	t.mu.Unlock()
 	t.look(ctx, force)
 	return t.status()
@@ -935,6 +1056,11 @@ type ytPlan struct {
 // startUpdate begins updating yt-dlp in the background and returns at once, or
 // says why not. The page follows it through status.
 func (t *ytTool) startUpdate() error {
+	// While an update is under way the file may be gone for a moment, and then
+	// "yt-dlp is not there" would be the wrong answer to a second one.
+	if ytdlpGate.isUpdating() {
+		return &ytRefusal{"updating", "yt-dlp is already being updated"}
+	}
 	bin, err := findYTDLP()
 	if err != nil {
 		return &ytRefusal{"missing", err.Error()}
@@ -975,7 +1101,7 @@ func (t *ytTool) runUpdate(plan ytPlan) {
 	defer cancel()
 	res := t.doUpdate(ctx, plan)
 	t.mu.Lock()
-	t.updating, t.step, t.result = false, "", &res
+	t.updating, t.step, t.result, t.resultAt = false, "", &res, time.Now()
 	t.mu.Unlock()
 	// After the result is there to be read: a page that sees the update over
 	// sees how it went.
@@ -990,22 +1116,26 @@ func (t *ytTool) setStep(step string) {
 
 func (t *ytTool) doUpdate(ctx context.Context, plan ytPlan) (res ytUpdateResult) {
 	res.From, _ = t.readVersion(ctx, plan.bin)
+	failed := func(w ytWhy) ytUpdateResult {
+		res.Error, res.ErrorCode, res.ErrorArg = w.Msg, w.Code, w.Arg
+		return res
+	}
 
 	switch plan.inst.Kind {
 	case ytInstWinget:
 		// Nothing newer than what is installed is a result and no failure, and
-		// the versions read afterwards say it.
-		ok, _, reason := t.winget(ctx, plan, "yt-dlp.yt-dlp")
+		// the versions read afterwards say it. Nor does it stop Deno from being
+		// looked at: yt-dlp can be the newest while the Deno it wants is not.
+		ok, _, why := t.winget(ctx, plan, "yt-dlp.yt-dlp")
 		if !ok {
-			res.Error = reason
-			return res
+			return failed(why)
 		}
 		if plan.deno {
 			t.setStep("Deno")
-			ok, current, reason := t.winget(ctx, plan, "DenoLand.Deno")
+			ok, current, why := t.winget(ctx, plan, "DenoLand.Deno")
 			switch {
 			case !ok:
-				res.Deno, res.DenoError = "failed", reason
+				res.Deno, res.DenoError, res.DenoErrorCode, res.DenoErrorArg = "failed", why.Msg, why.Code, why.Arg
 			case current:
 				res.Deno = "current"
 			default:
@@ -1025,19 +1155,20 @@ func (t *ytTool) doUpdate(ctx context.Context, plan ytPlan) (res ytUpdateResult)
 		cancel()
 		if err != nil {
 			log.Printf("yt-dlp -U failed: %v\n%s", err, out)
-			res.Error = ytUpdateFailure("yt-dlp -U", out, err, timedOut)
-			return res
+			return failed(ytUpdateFailure(out, err, timedOut))
 		}
 	}
 
-	res.OK = true
+	// What is there now has to say what it is. An update after which yt-dlp does
+	// not run is no good news, and neither is one of a copy that did not run
+	// before and still does not: the person is told, and not that all went well.
 	to, err := t.readVersion(ctx, plan.bin)
 	if err != nil {
-		// It was updated; that it will not say its version is another matter, which
-		// the next check will show.
 		log.Printf("yt-dlp: version after the update: %v", err)
+		w := asWhy(err)
+		return failed(ytWhy{"after-version", w.Msg, "yt-dlp does not say its version after the update: " + w.Msg})
 	}
-	res.To = to
+	res.OK, res.To = true, to
 	res.Changed = to != res.From
 	if outdated, known := ytOutdated(to, t.knownNewest()); known && outdated {
 		res.Behind = true
@@ -1046,7 +1177,7 @@ func (t *ytTool) doUpdate(ctx context.Context, plan ytPlan) (res ytUpdateResult)
 }
 
 // winget runs one winget upgrade of the plan and reads how it went.
-func (t *ytTool) winget(ctx context.Context, plan ytPlan, id string) (ok, current bool, reason string) {
+func (t *ytTool) winget(ctx context.Context, plan ytPlan, id string) (ok, current bool, reason ytWhy) {
 	wctx, cancel := context.WithTimeout(ctx, ytUpdateTimeout)
 	defer cancel()
 	cmd := newWingetCmd(wctx, plan.winget, wingetUpgradeArgs(id, plan.scope))
@@ -1056,19 +1187,42 @@ func (t *ytTool) winget(ctx context.Context, plan ytPlan, id string) (ok, curren
 		// What winget printed is more than a message has room for.
 		log.Printf("winget upgrade %s: %v\n%s", id, err, out)
 		if wctx.Err() != nil {
-			reason = fmt.Sprintf("winget did not finish in %d minutes", int(ytUpdateTimeout/time.Minute))
+			reason = ytTimeout("timeout-winget", "winget")
 		}
 	}
 	return ok, current, reason
 }
 
+// ytTimeout is a program of an update that did not end in the time allowed it.
+func ytTimeout(code, what string) ytWhy {
+	mins := strconv.Itoa(int(ytUpdateTimeout / time.Minute))
+	return ytWhy{code, mins, fmt.Sprintf("%s did not finish in %s minutes", what, mins)}
+}
+
 // ytUpdateFailure is the reason yt-dlp -U gave for failing: its own ERROR
 // line, as for any other failure of yt-dlp's.
-func ytUpdateFailure(what, out string, err error, timedOut bool) string {
+func ytUpdateFailure(out string, err error, timedOut bool) ytWhy {
 	if timedOut {
-		return fmt.Sprintf("%s did not finish in %d minutes", what, int(ytUpdateTimeout/time.Minute))
+		return ytTimeout("timeout-update", "yt-dlp -U")
 	}
-	return ytdlpReasonLine(outputLines(out), err)
+	return ytWhy{Msg: ytdlpReasonLine(outputLines(out), err)}
+}
+
+// finishYTDLPUpdate is for quitting godm. Ending winget or yt-dlp -U in the
+// middle of replacing yt-dlp can leave none: so a person who quits during an
+// update is told it is being waited for, and godm goes when it is over, or when
+// ytQuitWait is.
+func (m *Manager) finishYTDLPUpdate() {
+	if !ytdlpGate.isUpdating() {
+		return
+	}
+	log.Printf("quitting waits for the update of yt-dlp to end")
+	if m.announce != nil {
+		m.announce(m.tr("ytdlp.quitTitle"), m.tr("ytdlp.quitText"), "")
+	}
+	if !ytdlpGate.idle(ytQuitWait) {
+		log.Printf("the update of yt-dlp did not end in %v: quitting anyway", ytQuitWait)
+	}
 }
 
 // ---------- the API ----------

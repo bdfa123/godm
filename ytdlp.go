@@ -358,6 +358,19 @@ func ytdlpArgs(o YTDLPOptions) []string {
 
 // RunYTDLP downloads one video and reports where it landed.
 func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
+	if !strings.HasPrefix(strings.ToLower(o.URL), "http://") &&
+		!strings.HasPrefix(strings.ToLower(o.URL), "https://") {
+		return "", errors.New("only http and https URLs can be handed to yt-dlp")
+	}
+	// An update of yt-dlp is not started while this runs, and this does not start
+	// while one is under way: the file it would run is being replaced. Stopping
+	// ends the wait. It comes before yt-dlp is looked for, since during an update
+	// the file may be away for a moment, and a download that found none then
+	// would end in error when all it had to do was wait.
+	if err := ytdlpGate.enter(ctx); err != nil {
+		return "", err
+	}
+	defer ytdlpGate.leave()
 	bin := o.Binary
 	if bin == "" {
 		found, err := findYTDLP()
@@ -365,10 +378,6 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			return "", err
 		}
 		bin = found
-	}
-	if !strings.HasPrefix(strings.ToLower(o.URL), "http://") &&
-		!strings.HasPrefix(strings.ToLower(o.URL), "https://") {
-		return "", errors.New("only http and https URLs can be handed to yt-dlp")
 	}
 	// yt-dlp is not started in godm's folder, so a folder named from there has
 	// to be spelled out in full or it would be made inside yt-dlp's.
@@ -383,13 +392,6 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return "", err
 	}
-	// An update of yt-dlp is not started while this runs, and this does not start
-	// while one is under way: the file it would run is being replaced. Stopping
-	// ends the wait.
-	if err := ytdlpGate.enter(ctx); err != nil {
-		return "", err
-	}
-	defer ytdlpGate.leave()
 	cmd := newYTDLPCmd(ctx, bin, ytdlpArgs(o))
 	runFromOwnFolder(cmd)
 	cleanUp := prepareEnv(cmd)
@@ -630,6 +632,14 @@ type ytdlpJSON struct {
 // InspectYTDLP asks yt-dlp what is on offer without downloading anything, so
 // the user can pick a quality first.
 func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
+	// Not while yt-dlp is being updated, and no update while this is running; an
+	// inspection is short and its caller is waiting, so it is told rather than
+	// kept waiting. Before yt-dlp is looked for: while it is being replaced it
+	// may not be there, and "being updated" is the true answer then.
+	if err := ytdlpGate.tryEnter(); err != nil {
+		return nil, err
+	}
+	defer ytdlpGate.leave()
 	bin := o.Binary
 	if bin == "" {
 		found, err := findYTDLP()
@@ -655,13 +665,6 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 		}
 	}
 	args = append(args, "--", o.URL)
-	// Not while yt-dlp is being updated, and no update while this is running; an
-	// inspection is short and its caller is waiting, so it is told rather than
-	// kept waiting.
-	if err := ytdlpGate.tryEnter(); err != nil {
-		return nil, err
-	}
-	defer ytdlpGate.leave()
 	cmd := newYTDLPCmd(ctx, bin, args)
 	runFromOwnFolder(cmd)
 	cleanUp := prepareEnv(cmd)

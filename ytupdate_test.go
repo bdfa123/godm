@@ -56,13 +56,23 @@ const (
 	stubArgsFile    = "GODM_STUB_ARGS_FILE"    // where each is to write down what it was asked
 	stubUpdateTo    = "GODM_STUB_UPDATE_TO"    // what yt-dlp -U makes the version; empty fails it
 	stubWinget      = "GODM_STUB_WINGET"       // what winget does for each package id, as JSON
+	stubVersionWait = "GODM_STUB_VERSION_WAIT" // milliseconds yt-dlp takes to say its version
+	stubHang        = "GODM_STUB_HANG"         // "version" or "update": yt-dlp never gets to the end of it
 )
 
 // wingetStep is what the winget stand-in does for one package.
 type wingetStep struct {
 	Exit int64  `json:"exit"`
-	To   string `json:"to"`  // the version yt-dlp is after a run that works
-	Out  string `json:"out"` // what it prints
+	To   string `json:"to"`   // the version yt-dlp is after a run that works
+	Out  string `json:"out"`  // what it prints
+	Hang bool   `json:"hang"` // it never ends
+}
+
+// hangs is a program that does not end until it is killed. (A bare select
+// would be taken by the runtime for a deadlock and end the program at once.)
+func hangs() int {
+	time.Sleep(time.Hour)
+	return 0
 }
 
 // playUpdater is the test binary acting as yt-dlp (asked for its version, or to
@@ -82,6 +92,12 @@ func playUpdater(scene string, args []string) int {
 	case "ytool":
 		switch {
 		case contains(args, "--version"):
+			if ms, _ := strconv.Atoi(os.Getenv(stubVersionWait)); ms > 0 {
+				time.Sleep(time.Duration(ms) * time.Millisecond)
+			}
+			if os.Getenv(stubHang) == "version" {
+				return hangs()
+			}
 			b, err := os.ReadFile(versionFile)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "ERROR: no version")
@@ -97,6 +113,9 @@ func playUpdater(scene string, args []string) int {
 			fmt.Println(strings.TrimSpace(string(b)))
 			return 0
 		case contains(args, "-U"):
+			if os.Getenv(stubHang) == "update" {
+				return hangs()
+			}
 			to := os.Getenv(stubUpdateTo)
 			if to == "" {
 				fmt.Println("ERROR: Unable to write to yt-dlp.exe.new; Permission denied")
@@ -121,6 +140,9 @@ func playUpdater(scene string, args []string) int {
 			return 1
 		}
 		fmt.Print(step.Out)
+		if step.Hang {
+			return hangs()
+		}
 		if step.Exit == 0 && step.To != "" {
 			os.WriteFile(versionFile, []byte(step.To+"\n"), 0o600)
 		}
@@ -247,9 +269,9 @@ func updateAndWait(t *testing.T, tool *ytTool) ytStatus {
 }
 
 const wingetYTDLPCall = "upgrade --id yt-dlp.yt-dlp --exact --source winget --scope user --silent " +
-	"--accept-package-agreements --accept-source-agreements"
+	"--accept-package-agreements --accept-source-agreements --disable-interactivity"
 const wingetDenoCall = "upgrade --id DenoLand.Deno --exact --source winget --scope user --silent " +
-	"--accept-package-agreements --accept-source-agreements"
+	"--accept-package-agreements --accept-source-agreements --disable-interactivity"
 
 // ---------- versions ----------
 
@@ -663,7 +685,8 @@ func TestWingetIsAskedForOnePackageWithoutQuestions(t *testing.T) {
 		t.Errorf("arguments = %q\nwant %q", got, wingetYTDLPCall)
 	}
 	got = strings.Join(wingetUpgradeArgs("DenoLand.Deno", ""), " ")
-	want := "upgrade --id DenoLand.Deno --exact --source winget --silent --accept-package-agreements --accept-source-agreements"
+	want := "upgrade --id DenoLand.Deno --exact --source winget --silent --accept-package-agreements " +
+		"--accept-source-agreements --disable-interactivity"
 	if got != want {
 		t.Errorf("arguments = %q\nwant %q", got, want)
 	}
@@ -699,18 +722,25 @@ func TestWingetsExitCodesAreToldApart(t *testing.T) {
 		ok, current  bool
 		reasonHas    string
 		reasonHasNot string
+		code         string // the code the page words the reason by; empty where the wording is winget's
 	}{
-		{"it worked", ten, nil, true, false, "", ""},
-		{"nothing newer", "No available upgrade found.\n", fakeExit(0x8A15002B), true, true, "", ""},
-		{"in use", "", fakeExit(0x8A150101), false, false, "in use", ""},
-		{"a file in use", "", fakeExit(0x8A150103), false, false, "in use", ""},
-		{"not winget's", "No installed package found matching input criteria.\n", fakeExit(0x8A150014), false, false, "does not know", ""},
-		{"the source agreement", "", fakeExit(0x8A150046), false, false, "agreement", ""},
+		{"it worked", ten, nil, true, false, "", "", ""},
+		{"nothing newer", "No available upgrade found.\n", fakeExit(0x8A15002B), true, true, "", "", ""},
+		{"in use", "", fakeExit(0x8A150101), false, false, "in use", "", "winget-inuse"},
+		{"a file in use", "", fakeExit(0x8A150103), false, false, "in use", "", "winget-inuse"},
+		{"not winget's", "No installed package found matching input criteria.\n", fakeExit(0x8A150014), false, false, "does not know", "", "winget-nopackage"},
+		{"the source agreement", "", fakeExit(0x8A150046), false, false, "agreement", "", "winget-agreement"},
+		{"administrator rights needed", "", fakeExit(0x8A150019), false, false, "administrator", "", "winget-admin"},
+		{"a user's copy from an administrator's godm", "", fakeExit(0x8A15007D), false, false, "without them", "", "winget-elevated"},
 		{"anything else", "Downloading https://x\r" + ten + "Installer hash does not match\n", fakeExit(0x8A150049), false, false,
-			"Installer hash does not match (winget exit code 0x8a150049)", "70%"},
-		{"it was not even started", "", errors.New("fork/exec: access denied"), false, false, "access denied", ""},
+			"Installer hash does not match (winget exit code 0x8a150049)", "70%", ""},
+		{"it was not even started", "", errors.New("fork/exec: access denied"), false, false, "access denied", "", ""},
 	} {
-		ok, current, reason := wingetOutcome(c.out, c.err)
+		ok, current, why := wingetOutcome(c.out, c.err)
+		reason := why.Msg
+		if why.Code != c.code {
+			t.Errorf("%s: code %q, want %q", c.name, why.Code, c.code)
+		}
 		if ok != c.ok || current != c.current {
 			t.Errorf("%s: ok %v, current %v; want %v, %v", c.name, ok, current, c.ok, c.current)
 		}
@@ -1239,7 +1269,7 @@ func TestAPausedDownloadStopsWaitingForAnUpdate(t *testing.T) {
 
 // ---------- looking, and what a failed download says ----------
 
-func TestACheckClearsTheLastResultAndMakesNoClaimWhileUpdating(t *testing.T) {
+func TestACheckThatIsAskedForClearsTheLastResultAndMakesNoClaimWhileUpdating(t *testing.T) {
 	rig := newUpdateRig(t, ytInstStandalone, "2026.06.01", "")
 	t.Setenv(stubUpdateTo, "2026.08.19")
 	var gh fakeGitHub
@@ -1250,9 +1280,15 @@ func TestACheckClearsTheLastResultAndMakesNoClaimWhileUpdating(t *testing.T) {
 	if tool.status().Result == nil {
 		t.Fatal("no result to clear")
 	}
-	st := tool.check(context.Background(), false)
+	// The dialog being opened looks, and must leave how the update went to be
+	// read: else a person who came back to see what became of it would be shown a
+	// newer release available, and no word of why it was not installed.
+	if st := tool.check(context.Background(), false); st.Result == nil {
+		t.Error("a look that was only the dialog opening forgot how the update went")
+	}
+	st := tool.check(context.Background(), true)
 	if st.Result != nil {
-		t.Error("the result of the last update stayed after a new look")
+		t.Error("the result of the last update stayed after a look that was asked for")
 	}
 	if st.Outdated == nil || *st.Outdated || st.Version != "2026.08.19" || st.Latest != "2026.08.19" {
 		t.Errorf("status = %+v", st)
@@ -1394,9 +1430,10 @@ func TestAFailedInspectionSaysSoToo(t *testing.T) {
 func TestTheNoteDoesNotHoldAFailureUpForLong(t *testing.T) {
 	newUpdateRig(t, ytInstStandalone, "2026.06.01", "")
 	var gh fakeGitHub
-	gh.hold = make(chan struct{}) // GitHub never answers
+	gh.hold = make(chan struct{}) // GitHub does not answer
 	gh.install(t)
-	defer close(gh.hold)
+	release := sync.OnceFunc(func() { close(gh.hold) })
+	defer release()
 	replace(t, &ytHintBudget, 300*time.Millisecond)
 	m := NewManager(t.TempDir(), 2)
 	began := time.Now()
@@ -1407,11 +1444,11 @@ func TestTheNoteDoesNotHoldAFailureUpForLong(t *testing.T) {
 	if got != "yt-dlp failed: boom" {
 		t.Errorf("reason = %q, want no note when the newest release is not known", got)
 	}
-	// With the answer already known there is no waiting at all.
-	gh2 := fakeGitHub{}
-	gh2.set("2026.09.15", nil)
-	gh2.install(t)
-	m.yt.newest(context.Background(), true)
+	// The looking went on without it. When GitHub does answer, the next failure
+	// has the answer already and is not held up at all.
+	gh.set("2026.09.15", nil)
+	release()
+	waitFor(t, 5*time.Second, "the look that was given up on to go on", func() bool { return m.yt.knownNewest() != "" })
 	began = time.Now()
 	got = m.ytdlpFailureText(&YTDLPFailedError{"yt-dlp failed: boom"})
 	if !strings.Contains(got, "out of date") || time.Since(began) > time.Second {

@@ -513,6 +513,8 @@ func (t *tray) showMenu() {
 	case menuQuit:
 		log.Printf("quit requested from the tray")
 		t.mgr.PauseAll()
+		// Not in the middle of winget or yt-dlp -U replacing yt-dlp.
+		t.mgr.finishYTDLPUpdate()
 		t.mgr.shutdownBT()
 		t.mgr.save()
 		procShellNotifyIcon.Call(nimDelete, uintptr(unsafe.Pointer(&t.nid)))

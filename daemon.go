@@ -2069,13 +2069,17 @@ func (s *server) handlePing(w http.ResponseWriter, r *http.Request) {
 // refusal (DRM, a live stream) comes back as ok:false with the reason, not as
 // an HTTP error, so the caller can show the user why rather than "request
 // failed".
+// inspectBudget is as long as a page is given to be read for the qualities it
+// offers. A variable so that a test need not wait it out.
+var inspectBudget = 30 * time.Second
+
 func (s *server) handleInspect(w http.ResponseWriter, r *http.Request) {
 	var req jobRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), inspectBudget)
 	defer cancel()
 	var info *StreamInfo
 	var err error
