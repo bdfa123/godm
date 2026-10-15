@@ -132,6 +132,30 @@ func playYTDLP(scene string, args []string) int {
 	case "path":
 		// The PATH the child was given, reported as if it were the file.
 		say("%s%s", fileMarker, os.Getenv("PATH"))
+	case "temp":
+		// The temporary folders the child was given, reported as if they were the
+		// file, after unpacking into the first as the released yt-dlp.exe does and
+		// then ending without taking that away: nothing here is a launcher.
+		unpacked := filepath.Join(os.Getenv("TEMP"), "_MEI123456")
+		if err := os.MkdirAll(unpacked, 0o755); err != nil {
+			say("ERROR: %v", err)
+			return 1
+		}
+		os.WriteFile(filepath.Join(unpacked, "python313.dll"), []byte("unpacked"), 0o600)
+		say("%s%s", fileMarker, strings.Join([]string{os.Getenv("TEMP"), os.Getenv("TMP"), os.Getenv("TMPDIR")}, "|"))
+	case "litter":
+		// A launcher that unpacks itself into the temporary folder, as the
+		// released yt-dlp.exe does, and is ended before it can take that away. The
+		// folder is reported as the title, which is the first thing said.
+		temp := os.Getenv("TEMP")
+		unpacked := filepath.Join(temp, "_MEI123456")
+		if err := os.MkdirAll(unpacked, 0o755); err != nil {
+			say("ERROR: %v", err)
+			return 1
+		}
+		os.WriteFile(filepath.Join(unpacked, "python313.dll"), []byte("unpacked"), 0o600)
+		say("%s%s", titleMarker, asciiJSON(temp))
+		return standInLingers(nil)
 	case "silent":
 		progress("downloading", 1<<20, 4<<20, 100000, 30, "avc1")
 	case "where":
@@ -955,7 +979,11 @@ func TestYTDLPDoesNotOutliveGodm(t *testing.T) {
 	emptyProfile(t)
 	beat := beatFile(t)
 	godm := exec.Command(os.Args[0])
-	godm.Env = append(os.Environ(), stubEnv+"=godm")
+	// The temporary folder yt-dlp is given is made inside the temporary folder
+	// of the process that runs it, and this one is not given the chance to
+	// remove it again.
+	temp := t.TempDir()
+	godm.Env = append(os.Environ(), stubEnv+"=godm", "TMP="+temp, "TEMP="+temp)
 	if err := godm.Start(); err != nil {
 		t.Fatal(err)
 	}

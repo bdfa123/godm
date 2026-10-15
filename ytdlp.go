@@ -242,7 +242,8 @@ func runFromOwnFolder(cmd *exec.Cmd) {
 	cmd.Dir = filepath.Dir(cmd.Path)
 }
 
-// prepareEnv sets up the environment yt-dlp is started in.
+// prepareEnv sets up the environment yt-dlp is started in, and returns what to
+// call once yt-dlp, and everything it started, has ended.
 //
 // It asks yt-dlp to write UTF-8. Left to itself it writes to a pipe in the code
 // page of the machine and drops what that cannot hold, so on a Western or a
@@ -257,12 +258,28 @@ func runFromOwnFolder(cmd *exec.Cmd) {
 // beside yt-dlp when winget installs them as separate packages, and godm's own
 // PATH is as old as the browser that started it; see syspath.go. Without them
 // yt-dlp reports the video as unavailable.
-func prepareEnv(cmd *exec.Cmd) {
+//
+// And it gives yt-dlp a temporary folder of its own. The released yt-dlp.exe
+// unpacks itself into a folder of the temporary folder for each run, and its
+// launcher takes that away again when the program ends. A pause or a removal
+// ends the launcher with the rest, and then nothing does: every one left 23 MB
+// behind for good. A folder that is only this run's can be removed whatever
+// became of the programs that used it.
+func prepareEnv(cmd *exec.Cmd) (done func()) {
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
 	cmd.Env = append(cmd.Env, "PYTHONIOENCODING=utf-8")
 	cmd.Env = withPathDirs(cmd.Env, currentSystemPath())
+	dir, err := os.MkdirTemp("", "godm-yt-")
+	if err != nil {
+		// The shared one will do; the leftover is a waste of space and no harm.
+		return func() {}
+	}
+	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+		cmd.Env = setEnv(cmd.Env, name, dir)
+	}
+	return func() { removeTree(dir, "a temporary folder of yt-dlp's") }
 }
 
 func ytdlpArgs(o YTDLPOptions) []string {
@@ -333,7 +350,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	}
 	cmd := newYTDLPCmd(ctx, bin, ytdlpArgs(o))
 	runFromOwnFolder(cmd)
-	prepareEnv(cmd)
+	cleanUp := prepareEnv(cmd)
 	// Progress goes to stderr and the printed path to stdout. Both ends of one
 	// pipe keeps them in order and means neither can fill its own buffer and
 	// wedge the process.
@@ -348,6 +365,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 	// downloading behind a task that says it stopped.
 	release, err := startTree(cmd)
 	if err != nil {
+		cleanUp()
 		pw.Close()
 		pr.Close()
 		if ctx.Err() != nil {
@@ -355,6 +373,9 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		}
 		return "", fmt.Errorf("could not start yt-dlp: %w", err)
 	}
+	// After release, which comes first: the folder goes once nothing of
+	// yt-dlp's is left to use it.
+	defer cleanUp()
 	defer release()
 	// The child holds its own copy; ours has to go or the read never ends.
 	pw.Close()
@@ -571,7 +592,8 @@ func InspectYTDLP(ctx context.Context, o YTDLPOptions) (*StreamInfo, error) {
 	args = append(args, "--", o.URL)
 	cmd := newYTDLPCmd(ctx, bin, args)
 	runFromOwnFolder(cmd)
-	prepareEnv(cmd)
+	cleanUp := prepareEnv(cmd)
+	defer cleanUp()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	// The same two ways of being held up as a download has: when time is up

@@ -1187,6 +1187,29 @@ func deleteYTFiles(files []string) {
 	}, func() {})
 }
 
+// removeTree is os.RemoveAll, repeated in the background for as long as
+// deleteFor if something in the tree is still open, with a line in the log if
+// it is still there at the end.
+func removeTree(dir, what string) {
+	if os.RemoveAll(dir) == nil {
+		return
+	}
+	go func() {
+		deadline := time.Now().Add(deleteFor)
+		for wait := 50 * time.Millisecond; ; wait = min(2*wait, time.Second) {
+			time.Sleep(wait)
+			err := os.RemoveAll(dir)
+			if err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Printf("removing %s: could not delete %s and left it where it is: %v", what, dir, err)
+				return
+			}
+		}
+	}()
+}
+
 // RequestRefresh parks a task until the user fetches a new link for it, and
 // opens the page the download originally came from so they can click it again.
 func (m *Manager) RequestRefresh(id string) (string, error) {
