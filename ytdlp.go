@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,6 +110,36 @@ const ytProgressTemplate = progressMarker +
 // did not wait for holds it open, this is how long that is allowed to keep
 // godm waiting. It is a variable so a test need not sit through it.
 var ytdlpDrain = 2 * time.Second
+
+// ytdlpLineMax is as much of one line of yt-dlp's output as is kept. Its own
+// lines are short, but nothing stops one from being huge: a warning that
+// quotes a page, a plugin that dumps what it was given.
+const ytdlpLineMax = 1 << 20
+
+// eachLine hands fn every line r yields, without its line ending, until r
+// ends. A line past ytdlpLineMax is cut there and the reading goes on: a
+// reader that stops at a line it cannot hold stops reading at all, and
+// yt-dlp then fills the pipe and waits on it for good.
+func eachLine(r io.Reader, fn func(string)) {
+	br := bufio.NewReaderSize(r, 64<<10)
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if room := ytdlpLineMax - len(line); room > 0 {
+			line = append(line, chunk[:min(len(chunk), room)]...)
+		}
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if len(line) > 0 {
+			fn(strings.TrimRight(string(line), "\r\n"))
+		}
+		line = line[:0]
+		if err != nil {
+			return
+		}
+	}
+}
 
 // newYTDLPCmd is a variable so a test can point the runner at a stand-in
 // program without yt-dlp being installed.
@@ -345,13 +376,10 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		tail  []string
 		stage string
 	)
-	sc := bufio.NewScanner(pr)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
+	eachLine(pr, func(line string) {
 		if got, ok := strings.CutPrefix(line, fileMarker); ok {
 			path = strings.TrimSpace(got)
-			continue
+			return
 		}
 		if up, ok := parseYTProgress(line); ok {
 			// Only the line that starts a stream carries its codec; the rest
@@ -364,7 +392,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 			if o.OnUpdate != nil {
 				o.OnUpdate(up)
 			}
-			continue
+			return
 		}
 		if got, ok := strings.CutPrefix(line, titleMarker); ok {
 			var t string
@@ -373,7 +401,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 					o.OnStart(YTStart{Title: t})
 				}
 			}
-			continue
+			return
 		}
 		if f := ytdlpDestination(line); f != "" && o.OnStart != nil {
 			o.OnStart(YTStart{File: f})
@@ -383,7 +411,7 @@ func RunYTDLP(ctx context.Context, o YTDLPOptions) (string, error) {
 		if len(tail) > 12 {
 			tail = tail[len(tail)-12:]
 		}
-	}
+	})
 	close(read)
 	<-exited
 	if ctx.Err() != nil && (waitErr != nil || path == "") {

@@ -48,6 +48,16 @@ func playYTDLP(scene string, args []string) int {
 		dir = "."
 	}
 
+	if scene == "longline" {
+		// A line longer than anything a reader keeps whole, then more than a
+		// pipe holds, before going on as a download that works.
+		say("[debug] %s", strings.Repeat("x", 3<<20))
+		for i := range 4000 {
+			say("[debug] line %d %s", i, strings.Repeat("y", 100))
+		}
+		scene = "ok"
+	}
+
 	switch scene {
 	case "tree":
 		// yt-dlp.exe is a launcher that runs the real program as its child,
@@ -495,6 +505,36 @@ func TestAFileInTheDownloadFolderIsNeverYTDLPConfiguration(t *testing.T) {
 	}
 	if want := filepath.Join(dir, "A Video Title.mp4"); path != want {
 		t.Errorf("path = %q, want %q: the yt-dlp.conf in the download folder was read as options", path, want)
+	}
+}
+
+func TestEachLineCutsAnOverlongLineAndReadsOn(t *testing.T) {
+	long := strings.Repeat("x", ytdlpLineMax+5000)
+	var got []string
+	eachLine(strings.NewReader("a\r\nb\n"+long+"\nc"), func(s string) { got = append(got, s) })
+	if len(got) != 4 || got[0] != "a" || got[1] != "b" || got[3] != "c" {
+		t.Fatalf("lines = %d: %q, %q, …, want a, b, the long one, c", len(got), got[0], got[1])
+	}
+	if len(got[2]) != ytdlpLineMax || got[2] != long[:ytdlpLineMax] {
+		t.Errorf("the long line kept %d bytes, want its first %d", len(got[2]), ytdlpLineMax)
+	}
+}
+
+// A line too long to keep whole must not stop godm reading: yt-dlp would then
+// fill the pipe, wait on it for good, and the download with it.
+func TestAnOverlongLineFromYTDLPDoesNotStopTheReading(t *testing.T) {
+	stubYTDLP(t, "longline")
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	path, err := RunYTDLP(ctx, YTDLPOptions{
+		URL: "https://example.test/watch?v=1", OutDir: dir, Binary: "stub",
+	})
+	if err != nil {
+		t.Fatalf("after a long line: %v", err)
+	}
+	if want := filepath.Join(dir, "A Video Title.mp4"); path != want {
+		t.Errorf("path = %q, want %q", path, want)
 	}
 }
 
