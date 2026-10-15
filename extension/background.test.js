@@ -79,7 +79,8 @@ function start(options) {
     message: event(),
     menu: event(),
     installed: event(),
-    storage: event()
+    storage: event(),
+    tabUpdated: event()
   };
   let nextWindow = 100;
 
@@ -123,7 +124,7 @@ function start(options) {
       get: async () => ({}),
       // A tab sent to an address: how a magnet goes back to the browser.
       update: async (id, o) => seen.opened.push({ tab: id, url: o.url }),
-      onUpdated: event(),
+      onUpdated: events.tabUpdated,
       onRemoved: event(),
       onActivated: event()
     },
@@ -722,6 +723,25 @@ test("a page whose HTML has no links is still worth picking from when it played 
   assert.equal(nothing.seen.notices.length, 1, "told there is nothing to pick");
 });
 
+test("a page whose scan came back with nothing at all is still picked from, by what the tab says it is", async () => {
+  // The scan has nothing to report on a page it could not read the document of
+  // (a plain video file in a tab, say), but the sniffer saw what it played.
+  const w = start({ session: { "media:7": SNIFFED } }); // no page: executeScript answers []
+  const res = await w.context.pickLinksFromTab(PLAYER_TAB, false);
+  assert.equal(res.ok, true);
+  assert.equal(w.seen.windows.length, 1);
+  const list = pickedList(w);
+  assert.equal(list.page, PLAYER_TAB.url);
+  assert.equal(list.title, PLAYER_TAB.title);
+  assert.deepEqual(list.links, []);
+  assert.equal(list.videos.length, 2);
+
+  const bare = start({ session: { "media:7": SNIFFED } });
+  await bare.context.pickLinksFromTab({ id: 7 }, false);
+  assert.equal(pickedList(bare).page, "", "a tab that says nothing of itself is not made up for");
+  assert.equal(pickedList(bare).title, "");
+});
+
 test("a selection asks for the links inside it and is not given the page's videos", async () => {
   const w = start({ session: { "media:7": SNIFFED }, page: PAGE_LINKS });
   const res = await w.context.pickLinksFromTab(PLAYER_TAB, true);
@@ -749,7 +769,7 @@ test("a stream that was picked goes to the host as one, and a file as before", a
     referrer: PLAYER_TAB.url,
     connections: 6,
     items: [
-      { url: "https://cdn.test/play?id=7", kind: "hls", filename: "The Film" },
+      { url: "https://cdn.test/play?id=7", kind: "hls", filename: "The Film", variant: 2 },
       { url: "https://files.test/clip.mp4" },
       { url: "https://video.test/files/extras.zip", filename: "" }
     ]
@@ -760,11 +780,42 @@ test("a stream that was picked goes to the host as one, and a file as before", a
   assert.equal(sent.referrer, PLAYER_TAB.url);
   assert.equal(sent.connections, 6);
   assert.deepEqual(sent.items, [
-    { url: "https://cdn.test/play?id=7", filename: "The Film", cookie: "who=cdn.test", kind: "hls" },
+    { url: "https://cdn.test/play?id=7", filename: "The Film", cookie: "who=cdn.test", kind: "hls", variant: 2 },
     { url: "https://files.test/clip.mp4", filename: "", cookie: "who=files.test" },
     { url: "https://video.test/files/extras.zip", filename: "", cookie: "who=video.test" }
   ]);
-  assert.ok(!("variant" in sent), "no quality is named, so the best is taken");
+  assert.ok(!("variant" in sent), "a quality belongs to an item, not to the batch");
+});
+
+test("a quality goes with a stream that has one, as a number, and with nothing else", async () => {
+  const w = start();
+  await w.message({
+    type: "godm-batch",
+    items: [
+      { url: "https://v.test/a", kind: "hls", variant: 0 },
+      { url: "https://v.test/b", kind: "hls", variant: 3 },
+      { url: "https://v.test/c", kind: "hls", variant: -1 },
+      { url: "https://v.test/d", kind: "hls", variant: "2" },
+      { url: "https://v.test/e", kind: "hls", variant: 1.5 },
+      { url: "https://v.test/f", kind: "hls" },
+      { url: "https://v.test/g.zip", variant: 2 },
+      { url: "https://v.test/h", kind: "yt-dlp", variant: 720 }
+    ]
+  });
+  assert.deepEqual(
+    batches(w)[0].items.map((i) => [i.url.split("/").pop(), i.kind, i.variant]),
+    [
+      ["a", "hls", 0],
+      ["b", "hls", 3],
+      ["c", "hls", undefined],
+      ["d", "hls", undefined],
+      ["e", "hls", undefined],
+      ["f", "hls", undefined],
+      ["g.zip", undefined, undefined],
+      ["h", undefined, undefined]
+    ],
+    "the first quality is a quality; a file or a page for yt-dlp has none to name"
+  );
 });
 
 test("a picked batch can say a stream, and nothing else about what an item is", async () => {
@@ -898,4 +949,28 @@ test("only a change to the language, in the settings that sync, remakes the menu
     for (let i = 0; i < 5; i++) await settle();
   }
   assert.deepEqual(w.seen.menus, []);
+});
+
+// ---------- what a page played belongs to the page ----------
+
+// Chrome reports a navigation, one made by history.pushState with no reload as
+// much as any other, as a status of "loading" with the new address (seen in
+// Chrome 155: a pushState gives loading with the url, then complete, then the
+// title), and a change of the fragment alone the same.
+const navigate = (w, tabId, url) => w.events.tabUpdated.fns[0](tabId, { status: "loading", url }, { id: tabId, url });
+
+test("a page that is navigated to, in the page or not, starts with no videos", async () => {
+  const w = start({ session: { "media:7": SNIFFED, "media:8": SNIFFED.slice(0, 1) } });
+  navigate(w, 7, "https://video.test/watch/2");
+  await settle();
+  assert.equal(w.data.session["media:7"], undefined, "what the page before played is not this page's");
+  assert.equal(w.data.session["media:8"].length, 1, "another tab's is its own");
+
+  // What follows, the end of the loading and the new title, says nothing about
+  // which page it is.
+  w.data.session["media:7"] = SNIFFED;
+  w.events.tabUpdated.fns[0](7, { status: "complete" }, PLAYER_TAB);
+  w.events.tabUpdated.fns[0](7, { title: "Video Two" }, PLAYER_TAB);
+  await settle();
+  assert.equal(w.data.session["media:7"].length, SNIFFED.length);
 });

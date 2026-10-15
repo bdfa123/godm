@@ -794,16 +794,20 @@ async function pickLinksFromTab(tab, selectionOnly) {
 
 // submitPicked sends the chosen links as one batch. Cookies are looked up per
 // link because a single page often links to several hosts. A stream the page
-// played goes with its kind, so that godm runs it as one; it names no quality,
-// and the best is taken. Nothing else is passed on as a kind: that is all the
-// host would let through.
+// played goes with its kind, so that godm runs it as one, and with the quality
+// the picker read from its playlist, if it did; with none, the best is taken.
+// Nothing else is passed on as a kind or a quality: that is all the host would
+// let through.
 async function submitPicked(msg) {
   const cfg = await getConfig();
   const items = [];
   for (const it of msg.items || []) {
     if (!/^https?:\/\//i.test(it.url || "")) continue;
     const item = { url: it.url, filename: it.filename || "", cookie: await cookieHeader(it.url) };
-    if (it.kind === "hls") item.kind = "hls";
+    if (it.kind === "hls") {
+      item.kind = "hls";
+      if (Number.isInteger(it.variant) && it.variant >= 0) item.variant = it.variant;
+    }
     items.push(item);
   }
   if (!items.length) return { ok: false, error: tr("err_nothing_selected") };

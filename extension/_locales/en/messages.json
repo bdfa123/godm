@@ -423,7 +423,21 @@
     "message": "Videos this page played"
   },
   "picker_video_hls": {
-    "message": "HLS stream · best quality"
+    "message": "HLS stream"
+  },
+  "picker_hls_best_of": {
+    "message": "Best of $COUNT$ qualities ($BEST$)",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "best": {
+        "content": "$2"
+      }
+    }
+  },
+  "picker_hls_single": {
+    "message": "One quality"
   },
   "picker_empty": {
     "message": "No links match."

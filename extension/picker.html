@@ -42,6 +42,8 @@
   td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
   tr:hover td { background: var(--panel); }
   tr.off td { color: var(--faint); }
+  tr.blocked td { cursor: default; }
+  tr.blocked .text { color: var(--err); }
   .name { font-weight: 600; word-break: break-all; }
   .text { color: var(--muted); font-size: 12px; }
   .url { color: var(--faint); font-size: 11.5px; word-break: break-all; }

@@ -423,7 +423,21 @@
     "message": "此页面播放过的视频"
   },
   "picker_video_hls": {
-    "message": "HLS 流 · 最高清晰度"
+    "message": "HLS 流"
+  },
+  "picker_hls_best_of": {
+    "message": "共 $COUNT$ 种清晰度，取最高（$BEST$）",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      },
+      "best": {
+        "content": "$2"
+      }
+    }
+  },
+  "picker_hls_single": {
+    "message": "单一清晰度"
   },
   "picker_empty": {
     "message": "没有匹配的链接。"

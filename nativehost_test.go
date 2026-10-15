@@ -266,6 +266,59 @@ func TestNativeBatchCarriesAStreamsKind(t *testing.T) {
 	}
 }
 
+// The picker reads a stream before it offers it, as the popup does, and sends
+// the quality that is best, by the number the playlist gave it. Sent as a
+// number, it is the same request the popup makes of the same stream, which the
+// daemon then knows for the same download; sent as "the best" it would not be,
+// and the stream would be downloaded twice. A number is only the quality of a
+// stream: on a file, or on the message as a whole, it means nothing, and a
+// number that is not one is the best.
+func TestNativeBatchStreamKeepsTheQualityItWasGiven(t *testing.T) {
+	two, zero, minus := 2, 0, -3
+	jobs := sentBatch(t, nativeRequest{
+		Variant: &two, // the message's own, which must not become every item's
+		Items: []batchItem{
+			{URL: "https://v.test/a", Kind: "hls", Variant: &two},
+			{URL: "https://v.test/b", Kind: "hls", Variant: &zero},
+			{URL: "https://v.test/c", Kind: "hls"},
+			{URL: "https://v.test/d", Kind: "hls", Variant: &minus},
+			{URL: "https://v.test/e.zip", Variant: &two},
+			{URL: "https://v.test/f", Kind: "bt", Variant: &two},
+		},
+	})
+	var got []int
+	for _, j := range jobs {
+		got = append(got, j.Variant)
+	}
+	if want := []int{2, 0, -1, -1, -1, -1}; !reflect.DeepEqual(got, want) {
+		t.Errorf("qualities that reached the daemon = %v, want %v", got, want)
+	}
+}
+
+// The point of that number: a stream the popup is already downloading, and
+// picks the best quality of by its number, is the same download when the picker
+// is asked for it, and is not made a second time with a numbered name. One sent
+// without a number, as the picker does for a stream it has not read, is not
+// known to be the same, since only reading the playlist says which is best.
+func TestAStreamFromThePickerIsTheSameDownloadAsFromThePopup(t *testing.T) {
+	const stream = "https://cdn.test/hls/master.m3u8"
+	best := 1
+	popup := nativeRequest{Type: "download", URL: stream, Kind: "hls", Variant: &best}.job(stream, "The Film", "")
+	dir := t.TempDir()
+	running := &managedTask{req: popup, outDir: dir, view: TaskView{State: StateRunning}}
+
+	jobs := sentBatch(t, nativeRequest{Items: []batchItem{
+		{URL: stream, Kind: "hls", Variant: &best},
+		{URL: stream, Kind: "hls"},
+	}})
+	if !sameActiveDownload(running, jobs[0], dir) {
+		t.Errorf("the picker's request (%+v) is not the popup's (%+v), and the stream would be downloaded twice", jobs[0], popup)
+	}
+	if sameActiveDownload(running, jobs[1], dir) {
+		t.Errorf("a request that names no quality was taken for the popup's, which names the best")
+	}
+}
+
 // A batch may hold files and streams and nothing else. The extension can ask
 // for a torrent or a yt-dlp download in a message of their own; a batch item
 // that claims to be one is only a link, and neither a kind named on the

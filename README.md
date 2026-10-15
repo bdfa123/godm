@@ -123,8 +123,12 @@ it back on. Links picked in bulk skip the dialog.
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go. The list also holds the videos the page played
 while you watched it, which are not in its HTML: files and HLS streams, in a
-group of their own at the top (a selection leaves them out). A stream is
-queued at its best quality, as one added without a choice is.
+group of their own at the top (a selection leaves them out). Each stream's
+playlist is read as the list opens, as the popup does, so its row says whether
+it is one quality or the best of several and how long it runs, and a stream
+godm cannot download (a live one, a protected one, one whose sound is kept
+apart) gives its reason and cannot be ticked. A stream is queued at its best
+quality.
 
 A magnet link never turns into a download the extension could see, so a small
 script in every page watches for a click on one. It acts only on a click you

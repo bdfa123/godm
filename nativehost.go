@@ -50,6 +50,9 @@ type batchItem struct {
 	// Kind is "hls" for a stream playlist the page played, which the picker
 	// lists beside the page's links, and empty for a file. See batchKind.
 	Kind string `json:"kind"`
+	// Variant is the quality of that stream, by its number in the playlist. See
+	// batchVariant.
+	Variant *int `json:"variant"`
 }
 
 // batchKind is the kind an item of a batch is passed on with. A batch is links
@@ -64,6 +67,19 @@ func batchKind(kind string) string {
 		return "hls"
 	}
 	return ""
+}
+
+// batchVariant is the quality an item of a batch is passed on with: the number
+// the extension read from the stream's playlist, for a stream, and the best
+// otherwise. Only a stream has qualities, and the message's own variant belongs
+// to a download made on its own, so neither is let onto the items of a batch.
+// A number the playlist has no quality for is the best too, which the daemon
+// settles when it reads the playlist.
+func batchVariant(kind string, variant *int) int {
+	if kind != "hls" || variant == nil || *variant < 0 {
+		return -1
+	}
+	return *variant
 }
 
 type nativeResponse struct {
@@ -201,10 +217,11 @@ func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 		jobs := make([]jobRequest, 0, len(req.Items))
 		for _, it := range req.Items {
 			// The kind belongs to the item. The message's own would make every
-			// link of a mixed batch the same thing, and a stream has no quality
-			// to choose here: with none named the daemon takes the best.
+			// link of a mixed batch the same thing, and so would its quality.
+			// A stream with no quality named is given the best by the daemon.
 			job := req.job(it.URL, it.Filename, it.Cookie)
 			job.Kind = batchKind(it.Kind)
+			job.Variant = batchVariant(job.Kind, it.Variant)
 			jobs = append(jobs, job)
 		}
 		ids, errs, err := c.submitBatch(jobs)

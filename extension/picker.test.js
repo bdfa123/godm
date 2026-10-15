@@ -53,9 +53,27 @@ const LINKS = [
 ];
 const DATA = { page: PAGE, title: "The Film - video.test", links: LINKS, videos: SNIFFED };
 
+// What godm says of a playlist it was asked to read: a master with three
+// qualities, the best being the third, and a playlist that is one quality.
+const MASTER_INFO = {
+  kind: "hls",
+  duration: 5530,
+  segments: 1383,
+  best: 2,
+  variants: [
+    { index: 0, label: "480p · 0.8 Mbps" },
+    { index: 1, label: "720p · 2.5 Mbps" },
+    { index: 2, label: "1080p · 5.2 Mbps" }
+  ]
+};
+const MEDIA_INFO = { kind: "hls", duration: 12, segments: 2, best: -1 };
+const LIVE = { ok: false, error: "this is a live stream with no end marker; recording live streams is not supported yet" };
+
 // open runs the picker with this list of links and videos, as the worker would
-// have left it. language is what the options page saved, if anything.
-async function open(data, language) {
+// have left it. language is what the options page saved, if anything. inspect
+// answers the worker's reading of a playlist, which the picker asks for as the
+// popup does; by default every playlist is a master.
+async function open(data, language, inspect) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -65,6 +83,7 @@ async function open(data, language) {
   doc.title = "";
 
   const sent = [];
+  const asked = [];
   const closed = [];
   const chrome = Object.assign({}, install("en"), {
     storage: {
@@ -74,6 +93,10 @@ async function open(data, language) {
     runtime: {
       getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
       sendMessage: async (message) => {
+        if (message.type === "godm-media-inspect") {
+          asked.push(message);
+          return (inspect || (() => ({ ok: true, info: MASTER_INFO })))(message);
+        }
         sent.push(message);
         return { ok: true, ids: message.items.map((_, i) => "t" + i) };
       }
@@ -95,7 +118,7 @@ async function open(data, language) {
   }
   await settle();
   install("en");
-  return { ui, doc, sent, closed };
+  return { ui, doc, sent, asked, closed };
 }
 
 const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
@@ -140,7 +163,7 @@ test("the videos a page played are listed first, each with its name, type and si
   const [stream, file] = rows(p);
   assert.equal(stream.name, "The Film - video.test", "a playlist is told by the page's name, not index.m3u8");
   assert.equal(stream.type, "HLS");
-  assert.equal(stream.text, "HLS stream · best quality");
+  assert.equal(stream.text, "Best of 3 qualities (1080p · 5.2 Mbps) · 1:32:10 · 1383 segments");
   assert.equal(file.name, "clip.mp4");
   assert.equal(file.type, "FILE");
   assert.equal(file.text, "video/mp4 · 80.0 MiB");
@@ -190,7 +213,7 @@ test("a stream that was picked is sent as one, named for the page, with the rest
   assert.equal(p.sent[0].type, "godm-batch");
   assert.equal(p.sent[0].referrer, PAGE, "the page that played them is the referrer");
   assert.deepEqual(p.sent[0].items, [
-    { url: HLS, kind: "hls", filename: "The Film - video.test" },
+    { url: HLS, kind: "hls", filename: "The Film - video.test", variant: 2 },
     { url: CLIP },
     { url: ZIP }
   ]);
@@ -204,7 +227,7 @@ test("a stream with no name of its own is named for the page", async () => {
   clickRow(p, HLS);
   p.ui.go.fire("click");
   await settle();
-  assert.deepEqual(p.sent[0].items, [{ url: HLS, kind: "hls", filename: "The Film" }]);
+  assert.deepEqual(p.sent[0].items, [{ url: HLS, kind: "hls", filename: "The Film", variant: 2 }]);
 });
 
 test("a page's own links are sent as they always were, and a stream is the only thing with a kind", async () => {
@@ -230,7 +253,7 @@ test("a file the page links to and also played is listed once, as the video it i
 test("everything in it is said in the language that was chosen", async () => {
   const p = await open(DATA, "zh_CN");
   assert.equal(chips(p)[0].label, "此页面播放过的视频");
-  assert.equal(rows(p)[0].text, "HLS 流 · 最高清晰度");
+  assert.equal(rows(p)[0].text, "共 3 种清晰度，取最高（1080p · 5.2 Mbps） · 1:32:10 · 1383 个分片");
   assert.equal(p.ui.go.textContent, "下载 2 个文件");
 });
 
@@ -238,4 +261,117 @@ test("a list that has expired says so", async () => {
   const p = await open(undefined);
   assert.equal(p.ui.title.textContent, "This link list has expired");
   assert.equal(p.ui.empty.hidden, false);
+});
+
+// ---------- what the picker finds out about a stream before it offers it ----------
+
+const MEDIA = "https://cdn.test/hls/720p/index.m3u8";
+const LIVE_URL = "https://cdn.test/live/index.m3u8";
+const two = (url, kind) => ({ url, kind: "hls", type: "", size: 0, title: "The Film - video.test" });
+
+// answers makes a worker that knows what each playlist is, by its address.
+const answers = (table) => (message) => table[message.url] || { ok: true, info: MASTER_INFO };
+
+test("a master playlist and a playlist of one quality are not said to be the same", async () => {
+  const videos = [two(HLS), two(MEDIA)];
+  const p = await open({ page: PAGE, title: "", links: [], videos }, undefined, answers({ [MEDIA]: { ok: true, info: MEDIA_INFO } }));
+  const [master, single] = rows(p);
+  assert.equal(master.text, "Best of 3 qualities (1080p · 5.2 Mbps) · 1:32:10 · 1383 segments");
+  assert.equal(single.text, "One quality · 0:12 · 2 segments");
+  assert.equal(master.name, single.name, "the page's name is all both have");
+  assert.notEqual(master.text, single.text);
+});
+
+test("a playlist is asked about as the popup asks, with the page it was played in", async () => {
+  const p = await open(DATA);
+  assert.deepEqual(p.asked, [{ type: "godm-media-inspect", url: HLS, kind: "hls", page: PAGE }], "the one stream, and no file");
+});
+
+test("until the answer is in a stream claims nothing about its quality, and can be picked", async () => {
+  const p = await open(DATA, undefined, () => new Promise(() => {}));
+  assert.equal(rows(p)[0].text, "HLS stream · reading the playlist…");
+  clickRow(p, HLS);
+  p.ui.go.fire("click");
+  await settle();
+  assert.deepEqual(p.sent[0].items[0], { url: HLS, kind: "hls", filename: "The Film - video.test" }, "no quality: godm takes the best");
+});
+
+test("the quality that is best goes with a stream, and a stream of one quality names none", async () => {
+  const videos = [two(HLS), two(MEDIA)];
+  const p = await open({ page: PAGE, title: "", links: [], videos }, undefined, answers({ [MEDIA]: { ok: true, info: MEDIA_INFO } }));
+  clickRow(p, HLS);
+  clickRow(p, MEDIA);
+  p.ui.go.fire("click");
+  await settle();
+  assert.deepEqual(p.sent[0].items.map((i) => i.variant), [2, undefined]);
+});
+
+test("a stream godm will not download says why, and cannot be picked", async () => {
+  const videos = [two(HLS), two(LIVE_URL)];
+  const p = await open({ page: PAGE, title: "", links: [], videos }, undefined, answers({ [LIVE_URL]: LIVE }));
+  const live = rows(p)[1];
+  assert.equal(live.text, LIVE.error);
+  assert.match(p.ui.rows.innerHTML, /<tr class="off blocked" data-url="https:\/\/cdn.test\/live\/index.m3u8">\s*<td><input type="checkbox" disabled>/);
+
+  clickRow(p, LIVE_URL);
+  assert.equal(rows(p)[1].checked, false, "a press on the row does nothing");
+  p.ui.selAll.fire("click");
+  assert.deepEqual(rows(p).map((r) => r.checked), [true, false], "nor does all shown");
+  p.ui.toggleShown.fire("change", { target: { checked: true } });
+  assert.deepEqual(rows(p).map((r) => r.checked), [true, false], "nor does the box at the top");
+  assert.equal(p.ui.toggleShown.checked, true, "which is ticked when everything that can be is");
+  assert.equal(p.ui.go.textContent, "Download");
+
+  p.ui.go.fire("click");
+  await settle();
+  assert.deepEqual(p.sent[0].items.map((i) => i.url), [HLS]);
+});
+
+test("a stream picked before godm turned it down is put back", async () => {
+  const release = {};
+  const p = await open({ page: PAGE, title: "", links: [], videos: [two(LIVE_URL)] }, undefined, () => new Promise((r) => (release.answer = r)));
+  clickRow(p, LIVE_URL);
+  assert.equal(p.ui.go.disabled, false);
+  release.answer(LIVE);
+  await settle();
+  assert.equal(rows(p)[0].checked, false);
+  assert.equal(p.ui.go.disabled, true, "there is nothing left to send");
+});
+
+test("a playlist that could not be read is turned away with the reason given", async () => {
+  const p = await open(DATA, undefined, () => ({ ok: false, error: "native host unreachable" }));
+  assert.equal(rows(p)[0].text, "native host unreachable");
+  const none = await open(DATA, undefined, () => undefined);
+  assert.equal(rows(none)[0].text, "could not read the playlist", "an answer with no reason has one made up for it");
+  const gone = await open(DATA, undefined, () => {
+    throw new Error("Extension context invalidated");
+  });
+  assert.equal(rows(gone)[0].text, "could not read the playlist");
+  assert.match(gone.ui.rows.innerHTML, /blocked/);
+});
+
+test("a page that played many streams has only the first few read, three at a time", async () => {
+  const videos = Array.from({ length: 10 }, (_, i) => two("https://cdn.test/s" + i + "/index.m3u8"));
+  let active = 0;
+  let most = 0;
+  const p = await open({ page: PAGE, title: "", links: [], videos }, undefined, async () => {
+    active++;
+    most = Math.max(most, active);
+    await settle();
+    active--;
+    return { ok: true, info: MEDIA_INFO };
+  });
+  for (let i = 0; i < 10; i++) await settle();
+  assert.equal(p.asked.length, 6);
+  assert.equal(most, 3);
+  const texts = rows(p).map((r) => r.text);
+  assert.equal(texts.slice(0, 6).every((t) => t.startsWith("One quality")), true);
+  assert.deepEqual(texts.slice(6), ["HLS stream", "HLS stream", "HLS stream", "HLS stream"], "the rest claim nothing");
+});
+
+test("the reason a stream is turned away is said in the language that was chosen", async () => {
+  const p = await open(DATA, "zh_CN", () => new Promise(() => {}));
+  assert.equal(rows(p)[0].text, "HLS 流 · 正在读取播放列表…");
+  const single = await open({ page: PAGE, title: "", links: [], videos: [two(MEDIA)] }, "zh_CN", () => ({ ok: true, info: MEDIA_INFO }));
+  assert.equal(rows(single)[0].text, "单一清晰度 · 0:12 · 2 个分片");
 });
