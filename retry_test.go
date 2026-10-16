@@ -495,19 +495,29 @@ func TestTheLimitReportedDuringACapTryIsTheCap(t *testing.T) {
 	if len(h.refusals()) < 5 {
 		t.Fatalf("only %d connections were turned away, the cap was hardly tried", len(h.refusals()))
 	}
-	for i, n := range limits {
-		if i > 0 && n != 3 {
-			t.Fatalf("limit reported over time: %v; once the cap was learned it is 3, never %d", limits, n)
-		}
+	// Once the cap is learned, the limit reported is the cap and never the
+	// one connection more a try lets through. The cap can be learned one
+	// short, when one of the server's three was between its requests at the
+	// refusal, and then rises as soon as three are seen being served; that
+	// is the cap correcting itself, not a try showing.
+	if len(limits) < 2 || limits[len(limits)-1] != 3 {
+		t.Fatalf("limit reported over time: %v; the cap of 3 was never learned", limits)
 	}
-	if len(limits) < 2 {
-		t.Fatalf("limit reported over time: %v; the cap was never learned", limits)
+	for i, n := range limits {
+		if i > 0 && n > 3 {
+			t.Fatalf("limit reported over time: %v; once the cap was learned it is 3 at most, never %d", limits, n)
+		}
 	}
 	// The cap itself is reported too, apart from the eight asked for, so that
 	// the manager can say the server allows only three: none until it is
 	// learned, then three, a try at a fourth notwithstanding.
-	if n := len(caps); n == 0 || caps[n-1] != 3 || n > 2 || (n == 2 && caps[0] != 0) {
+	if n := len(caps); n == 0 || caps[0] != 0 || caps[n-1] != 3 {
 		t.Errorf("the server's cap reported over time: %v, want 0 and then 3", caps)
+	}
+	for _, c := range caps {
+		if c > 3 {
+			t.Errorf("the server's cap reported over time: %v; a try at a fourth showed as the cap", caps)
+		}
 	}
 }
 
