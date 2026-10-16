@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -155,18 +156,31 @@ func taskOf(m *Manager, id string) *managedTask {
 	return m.get(id)
 }
 
-// waitLoaded waits for a task's torrent to be in godm's client.
-// waitTorrentDone waits for a torrent task to finish, and when it does not,
-// fails with what the torrent and its seeder were doing: a stall on a CI
-// runner, which has not been seen anywhere else, then says whether the
-// connection went (no peers), or stayed and moved nothing.
-func waitTorrentDone(t *testing.T, m *Manager, id string, seed *peer, within time.Duration) {
+// waitTorrentDone waits for a torrent task to finish. How long that takes says
+// more about the machine than about the torrent: on GitHub's Windows runners,
+// with the tests' files on the system disk, about one run in eight loses
+// seconds to the disk, and a download of eight seconds has taken twenty-four.
+// What a torrent must not do is stand still, so it fails when no byte has come
+// for the time stalled, or when the whole wait has gone past three minutes,
+// and says what the torrent and its seeder were doing: whether the connection
+// went (no peers), or stayed and moved nothing.
+func waitTorrentDone(t *testing.T, m *Manager, id string, seed *peer, stalled time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	const most = 3 * time.Minute
+	begun := time.Now()
 	var trace strings.Builder
-	next := time.Now()
+	next, last, moved := begun, int64(-1), begun
 	for !stateIs(m, id, StateDone)() {
 		now := time.Now()
+		var have int64
+		if mt := taskOf(m, id); mt != nil {
+			if tor := m.bt.loadedFor(mt); tor != nil {
+				have = tor.BytesCompleted()
+			}
+		}
+		if have != last {
+			last, moved = have, now
+		}
 		if !now.Before(next) {
 			v, _ := findTask(m, id)
 			line := fmt.Sprintf("\n  %s: task %s %q", now.Format("15:04:05.0"), v.State, v.Error)
@@ -183,13 +197,17 @@ func waitTorrentDone(t *testing.T, m *Manager, id string, seed *peer, within tim
 			trace.WriteString(line)
 			next = now.Add(2 * time.Second)
 		}
-		if now.After(deadline) {
-			t.Fatalf("timed out waiting for completion:%s", trace.String())
+		if now.Sub(moved) > stalled {
+			t.Fatalf("no byte arrived for %s (%s since the wait began):%s", now.Sub(moved).Round(time.Millisecond), now.Sub(begun).Round(time.Millisecond), trace.String())
+		}
+		if now.Sub(begun) > most {
+			t.Fatalf("still not done %s after the wait began:%s", now.Sub(begun).Round(time.Second), trace.String())
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
 }
 
+// waitLoaded waits for a task's torrent to be in godm's client.
 func waitLoaded(t *testing.T, m *Manager, id string) *torrent.Torrent {
 	t.Helper()
 	var tor *torrent.Torrent
@@ -1310,6 +1328,100 @@ func TestADuplicateTorrentLeavesTheOriginalAlone(t *testing.T) {
 	}
 }
 
+// holdsLimit watches what a torrent completes for the time d, and for twice as
+// long again if it has to, and judges its pace against a limit in bytes per
+// second. All of the stretch together must come to no more than the limit
+// allows, with slack bytes besides for what a change of limit lets through
+// early; and some second of it must have come at no less than six tenths of
+// the limit, counting from half a second after the change.
+//
+// It does not ask for the average, because a runner whose system disk now
+// and then slows the transfer for a second or two takes that much out of any
+// stretch, and a limit does not say how much a torrent gets when it does not
+// get it all. A limit that is not in force shows in the whole stretch, as too
+// much; a torrent starved by the change, or held far under the limit, shows in
+// there being no second at the pace.
+func holdsLimit(t *testing.T, tor *torrent.Torrent, limit int64, d time.Duration, slack int64) {
+	t.Helper()
+	type sample struct {
+		at   time.Time
+		have int64
+	}
+	start := time.Now()
+	samples := []sample{{start, tor.BytesCompleted()}}
+	best := 0.0
+	for {
+		time.Sleep(50 * time.Millisecond)
+		now := sample{time.Now(), tor.BytesCompleted()}
+		samples = append(samples, now)
+		// The latest second that began after the change had settled.
+		for i := len(samples) - 2; i >= 0 && samples[i].at.Sub(start) >= 500*time.Millisecond; i-- {
+			if age := now.at.Sub(samples[i].at); age >= time.Second {
+				best = max(best, float64(now.have-samples[i].have)/age.Seconds())
+				break
+			}
+		}
+		elapsed := now.at.Sub(start)
+		if elapsed >= d && (best >= 0.6*float64(limit) || elapsed >= 3*d) {
+			break
+		}
+	}
+	last := samples[len(samples)-1]
+	var bySecond strings.Builder
+	for sec, from := 1, 0; ; sec++ {
+		to := slices.IndexFunc(samples[from:], func(s sample) bool { return s.at.Sub(start) >= time.Duration(sec)*time.Second })
+		if to < 0 {
+			break
+		}
+		fmt.Fprintf(&bySecond, " %d", samples[from+to].have-samples[from].have)
+		from += to
+	}
+	elapsed := last.at.Sub(start)
+	t.Logf("under a limit of %d bytes/s: %d bytes in %s, the best second %.0f; by the second:%s", limit, last.have-samples[0].have, elapsed.Round(time.Millisecond), best, bySecond.String())
+	if got, most := last.have-samples[0].have, int64(1.4*float64(limit)*elapsed.Seconds())+slack; got > most {
+		t.Errorf("under a limit of %d bytes/s, %d bytes arrived in %s; no more than %d should have", limit, got, elapsed.Round(time.Millisecond), most)
+	}
+	if best < 0.6*float64(limit) {
+		t.Errorf("under a limit of %d bytes/s, no second of %s came at more than %.0f bytes/s, as if the limit were lower", limit, elapsed.Round(time.Millisecond), best)
+	}
+}
+
+// waitForPace waits until a stretch of the length over, of what the torrent
+// completes, has come at atLeast bytes per second, and fails if none has
+// within the time given. The fastest stretch is the one to ask for: how long
+// the rest takes, or how much comes in a given time, is as much the disk's and
+// the machine's as the limit's. The stretch has to be long enough that the
+// reads which were out when the limit changed, and are paid for late, cannot
+// make up a pace the limit would not have allowed.
+func waitForPace(t *testing.T, tor *torrent.Torrent, atLeast float64, over, within time.Duration, what string) {
+	t.Helper()
+	type sample struct {
+		at   time.Time
+		have int64
+	}
+	start := time.Now()
+	samples := []sample{{start, tor.BytesCompleted()}}
+	best := 0.0
+	for {
+		time.Sleep(25 * time.Millisecond)
+		now := sample{time.Now(), tor.BytesCompleted()}
+		samples = append(samples, now)
+		for i := len(samples) - 2; i >= 0; i-- {
+			if age := now.at.Sub(samples[i].at); age >= over {
+				best = max(best, float64(now.have-samples[i].have)/age.Seconds())
+				break
+			}
+		}
+		if best >= atLeast {
+			t.Logf("%s: %.0f bytes/s after %s", what, best, now.at.Sub(start).Round(time.Millisecond))
+			return
+		}
+		if now.at.Sub(start) > within {
+			t.Fatalf("%s: no %s of the %s came at %.0f bytes/s or more; the fastest came at %.0f", what, over, within, atLeast, best)
+		}
+	}
+}
+
 func TestTorrentsKeepToTheOverallSpeedLimit(t *testing.T) {
 	const limit = 256 << 10
 	src := t.TempDir()
@@ -1325,13 +1437,7 @@ func TestTorrentsKeepToTheOverallSpeedLimit(t *testing.T) {
 	}
 	tor := waitLoaded(t, m, id)
 	waitFor(t, 10*time.Second, "the file list", func() bool { return tor.Info() != nil })
-	start, before := time.Now(), tor.BytesCompleted()
-	time.Sleep(3 * time.Second)
-	got := tor.BytesCompleted() - before
-	want := int64(time.Since(start).Seconds() * limit)
-	if got < want*6/10 || got > want*14/10 {
-		t.Errorf("under a limit of %d bytes/s, %d bytes arrived in %s; want about %d", limit, got, time.Since(start).Round(time.Millisecond), want)
-	}
+	holdsLimit(t, tor, limit, 3*time.Second, 0)
 
 	// Lifting the limit reaches the torrent that is already running. How long
 	// the rest takes says little, as the connection can stand still for a few
@@ -1409,13 +1515,7 @@ func TestTheSpeedLimitChangesUnderARunningTorrent(t *testing.T) {
 	_, oneRead := btDownloadLimit(high)
 	holds := func(limit int64, d time.Duration) {
 		t.Helper()
-		start, before := time.Now(), tor.BytesCompleted()
-		time.Sleep(d)
-		got := tor.BytesCompleted() - before
-		want := int64(time.Since(start).Seconds() * float64(limit))
-		if got < want*6/10-int64(oneRead) || got > want*14/10+int64(oneRead) {
-			t.Errorf("with the limit changed to %d bytes/s, %d bytes arrived in %s; want about %d", limit, got, time.Since(start).Round(time.Millisecond), want)
-		}
+		holdsLimit(t, tor, limit, d, int64(oneRead))
 	}
 
 	m.SetSpeedLimit(low)
@@ -1424,13 +1524,12 @@ func TestTheSpeedLimitChangesUnderARunningTorrent(t *testing.T) {
 	m.SetSpeedLimit(middle)
 	holds(middle, 3*time.Second)
 
-	// With no limit the peer sets the pace, three times the last limit: two
-	// seconds of it would take six under that limit.
+	// With no limit the peer sets the pace, three times the last limit. How
+	// soon it gets there is no matter, only that it does: a limit still in
+	// force would keep every second under two and a half times itself, even
+	// with the read it owes from before.
 	m.SetSpeedLimit(0)
-	before := tor.BytesCompleted()
-	waitFor(t, 4*time.Second, "the peer's own pace once the limit is lifted", func() bool {
-		return tor.BytesCompleted()-before >= 2*peerRate
-	})
+	waitForPace(t, tor, 2.5*middle, time.Second, 20*time.Second, "the peer's own pace once the limit is lifted")
 
 	// A limit that comes back finds reads that began before it went away:
 	// sized under the high limit, still out through the time without one,

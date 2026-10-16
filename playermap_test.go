@@ -445,7 +445,12 @@ func TestATorrentBeingStreamedHasAMapOfItsPieces(t *testing.T) {
 	}
 	size := int64(len(film))
 	var pm playerMap
-	waitFor(t, 2500*time.Millisecond, "a map that has what the player was sent", func() bool {
+	// The map is written every 50ms. The waits in this test are for it to
+	// follow the torrent and not for the torrent to be quick, which on GitHub's
+	// Windows runners, where the system disk now and then stalls for seconds,
+	// it is not always: they are long enough to tell a map that never comes
+	// from one that is late, and the torrent itself is held only to keep moving.
+	waitFor(t, 10*time.Second, "a map that has what the player was sent", func() bool {
 		return readMap(file, &pm) && covers(pm.Have, from, to+1)
 	})
 	if pm.Size != size || pm.State != StateRunning || pm.Complete {
@@ -463,13 +468,13 @@ func TestATorrentBeingStreamedHasAMapOfItsPieces(t *testing.T) {
 	if _, err := io.ReadFull(resp.Body, make([]byte, 32<<10)); err != nil {
 		t.Fatal(err)
 	}
-	waitTorrentDone(t, m, id, seed, 40*time.Second)
+	waitTorrentDone(t, m, id, seed, 30*time.Second)
 	// All of the film and nothing of the files beside it.
-	waitFor(t, 5*time.Second, "a map of the whole film", func() bool {
+	waitFor(t, 15*time.Second, "a map of the whole film", func() bool {
 		return readMap(file, &pm) && pm.Complete && fmt.Sprint(pm.Have) == fmt.Sprintf("[[0 %d]]", size)
 	})
 	m.Remove(id, false)
-	waitFor(t, 5*time.Second, "the map to go with the torrent", noFile(file))
+	waitFor(t, 15*time.Second, "the map to go with the torrent", noFile(file))
 }
 
 // A map a godm left behind when it stopped is swept away by the next one to
