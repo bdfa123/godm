@@ -65,8 +65,16 @@ jobs:
         run: go vet ./...
 
       # Some of the tests are timing-sensitive, so run each once and do not
-      # reuse a cached result from a different machine.
+      # reuse a cached result from a different machine. They also write files,
+      # and the system disk, where Windows keeps the temporary folder, now and
+      # then stalls for seconds under the torrent tests' small writes: about
+      # one run in eight of the map test lost between one and sixteen seconds
+      # there, and none of eighty did with their files on the runner's own
+      # temporary disk, which is where they go.
       - name: go test
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         run: go test -count=1 ./...
 
       # bash expands the glob, so every extension/*.test.js runs on any Node.
