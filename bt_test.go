@@ -1328,9 +1328,9 @@ func TestADuplicateTorrentLeavesTheOriginalAlone(t *testing.T) {
 	}
 }
 
-// holdsLimit watches what a torrent completes for the time d, and for twice as
-// long again if it has to, and judges its pace against a limit in bytes per
-// second. All of the stretch together must come to no more than the limit
+// holdsLimit watches what a torrent completes for the time d, and for up to
+// five times that if it has to, and judges its pace against a limit in bytes
+// per second. All of the stretch together must come to no more than the limit
 // allows, with slack bytes besides for what a change of limit lets through
 // early; and some second of it must have come at no less than six tenths of
 // the limit, counting from half a second after the change.
@@ -1362,7 +1362,12 @@ func holdsLimit(t *testing.T, tor *torrent.Torrent, limit int64, d time.Duration
 			}
 		}
 		elapsed := now.at.Sub(start)
-		if elapsed >= d && (best >= 0.6*float64(limit) || elapsed >= 3*d) {
+		// A system disk that is slow for a second or two takes that much out
+		// of the stretch, and one has held a torrent under half of a limit of
+		// 256 KB/s for nine seconds on end. The films are long enough to wait
+		// out five times as much as the stretch asks for, and a torrent that is
+		// held for longer than that is not one a pace can be judged on.
+		if elapsed >= d && (best >= 0.6*float64(limit) || elapsed >= 5*d) {
 			break
 		}
 	}
