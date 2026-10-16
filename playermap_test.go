@@ -879,7 +879,13 @@ func TestTheMapScriptInMPV(t *testing.T) {
 	c := startMPV(t, exe, playerLaunch{Target: film, Title: "film", MapFile: mapFile, Lang: langEN}, script,
 		"--pause", "--cache=no", "--demuxer-readahead-secs=0")
 
-	s := c.wait(t, "the map", func(s overlayState) bool { return s.Known })
+	// The map is read as soon as the script starts, a good while before mpv has
+	// opened the file; until it has, it knows neither the duration nor where it
+	// is in the file, and the overlay says -1 of both and of what follows from
+	// them. A loaded machine can leave it like that for seconds.
+	s := c.wait(t, "the map, and the film's duration and place", func(s overlayState) bool {
+		return s.Known && s.Ranges == 1 && s.Need > 0 && s.Playhead >= 0 && s.MapReady >= 0
+	})
 	near := func(a, b float64) bool { return a > b-1 && a < b+1 }
 	// The playhead is the byte mpv plays, a little past the start by what its
 	// decoder holds.
