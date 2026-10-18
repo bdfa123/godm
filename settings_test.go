@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -144,6 +146,89 @@ func TestSettingsEndpointControlsSorting(t *testing.T) {
 	}
 	if _, got = call("GET", "", "tok"); got["folders"].(map[string]any)["video"] != "Movies" {
 		t.Error("a refused request changed a folder")
+	}
+}
+
+// The folder downloads go to by default is chosen in Settings, and a download
+// added afterwards goes there; going back to the folder godm was started with
+// is choosing nothing.
+func TestTheDefaultDownloadFolderIsChosenInSettings(t *testing.T) {
+	started := t.TempDir()
+	m := NewManager(started, 2)
+	call := settingsAPI(t, m)
+
+	chosen := filepath.Join(t.TempDir(), "Films", "New") // not there yet
+	body, _ := json.Marshal(map[string]string{"download_dir": chosen})
+	code, got := call("POST", string(body), "tok")
+	if code != 200 || got["out_dir"] != chosen || got["download_dir"] != chosen || got["started_dir"] != started {
+		t.Fatalf("POST = %d %v, want %s chosen over %s", code, got, chosen, started)
+	}
+	if fi, err := os.Stat(chosen); err != nil || !fi.IsDir() {
+		t.Fatalf("the chosen folder was not made: %v", err)
+	}
+	if left, _ := os.ReadDir(chosen); len(left) != 0 {
+		t.Errorf("checking the folder left %d files in it", len(left))
+	}
+	if got := m.downloadDir(jobRequest{Filename: "a.zip"}); got != chosen {
+		t.Errorf("a new download goes to %s, want %s", got, chosen)
+	}
+	if got := m.OutDir(); got != chosen {
+		t.Errorf("OutDir = %s, want %s", got, chosen)
+	}
+	// A folder the request names still wins, and sorting works inside the
+	// chosen folder.
+	if got := m.downloadDir(jobRequest{Filename: "a.zip", OutDir: started}); got != started {
+		t.Errorf("a download that names its folder goes to %s, want %s", got, started)
+	}
+	sortOn(t, m)
+	if got := m.downloadDir(jobRequest{Filename: "a.mkv"}); got != filepath.Join(chosen, "Video") {
+		t.Errorf("a sorted video goes to %s, want it inside the chosen folder", got)
+	}
+
+	// Choosing the folder godm was started with, or nothing, goes back to it.
+	for _, back := range []string{started, ""} {
+		body, _ = json.Marshal(map[string]string{"download_dir": back})
+		if code, got = call("POST", string(body), "tok"); code != 200 || got["download_dir"] != "" || got["out_dir"] != started {
+			t.Errorf("choosing %q = %d %v, want no choice kept and %s in use", back, code, got, started)
+		}
+	}
+}
+
+func TestADownloadFolderThatCannotTakeDownloadsIsRefused(t *testing.T) {
+	m := NewManager(t.TempDir(), 2)
+	call := settingsAPI(t, m)
+	file := filepath.Join(t.TempDir(), "a file")
+	os.WriteFile(file, []byte("x"), 0o600)
+	for _, bad := range []string{"Downloads", `..\x`, filepath.Join(file, "sub")} {
+		body, _ := json.Marshal(map[string]string{"download_dir": bad})
+		if code, _ := call("POST", string(body), "tok"); code != http.StatusBadRequest {
+			t.Errorf("%q = %d, want 400", bad, code)
+		}
+	}
+	if got := m.OutDir(); got != m.outDir {
+		t.Errorf("a refused folder was taken: %s", got)
+	}
+}
+
+func TestTheChosenDownloadFolderIsKept(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "tasks.json")
+	m := NewManager(dir, 2)
+	m.store = store
+	chosen := t.TempDir()
+	if err := m.UpdateSettings(settingsUpdate{DownloadDir: &chosen}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.save(); err != nil {
+		t.Fatal(err)
+	}
+	m2 := NewManager(dir, 2)
+	m2.store = store
+	if err := m2.load(); err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.OutDir(); got != chosen {
+		t.Errorf("after a restart new downloads go to %s, want %s", got, chosen)
 	}
 }
 

@@ -112,6 +112,14 @@ func TestTheSettingsDialogShowsAndUpdatesYTDLP(t *testing.T) {
 	}
 }
 
+// The Settings dialog chooses the folder new downloads go to: browsing for one,
+// keeping it, and going back to the default.
+func TestTheSettingsDialogChoosesTheDownloadFolder(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "downloaddir", lang) })
+	}
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -879,6 +887,73 @@ scenarios.ytsettings = async function () {
   runTimers();
   await tick();
   same(count("/api/ytdlp"), quiet, "the page asked after the dialog was closed");
+};
+
+// The download folder in the Settings dialog: a folder never chosen shows as an
+// empty field with the one in use behind it, saving without touching it sends
+// nothing, Browse fills in what the chooser answered, and Use the default
+// empties the field so that saving goes back to it.
+scenarios.downloaddir = async function () {
+  tasks = [];
+  let saved = null, browseAsked = "", chosen = "";
+  const started = "C:\\Users\\me\\Downloads";
+  const view = () => ({ ok: true, keep_awake: true, can_keep_awake: true, after_all: "nothing", after_all_options: ["nothing"],
+    sort_by_type: false, folders: {}, out_dir: chosen || started, download_dir: chosen, started_dir: started, language: process.env.PAGE_LANG });
+  routes["/api/settings"] = (body) => {
+    if (body) {
+      saved = body;
+      if ("download_dir" in body) chosen = body.download_dir;
+    }
+    return view();
+  };
+  routes["/api/browse"] = (body, path) => { browseAsked = path; return { ok: true, path: "E:\\Films" }; };
+  routes["/api/ytdlp"] = () => ({ ok: true, found: false });
+  routes["/api/ytdlp/check"] = () => ({ ok: true, found: false });
+  await boot();
+  const open = async () => { els.setDlg.hidden = true; dispatch(els.setBtn, "click"); await tick(); };
+
+  await open();
+  same(els.setDir.value, "", "a folder never chosen shows as an empty field");
+  same(els.setDir.placeholder, started, "with the folder in use behind it");
+  assert(els.setDirHelp.innerHTML.indexOf(started) >= 0, "the help says where the default is: " + els.setDirHelp.innerHTML);
+
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved, null, "saving an untouched dialog sent settings");
+
+  // Browse asks the daemon's chooser, starting at the folder in use, and fills
+  // in its answer; saving sends it.
+  await open();
+  dispatch(els.setDirBrowse, "click");
+  await tick();
+  assert(browseAsked.indexOf("/api/browse?current=" + encodeURIComponent(started)) === 0, "the chooser should start at the folder in use: " + browseAsked);
+  same(els.setDir.value, "E:\\Films", "the folder chosen is filled in");
+  same(els.setDirBrowse.disabled, false, "Browse can be pressed again");
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved && saved.download_dir, "E:\\Films", "saving sends the folder chosen");
+
+  // Opening again shows it; Use the default empties it, and saving goes back.
+  saved = null;
+  await open();
+  same(els.setDir.value, "E:\\Films", "the folder chosen shows when the dialog opens again");
+  dispatch(els.setDirReset, "click");
+  same(els.setDir.value, "", "Use the default empties the field");
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved && saved.download_dir, "", "saving an emptied field goes back to the default");
+
+  // A folder that is not a full path is refused on the page, in the page's
+  // language, and the dialog stays open to fix it.
+  saved = null;
+  await open();
+  els.setDir.value = "Films";
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved, null, "a folder that is not a full path was sent");
+  same(els.setDlg.hidden, false, "the dialog closed on a mistake");
+  assert(/ err/.test(toast().className), "the mistake should be shown as one");
+  assert(toast().textContent.indexOf(words("full path", "完整路径")) >= 0, "the toast says why: " + toast().textContent);
 };
 
 const run = scenarios[which];

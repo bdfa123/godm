@@ -197,6 +197,8 @@ const uiHTML = `<!doctype html>
   .folders input { flex: 1; min-width: 0; }
   @media (max-width: 520px) { .folders { grid-template-columns: 1fr; } }
   .sethead { font-weight: 600; }
+  .dirline { display: flex; gap: 6px; margin: 6px 0 0; }
+  .dirline input { flex: 1; min-width: 0; }
   .ytline { display: flex; gap: 4px 20px; flex-wrap: wrap; margin: 6px 0 0; color: var(--muted); }
   .ytline b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   .ytbtns { display: flex; gap: 8px; margin: 8px 0 0; flex-wrap: wrap; }
@@ -295,6 +297,15 @@ const uiHTML = `<!doctype html>
     <div class="set" id="seedRow" hidden>
       <label class="field"><span data-i18n="set.seed"></span> <select id="setSeed"></select></label>
       <p data-i18n="set.seed.help"></p>
+    </div>
+    <div class="set">
+      <label class="sethead" for="setDir" data-i18n="set.dir"></label>
+      <div class="dirline">
+        <input type="text" id="setDir" spellcheck="false">
+        <button class="btn small" id="setDirBrowse" data-i18n="set.dir.browse"></button>
+        <button class="btn small" id="setDirReset" data-i18n="set.dir.reset"></button>
+      </div>
+      <p id="setDirHelp"></p>
     </div>
     <div class="set">
       <label class="check"><input type="checkbox" id="setSort"> <span data-i18n="set.sort"></span></label>
@@ -518,6 +529,12 @@ I18N.en = {
   "seed.stop": "Stop uploading",
   "seed.ratio": "Seed to ratio 1.0",
   "seed.keep": "Keep seeding",
+  "set.dir": "Download folder",
+  "set.dir.browse": "Browse…",
+  "set.dir.reset": "Use the default",
+  "set.dir.help": "New downloads are saved here unless you choose another folder for one, for example in the browser's download dialog. Downloads already in the list stay where they are. The default is {dir}.",
+  "set.dir.choosing": "Choose a folder in the window that opened…",
+  "set.dir.full": "The download folder must be a full path, like D:\\Downloads.",
   "set.sort": "Sort new downloads into folders by type",
   "set.sort.help": "Inside {dir}. A download that comes with a folder of its own, like one you chose in the browser, goes where you said. Types godm does not recognise stay in the main folder, and downloads already in the list stay where they are. Leave a name empty to keep that type in the main folder.",
   "set.folder.ph": "main folder",
@@ -746,6 +763,12 @@ I18N.zh = {
   "seed.stop": "停止上传",
   "seed.ratio": "做种至分享率 1.0",
   "seed.keep": "持续做种",
+  "set.dir": "下载文件夹",
+  "set.dir.browse": "浏览…",
+  "set.dir.reset": "恢复默认",
+  "set.dir.help": "新下载默认保存到这里；单个下载另选了文件夹的（例如在浏览器的下载确认框里选的）照您选的保存。列表里已有的任务不会移动。默认位置是 {dir}。",
+  "set.dir.choosing": "请在弹出的窗口里选择文件夹…",
+  "set.dir.full": "下载文件夹要写完整路径，例如 D:\\Downloads。",
   "set.sort": "按类型将新下载分到不同文件夹",
   "set.sort.help": "文件夹建在 {dir} 中。自带保存位置的下载（例如在浏览器中选好了文件夹的）仍保存到您指定的位置。godm 无法识别的类型留在默认文件夹，列表中已有的任务不会移动。某个类型的名称留空，则该类型仍放在默认文件夹。",
   "set.folder.ph": "默认文件夹",
@@ -1608,6 +1631,7 @@ document.getElementById("setSort").addEventListener("change", dimFolders);
 function fillSettingsText() {
   var d = S.settings || {};
   document.getElementById("setSortHelp").innerHTML = tr("set.sort.help", { dir: "<b>" + esc(d.out_dir || "") + "</b>" });
+  document.getElementById("setDirHelp").innerHTML = tr("set.dir.help", { dir: "<b>" + esc(d.started_dir || d.out_dir || "") + "</b>" });
   var lang = document.getElementById("setLang"), chosen = lang.value || LANG_SETTING;
   lang.innerHTML = LANG_CHOICES.map(function (c) {
     return '<option value="' + c[0] + '">' + esc(c[1] || tr("set.lang.auto")) + "</option>";
@@ -1656,6 +1680,11 @@ function openSettings() {
     document.getElementById("afterRow").hidden = (d.after_all_options || []).length < 2;
     document.getElementById("seedRow").hidden = !S.seed;
     if (S.seed) document.getElementById("setSeed").value = S.seed.policy;
+    // No folder chosen shows as an empty field with the one in use behind it,
+    // so that saving without touching it chooses nothing.
+    var dirIn = document.getElementById("setDir");
+    dirIn.value = d.download_dir || "";
+    dirIn.placeholder = d.started_dir || d.out_dir || "";
     document.getElementById("setSort").checked = !!d.sort_by_type;
     folderInputs().forEach(function (i) { i.value = (d.folders || {})[i.getAttribute("data-folder")] || ""; });
     dimFolders();
@@ -1664,6 +1693,21 @@ function openSettings() {
   }).catch(fail);
 }
 document.getElementById("setBtn").addEventListener("click", openSettings);
+// The folder chooser is the daemon's, on the desktop, and it answers once the
+// person closes it: with the folder, or with nothing if they cancelled.
+document.getElementById("setDirBrowse").addEventListener("click", function () {
+  var btn = this, dirIn = document.getElementById("setDir");
+  btn.disabled = true;
+  toast(tr("set.dir.choosing"));
+  post("/api/browse?current=" + q(dirIn.value.trim() || dirIn.placeholder)).then(function (r) {
+    if (!r.ok) throw new Error(r.error || "");
+    if (r.path) dirIn.value = r.path;
+    document.getElementById("toast").hidden = true;
+  }).catch(fail).then(function () { btn.disabled = false; });
+});
+document.getElementById("setDirReset").addEventListener("click", function () {
+  document.getElementById("setDir").value = "";
+});
 document.getElementById("setGo").addEventListener("click", function () {
   var was = S.settings, upd = {};
   var lang = document.getElementById("setLang").value;
@@ -1672,6 +1716,12 @@ document.getElementById("setGo").addEventListener("click", function () {
   if (awake !== !!was.keep_awake) upd.keep_awake = awake;
   var after = document.getElementById("setAfter").value;
   if (after && after !== was.after_all) upd.after_all = after;
+  var dir = document.getElementById("setDir").value.trim();
+  if (dir !== (was.download_dir || "")) {
+    // The daemon refuses anything but a full path too, but says so in English.
+    if (dir && !/^([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+|\/)/.test(dir)) return fail(new Error(tr("set.dir.full")));
+    upd.download_dir = dir;
+  }
   var sort = document.getElementById("setSort").checked;
   if (sort !== !!was.sort_by_type) upd.sort_by_type = sort;
   var names = {}, renamed = false;

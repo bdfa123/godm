@@ -79,16 +79,16 @@ func (m *Manager) downloadDir(req jobRequest) string {
 		return req.OutDir
 	}
 	m.mu.Lock()
-	on, folders := m.settings.SortByType, m.settings.Folders
+	on, folders, base := m.settings.SortByType, m.settings.Folders, m.defaultDirLocked()
 	var name string
 	if on {
 		name = folders[folderKindFor(req)] // a type that is not known has no folder
 	}
 	m.mu.Unlock()
 	if name == "" {
-		return m.outDir
+		return base
 	}
-	return filepath.Join(m.outDir, name)
+	return filepath.Join(base, name)
 }
 
 // cleanFolderName checks a folder name typed into the dialog. It must be one

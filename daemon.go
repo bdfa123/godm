@@ -490,7 +490,13 @@ func (m *Manager) SetNotifications(on bool) {
 	m.dirty.Store(true)
 }
 
-func (m *Manager) OutDir() string { return m.outDir }
+// OutDir is the folder a new download goes to when it names none: the one
+// chosen in Settings, else the one godm was started with.
+func (m *Manager) OutDir() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.defaultDirLocked()
+}
 
 // announceFinish tells the user what happened to a download once it stops
 // moving. Pausing is their own doing, so it stays quiet.
