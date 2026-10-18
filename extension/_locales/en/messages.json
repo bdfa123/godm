@@ -330,13 +330,13 @@
     "message": "Ask before starting each download"
   },
   "options_confirm_hint": {
-    "message": "Shows a window to change the file name, save folder and connections, or to cancel. Cancelling downloads nothing. Links picked from a page are added without asking."
+    "message": "Shows a window to change the file name, save folder and connections, or to cancel; for a torrent, only the folder. Cancelling downloads nothing. The folder chosen is offered again next time. Links picked from a page are added without asking."
   },
   "options_take_torrents": {
     "message": "Take over magnet links and .torrent files"
   },
   "options_take_torrents_hint": {
-    "message": "A click on a magnet link goes straight to godm as a torrent, without asking, and a notice says what was added. A .torrent the browser starts to download goes to godm as a torrent whatever its size or type, through the window above when asking is on. Hold Ctrl or Shift while clicking to leave a magnet link to the browser. Pages that were open before the extension was loaded need reloading first."
+    "message": "A click on a magnet link goes to godm as a torrent. With asking on, the window above opens first, to choose where it is saved; without, it is added at once and a notice says what was added. A .torrent the browser starts to download goes to godm as a torrent whatever its size or type, also through the window when asking is on. Hold Ctrl or Shift while clicking to leave a magnet link to the browser. Pages that were open before the extension was loaded need reloading first."
   },
   "options_types": {
     "message": "File types"
@@ -585,6 +585,9 @@
         "content": "$1"
       }
     }
+  },
+  "confirm_last_dir": {
+    "message": "The folder chosen last time. Empty the field to use godm's own folder."
   },
   "confirm_sorted": {
     "message": "$DIR$ (sorted by type)",

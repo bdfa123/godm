@@ -441,7 +441,8 @@ async function handleDownload(item) {
 // Resolves {ok:true}, {ok:false, expired:true, error}, or
 // {ok:false, handedBack:true, error}.
 async function handOff(held, job, stillWanted) {
-  const cookie = await cookieHeader(job.url);
+  // A magnet is not fetched over HTTP, so it carries no cookies.
+  const cookie = held.magnet ? "" : await cookieHeader(job.url);
   if (stillWanted && !(await stillWanted())) {
     return { ok: false, expired: true, error: tr("err_request_expired") };
   }
@@ -451,6 +452,7 @@ async function handOff(held, job, stillWanted) {
     bumpBadge(1);
     return { ok: true };
   }
+  if (held.magnet) return magnetNotTaken(held, resp);
 
   // The host answered the ping but failed the job. Hand the download back and
   // remember the link so the replacement is not intercepted in turn. A job the
@@ -477,6 +479,58 @@ async function handOff(held, job, stillWanted) {
     await notifyThrottled("lost", tr("notify_lost_title"), tr("notify_lost_body", url));
   }
   return { ok: false, handedBack: true, error: resp.error || tr("err_unknown") };
+}
+
+// magnetNotTaken deals with a magnet from the dialog that godm did not take.
+// Chrome's downloads cannot fetch a magnet, so it is never given one. A magnet
+// the daemon refused stays in the dialog with the reason, which may be the
+// folder, so that it can be changed and Start pressed again. One that never
+// reached godm goes back to the tab it was clicked in, which passes it on to
+// an installed client as the click would have; one from the right-click menu
+// has no click to give back and stays in the dialog too.
+async function magnetNotTaken(held, resp) {
+  await noteHost(resp);
+  const error = resp.error || tr("err_unknown");
+  if (resp.rejected || held.backTab === undefined) return { ok: false, error };
+  await notifyThrottled("host-down", tr("notify_host_down_title"), tr("notify_host_down_body", error));
+  try {
+    await chrome.tabs.update(held.backTab, { url: held.url });
+  } catch (e) {
+    console.warn("godm: could not hand the magnet link back to the browser", e);
+  }
+  return { ok: false, handedBack: true, error };
+}
+
+// magnetHeld is what the dialog is given for a magnet link. backTab, for a
+// click, is the tab the link goes back to if godm cannot be reached.
+function magnetHeld(url, referrer, cfg, backTab) {
+  const held = { url, kind: "bt", magnet: true, filename: magnetName(url), size: 0, referrer, connections: cfg.connections };
+  if (backTab !== undefined) held.backTab = backTab;
+  return held;
+}
+
+// askAboutMagnet opens the dialog for a magnet link, and says whether it did.
+async function askAboutMagnet(held) {
+  try {
+    return await openConfirm(held);
+  } catch (e) {
+    console.warn("godm: confirmation dialog failed", e);
+    return false;
+  }
+}
+
+// The folder last chosen in the dialog, which confirm.js reads under the same
+// name and offers the next time. It is kept on this computer only: a folder on
+// one is seldom there on another.
+const LAST_DIR_KEY = "lastDir";
+
+async function rememberDir(dir) {
+  try {
+    if (dir) await chrome.storage.local.set({ [LAST_DIR_KEY]: dir });
+    else await chrome.storage.local.remove(LAST_DIR_KEY);
+  } catch (e) {
+    console.warn("godm: could not remember the folder", e);
+  }
 }
 
 // ---------- download confirmation dialog ----------
@@ -607,7 +661,12 @@ async function confirmStart(msg) {
         console.warn("godm: could not save the do-not-ask setting", e);
       }
     }
-    await chrome.storage.session.remove(key);
+    // The folder the download went to is offered next time, and one emptied
+    // out goes back to godm's own.
+    if (result.ok) await rememberDir(built.job.outDir);
+    // A refused magnet is the only one left in the dialog to try again (see
+    // magnetNotTaken); everything else is done with.
+    if (result.ok || result.expired || result.handedBack) await chrome.storage.session.remove(key);
     return result;
   } finally {
     startingNow.delete(key);
@@ -695,11 +754,16 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // cannot name the magnet: scheme. A magnet is not fetched over HTTP, so it
   // carries no cookies.
   const magnet = /^magnet:/i.test(url);
+  const referrer = info.pageUrl || (tab && tab.url) || "";
+  // A magnet is asked about, as a clicked one is, so that it can be put
+  // somewhere other than the default folder. A link of any other kind goes
+  // straight in, as it always has: picking it from the menu was the asking.
+  if (magnet && cfg.confirmDownload && (await askAboutMagnet(magnetHeld(url, referrer, cfg)))) return;
   const resp = await callHost({
     type: "download",
     url: url,
     kind: magnet ? "bt" : "",
-    referrer: info.pageUrl || (tab && tab.url) || "",
+    referrer: referrer,
     cookie: magnet ? "" : await cookieHeader(url),
     userAgent: navigator.userAgent,
     connections: cfg.connections
@@ -836,9 +900,9 @@ async function submitPicked(msg) {
 // takeMagnet hands a magnet link that magnet.js caught to godm. The page was
 // told not to follow it, so every way this can fail ends with the link going
 // back to the browser, which passes it on to an installed client as it would
-// have without godm. Like a magnet from the right-click menu it is not asked
-// about and carries no cookies: it is not fetched over HTTP. Unlike one from
-// the menu, a notice says what was added.
+// have without godm. With asking on it opens the dialog, as a download does,
+// so that it can be put in a folder of its own; without, a notice says what was
+// added. It carries no cookies either way: it is not fetched over HTTP.
 async function takeMagnet(msg, sender) {
   const link = typeof msg.url === "string" ? msg.url.trim() : "";
   // Only a magnet is ever handed back: anything else is not what the content
@@ -858,12 +922,35 @@ async function sendMagnet(link, sender) {
   if (!url || !cfg.enabled || !cfg.takeTorrents || (await takeoverDisabled())) {
     return giveMagnetBack(link, sender);
   }
+  const referrer = (sender.tab && sender.tab.url) || sender.url || "";
+
+  if (cfg.confirmDownload) {
+    // A dialog for a godm that is not there would be a dead end, and the
+    // browser can still pass the link on, so the host is asked first, as it
+    // is before a download is taken from the browser.
+    const health = await callHost({ type: "ping" });
+    if (!health.ok) {
+      await setHostState(false, health.error);
+      await notifyThrottled(
+        "host-down",
+        tr("notify_host_down_title"),
+        tr("notify_host_down_body", health.error || tr("err_host_unreachable"))
+      );
+      return giveMagnetBack(url, sender);
+    }
+    await setHostState(true, "");
+    // The person pressing Start says what was added, so no notice follows.
+    if (await askAboutMagnet(magnetHeld(url, referrer, cfg, sender.tab.id))) return { ok: true, asked: true };
+    // No window to ask in: carry on as if asking were switched off, as a
+    // download taken from the browser does.
+    console.warn("godm: could not open the confirmation dialog, adding the magnet directly");
+  }
 
   const resp = await callHost({
     type: "download",
     url: url,
     kind: "bt",
-    referrer: (sender.tab && sender.tab.url) || sender.url || "",
+    referrer: referrer,
     userAgent: navigator.userAgent,
     connections: cfg.connections
   });

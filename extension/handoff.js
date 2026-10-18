@@ -110,7 +110,11 @@ function parseConnections(raw) {
 }
 
 // firstProblem is what the dialog shows under the form and what disables Start.
-function firstProblem(form) {
+// A torrent has neither a name to give nor connections to set: it is named by
+// what it holds and fetched from peers, so the dialog does not offer them and
+// only its folder is checked.
+function firstProblem(form, torrent) {
+  if (torrent) return validateDir(form.outDir) || "";
   return (
     validateName(form.filename) ||
     validateDir(form.outDir) ||
@@ -122,20 +126,24 @@ function firstProblem(form) {
 // buildJob turns what was held back when the download was cancelled in the
 // browser, plus what the person chose, into the message for the host. Cookies
 // and the user agent are added by the caller, which is the only place that can
-// read them. Returns {error} or {job}. A .torrent was marked as one by the
-// worker when it was held, and the daemon has to be told: a tracker's link
-// seldom ends in .torrent.
+// read them. Returns {error} or {job}. A .torrent or a magnet was marked as
+// one by the worker when it was held, and the daemon has to be told: a
+// tracker's link seldom ends in .torrent. What a torrent is called and how many
+// connections it gets are what was held, not what the form says: the dialog
+// offers neither. A magnet goes without a name, as it does when nobody is asked,
+// and the daemon names it from the link.
 function buildJob(pending, form) {
-  const problem = firstProblem(form || {});
+  const torrent = pending.kind === "bt";
+  const problem = firstProblem(form || {}, torrent);
   if (problem) return { error: problem };
   return {
     job: {
       type: "download",
       url: pending.url,
-      kind: pending.kind === "bt" ? "bt" : "",
-      filename: String(form.filename).trim(),
+      kind: torrent ? "bt" : "",
+      filename: torrent ? (pending.magnet ? "" : String(pending.filename || "").trim()) : String(form.filename).trim(),
       referrer: pending.referrer || "",
-      connections: parseConnections(form.connections).value,
+      connections: torrent ? pending.connections : parseConnections(form.connections).value,
       outDir: String(form.outDir == null ? "" : form.outDir).trim()
     }
   };

@@ -14,7 +14,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install, messagesFor, ownFiles } = require("./fakechrome.test.js");
 
-const IDS = ["form", "url", "name", "size", "dir", "browse", "conns", "dontAsk", "status", "cancel", "start"];
+const IDS = ["form", "url", "name", "size", "sizeRow", "dir", "browse", "conns", "connsRow", "dontAsk", "status", "cancel", "start"];
 
 class FakeElement {
   constructor() {
@@ -26,6 +26,8 @@ class FakeElement {
     this.disabled = false;
     this.hidden = false;
     this.checked = false;
+    this.readOnly = false;
+    this.focused = false;
     this.listeners = {};
   }
   addEventListener(type, fn) {
@@ -36,7 +38,9 @@ class FakeElement {
     if (this.disabled && type === "click") return;
     for (const fn of this.listeners[type] || []) fn(Object.assign({ preventDefault() {} }, event));
   }
-  focus() {}
+  focus() {
+    this.focused = true;
+  }
   setSelectionRange() {}
 }
 
@@ -59,9 +63,10 @@ function later() {
 }
 
 // open runs the dialog page. reply answers the messages it sends to the worker.
-// language is what the options page saved, if anything, and held what the worker
-// left under the dialog's key (the download, unless it says otherwise).
-async function open(reply, language, held = HELD) {
+// language is what the options page saved, if anything, held what the worker
+// left under the dialog's key (the download, unless it says otherwise), and
+// local what the worker keeps on this computer, such as the folder chosen last.
+async function open(reply, language, held = HELD, local = {}) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -75,7 +80,8 @@ async function open(reply, language, held = HELD) {
   const chrome = Object.assign({}, install("en"), {
     storage: {
       session: { get: async (key) => ({ [key]: held }) },
-      sync: { get: async (defaults) => Object.assign({}, defaults, language ? { language } : {}) }
+      sync: { get: async (defaults) => Object.assign({}, defaults, language ? { language } : {}) },
+      local: { get: async (defaults) => Object.assign({}, defaults, local) }
     },
     runtime: {
       getURL: (p) => "chrome-extension://abcdefghijklmnop/" + p,
@@ -213,6 +219,61 @@ test("a failed send leaves the dialog usable: Start again, or Cancel", async () 
   assert.equal(d.ui.status.textContent, "try again");
   assert.equal(d.ui.start.disabled, false);
   assert.equal(d.ui.cancel.disabled, false);
+});
+
+const MAGNET_HELD = {
+  url: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Some+Film",
+  referrer: "https://tracker.test/t/42",
+  filename: "Some Film",
+  size: 0,
+  connections: 8,
+  kind: "bt",
+  magnet: true
+};
+
+test("a torrent is asked only where it goes", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }), undefined, MAGNET_HELD);
+  assert.equal(d.ui.name.value, "Some Film", "it is shown by the name it carries");
+  assert.equal(d.ui.name.readOnly, true, "which cannot be changed");
+  assert.equal(d.ui.sizeRow.hidden, true, "a size the browser does not know, or the .torrent's own, is not shown");
+  assert.equal(d.ui.connsRow.hidden, true, "nor connections, which a torrent does not use");
+  assert.equal(d.ui.dir.focused, true, "the folder is what there is to choose");
+  // Neither the name nor the hidden connections can hold Start back.
+  d.ui.conns.value = "";
+  d.ui.conns.fire("input");
+  assert.equal(d.ui.start.disabled, false);
+  d.ui.dir.value = "E:\\Films";
+  d.ui.dir.fire("input");
+  d.ui.form.fire("submit");
+  await settle();
+  assert.equal(starts(d)[0].outDir, "E:\\Films");
+
+  const file = await open((m) => (m.type === "godm-config" ? config : { ok: true }));
+  assert.equal(file.ui.name.readOnly, false);
+  assert.equal(file.ui.sizeRow.hidden, false);
+  assert.equal(file.ui.connsRow.hidden, false);
+  assert.equal(file.ui.name.focused, true);
+});
+
+test("the folder chosen last time is filled in, and emptying it goes back to godm's own", async () => {
+  const reply = (m) => (m.type === "godm-config" ? config : { ok: true });
+  const d = await open(reply, undefined, HELD, { lastDir: "E:\\Films" });
+  assert.equal(d.ui.dir.value, "E:\\Films");
+  assert.match(d.ui.status.textContent, /chosen last time/, "and the dialog says where it came from");
+  d.ui.form.fire("submit");
+  await settle();
+  assert.equal(starts(d)[0].outDir, "E:\\Films", "left alone, it is where the download goes");
+
+  const emptied = await open(reply, undefined, HELD, { lastDir: "E:\\Films" });
+  emptied.ui.dir.value = "";
+  emptied.ui.dir.fire("input");
+  emptied.ui.form.fire("submit");
+  await settle();
+  assert.equal(starts(emptied)[0].outDir, "", "an emptied field leaves the folder to godm");
+
+  const none = await open(reply);
+  assert.equal(none.ui.dir.value, "", "with nothing remembered the field starts empty");
+  assert.equal(none.ui.dir.placeholder, "C:\\Users\\me\\Downloads", "with godm's own folder behind it");
 });
 
 test("the dialog says what is wrong in the language that was chosen", async () => {

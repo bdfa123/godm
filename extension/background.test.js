@@ -66,12 +66,13 @@ const WEB_PAGE = {
 // start loads background.js into a fresh worker. options.host answers what the
 // native host is asked, and options.cookies what the cookie jar holds.
 // options.browser is the language the browser is set to, options.session what
-// the worker's session storage holds already, options.page what the links in
+// the worker's session storage holds already, options.local what its storage
+// on this computer holds, options.page what the links in
 // the page of a tab are found to be, and options.fetch replaces the worker's
 // reading of its own files.
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {}, session: {} }, options);
-  const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: {} };
+  const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: clone(opts.local || {}) };
   const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [], titles: [] };
   const events = {
     determining: event(),
@@ -392,8 +393,8 @@ const MAGNET = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=
 const clicked = (w, url, sender) => w.fromPage({ type: "godm-magnet", url: url === undefined ? MAGNET : url }, sender);
 const handedBack = (url) => [{ tab: WEB_PAGE.tab.id, url: url || MAGNET }];
 
-test("a magnet clicked in a page goes to godm as a torrent, without the dialog", async () => {
-  const w = start({ cookies: () => [{ name: "uid", value: "1" }] });
+test("with asking off, a magnet clicked in a page goes to godm as a torrent at once", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }], settings: { confirmDownload: false } });
   assert.deepEqual(await clicked(w), { ok: true });
   const sent = downloads(w);
   assert.equal(sent.length, 1);
@@ -403,7 +404,7 @@ test("a magnet clicked in a page goes to godm as a torrent, without the dialog",
   assert.equal(sent[0].userAgent, "test-agent");
   assert.equal(sent[0].connections, 8);
   assert.ok(!sent[0].cookie, "a magnet is not fetched over HTTP, so it carries no cookies");
-  assert.equal(w.seen.windows.length, 0, "no dialog, even with asking switched on");
+  assert.equal(w.seen.windows.length, 0, "no dialog");
   assert.deepEqual(w.seen.opened, [], "and the browser was not given it as well");
   assert.equal(await badge(w), "1", "the badge counts it");
   // Nobody was asked, and a click can be had by a link laid over something
@@ -414,7 +415,7 @@ test("a magnet clicked in a page goes to godm as a torrent, without the dialog",
 });
 
 test("a clicked magnet with no name is named by its hash, and the frame it was in is the site", async () => {
-  const w = start();
+  const w = start({ settings: { confirmDownload: false } });
   const bare = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
   const advert = Object.assign({}, WEB_PAGE, { url: "https://ads.test/frame.html", frameId: 3 });
   await clicked(w, bare, advert);
@@ -482,6 +483,126 @@ test("a magnet the daemon refuses is reported in its words and leaves takeover o
   assert.notEqual(await badge(w), "1", "and the badge does not count it");
   await w.download(ITEM);
   assert.deepEqual(w.seen.cancelled, [ITEM.id], "the next download still goes to godm");
+});
+
+// ---------- a magnet, asked about ----------
+
+const magnetForm = (key, outDir) => ({ type: "godm-confirm-start", key, filename: "", outDir: outDir || "", connections: "", dontAsk: false });
+
+test("with asking on, a clicked magnet waits in the dialog, and Start adds it to the folder chosen", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }] });
+  assert.deepEqual(await clicked(w), { ok: true, asked: true });
+  assert.deepEqual(w.seen.host.map((m) => m.type), ["ping"], "godm was only asked whether it is there");
+  assert.equal(w.seen.windows.length, 1, "the dialog opened");
+  assert.deepEqual(w.seen.opened, [], "the browser was not given it");
+  assert.deepEqual(w.seen.notices, [], "and nobody is told about what has not been added");
+  const held = w.data.session[w.heldKey()];
+  assert.equal(held.kind, "bt");
+  assert.equal(held.magnet, true);
+  assert.equal(held.filename, "Some Film", "the dialog shows it by its name");
+  assert.equal(held.referrer, WEB_PAGE.tab.url);
+
+  assert.deepEqual(await w.message(magnetForm(w.heldKey(), "E:\\Films")), { ok: true });
+  const sent = downloads(w);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, MAGNET);
+  assert.equal(sent[0].kind, "bt");
+  assert.equal(sent[0].outDir, "E:\\Films");
+  assert.equal(sent[0].filename, "", "the daemon names it from the link, as it does unasked");
+  assert.ok(!sent[0].cookie, "a magnet carries no cookies");
+  assert.deepEqual(w.seen.notices, [], "the person pressed Start, so there is nothing to tell them");
+  assert.equal(w.heldKey(), undefined, "nothing is left waiting");
+  assert.equal(w.data.local.lastDir, "E:\\Films", "the folder is offered next time");
+});
+
+test("a magnet godm refuses after asking stays in the dialog to be tried again", async () => {
+  let refusing = true;
+  const w = start({ host: (m) => (m.type === "download" && refusing ? refusal("cannot write to E:\\Films") : { ok: true }) });
+  await clicked(w);
+  const key = w.heldKey();
+  const resp = await w.message(magnetForm(key, "E:\\Films"));
+  assert.equal(resp.ok, false);
+  assert.equal(resp.error, "cannot write to E:\\Films", "in the daemon's words");
+  assert.ok(!resp.handedBack, "the dialog keeps it");
+  assert.deepEqual(w.seen.downloaded, [], "Chrome cannot fetch a magnet, so it is not given one");
+  assert.deepEqual(w.seen.opened, []);
+  assert.equal(w.data.local.lastDir, undefined, "a folder that did not take is not remembered");
+
+  refusing = false;
+  assert.deepEqual(await w.message(magnetForm(key, "D:\\Films")), { ok: true }, "Start again, with another folder");
+  assert.equal(downloads(w).pop().outDir, "D:\\Films");
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [ITEM.id], "and takeover stayed on");
+});
+
+test("a magnet that cannot reach godm after asking goes back to the tab it was clicked in", async () => {
+  const w = start({ host: (m) => (m.type === "download" ? { ok: false, error: "host gone" } : { ok: true }) });
+  await clicked(w);
+  const resp = await w.message(magnetForm(w.heldKey()));
+  assert.equal(resp.handedBack, true);
+  assert.deepEqual(w.seen.opened, handedBack(), "the tab is sent to the link, which opens it as the click would have");
+  assert.deepEqual(w.seen.downloaded, []);
+  assert.equal(w.heldKey(), undefined);
+  assert.equal(w.seen.notices.length, 1, "the person is told");
+});
+
+test("with asking on, a host that cannot be reached hands a clicked magnet straight back", async () => {
+  const w = start({ host: () => ({ ok: false, error: "Specified native messaging host not found." }) });
+  assert.equal((await clicked(w)).handedBack, true);
+  assert.deepEqual(w.seen.windows, [], "no dialog that could only fail");
+  assert.deepEqual(w.seen.opened, handedBack());
+  assert.equal(w.seen.notices.length, 1);
+});
+
+test("a clicked magnet with no window to ask in is added as if asking were off", async () => {
+  const w = start();
+  w.context.chrome.windows.create = async () => {
+    throw new Error("no window");
+  };
+  assert.deepEqual(await clicked(w), { ok: true });
+  assert.equal(downloads(w).length, 1);
+  assert.equal(w.seen.notices.length, 1, "and the notice says what was added");
+});
+
+test("a magnet from the right-click menu is asked about too, and kept when godm cannot be reached", async () => {
+  const w = start({ host: (m) => (m.type === "download" ? { ok: false, error: "host gone" } : { ok: true }) });
+  await w.menu({ menuItemId: "godm-link", linkUrl: MAGNET, pageUrl: "https://tracker.test/t/42" }, { id: 7, url: "https://tracker.test/t/42" });
+  assert.equal(w.seen.windows.length, 1);
+  assert.deepEqual(downloads(w), []);
+  const resp = await w.message(magnetForm(w.heldKey()));
+  assert.equal(resp.ok, false);
+  assert.ok(!resp.handedBack, "a right-click has no click to give back");
+  assert.deepEqual(w.seen.opened, []);
+  assert.notEqual(w.heldKey(), undefined, "so the dialog can try again");
+
+  // A link of another kind goes straight in, as it always has.
+  const other = start();
+  await other.menu({ menuItemId: "godm-link", linkUrl: "https://example.test/a.zip" }, { id: 7, url: "https://example.test/" });
+  assert.equal(other.seen.windows.length, 0);
+  assert.equal(downloads(other).length, 1);
+  // And with asking off, so does a magnet.
+  const off = start({ settings: { confirmDownload: false } });
+  await off.menu({ menuItemId: "godm-link", linkUrl: MAGNET }, { id: 7, url: "https://tracker.test/" });
+  assert.equal(off.seen.windows.length, 0);
+  assert.equal(downloads(off)[0].kind, "bt");
+});
+
+test("the folder chosen in the dialog is remembered when the download goes through, and an emptied one is forgotten", async () => {
+  let refusing = false;
+  const w = start({ host: (m) => (m.type === "download" && refusing ? refusal("disk full") : { ok: true }) });
+  await w.download(ITEM);
+  await w.message(Object.assign(form(w.heldKey()), { outDir: "E:\\Stuff" }));
+  assert.equal(w.data.local.lastDir, "E:\\Stuff");
+
+  refusing = true;
+  await w.download(Object.assign({}, ITEM, { id: 6, url: "https://example.test/get/b.exe", finalUrl: "https://cdn.test/b.exe" }));
+  await w.message(Object.assign(form(w.heldKey()), { outDir: "F:\\Elsewhere" }));
+  assert.equal(w.data.local.lastDir, "E:\\Stuff", "a download handed back to Chrome does not change it");
+
+  refusing = false;
+  await w.download(Object.assign({}, ITEM, { id: 8, url: "https://example.test/get/c.exe", finalUrl: "https://cdn.test/c.exe" }));
+  await w.message(form(w.heldKey()));
+  assert.equal("lastDir" in w.data.local, false, "an empty folder goes back to godm's own");
 });
 
 test("a web page may send nothing but a clicked magnet", async () => {

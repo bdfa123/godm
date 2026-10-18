@@ -11,9 +11,11 @@ const ui = {
   url: document.getElementById("url"),
   name: document.getElementById("name"),
   size: document.getElementById("size"),
+  sizeRow: document.getElementById("sizeRow"),
   dir: document.getElementById("dir"),
   browse: document.getElementById("browse"),
   conns: document.getElementById("conns"),
+  connsRow: document.getElementById("connsRow"),
   dontAsk: document.getElementById("dontAsk"),
   status: document.getElementById("status"),
   cancel: document.getElementById("cancel"),
@@ -26,6 +28,7 @@ let browsing = false; // the folder chooser is open on the desktop
 let dirTouched = false; // the person has typed or picked a folder themselves
 let defaultDir = ""; // godm's own download folder, shown as the placeholder
 let over = false; // nothing left to do here: the request expired, or went back to Chrome
+let torrent = false; // a .torrent or a magnet link: only its folder can be chosen
 
 // The folder goes to godm only when the person chose one. Sending the default
 // as if it had been chosen would also switch off godm's sorting by type,
@@ -41,7 +44,7 @@ function formValues() {
 // render decides what the status line says and whether Start can be pressed.
 // A mistake in the form outranks a note, because it is what stops Start.
 function render() {
-  const problem = over ? "" : firstProblem(formValues());
+  const problem = over ? "" : firstProblem(formValues(), torrent);
   ui.status.textContent = problem || note;
   ui.status.className = problem ? "err" : "";
   ui.start.disabled = !!problem || busy || browsing || over;
@@ -87,7 +90,7 @@ ui.form.addEventListener("submit", async (e) => {
   // Start is disabled while the form has a mistake in it, so getting here with
   // one means the page had not caught up. Say what is wrong rather than leave
   // the person pressing a button that does nothing.
-  if (firstProblem(formValues())) {
+  if (firstProblem(formValues(), torrent)) {
     render();
     return;
   }
@@ -185,17 +188,47 @@ i18nReady.then(async function init() {
     finish(tr("err_request_expired"));
     return;
   }
+  const filename = String(held.filename || "");
   ui.url.textContent = held.url;
   ui.url.title = held.url;
-  ui.name.value = held.filename;
+  ui.name.value = filename;
   ui.size.textContent = formatSize(held.size);
   const wanted = parseInt(held.connections, 10) || 8;
   ui.conns.value = Math.min(Math.max(wanted, 1), DIALOG_MAX_CONNECTIONS);
 
-  // Select the name but not the extension, so typing replaces the right part.
-  const dot = held.filename.lastIndexOf(".");
-  ui.name.focus();
-  ui.name.setSelectionRange(0, dot > 0 ? dot : held.filename.length);
+  // A torrent is named by what it holds once godm has read it, and fetched from
+  // peers rather than over connections. The size the browser knew is that of
+  // the .torrent file, a few kilobytes, not of what it stands for. So only its
+  // folder is asked about.
+  torrent = held.kind === "bt";
+  ui.name.readOnly = torrent;
+  ui.sizeRow.hidden = torrent;
+  ui.connsRow.hidden = torrent;
+
+  // The folder chosen last time is offered again, as if typed in, so it is
+  // what the download goes to unless it is changed. Emptying the field goes
+  // back to godm's own folder. The worker keeps it, under the same name, when
+  // a download goes through.
+  let last = "";
+  try {
+    last = (await chrome.storage.local.get({ lastDir: "" })).lastDir;
+  } catch (e) {
+    // Nothing remembered; godm's own folder is the placeholder.
+  }
+  if (typeof last === "string" && last.trim()) {
+    ui.dir.value = last;
+    dirTouched = true;
+    note = tr("confirm_last_dir");
+  }
+
+  if (torrent) {
+    ui.dir.focus();
+  } else {
+    // Select the name but not the extension, so typing replaces the right part.
+    const dot = filename.lastIndexOf(".");
+    ui.name.focus();
+    ui.name.setSelectionRange(0, dot > 0 ? dot : filename.length);
+  }
 
   render();
   loadConfig();

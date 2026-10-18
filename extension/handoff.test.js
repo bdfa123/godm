@@ -9,6 +9,7 @@ const {
   DIALOG_MAX_CONNECTIONS,
   buildJob,
   dialogBounds,
+  firstProblem,
   formatSize,
   parseConnections,
   pickSize,
@@ -113,6 +114,26 @@ test("a held .torrent goes out as a torrent, and nothing else can be named by th
   assert.equal(buildJob(Object.assign({ kind: "bt" }, pending), form).job.kind, "bt");
   assert.equal(buildJob(Object.assign({ kind: "hls" }, pending), form).job.kind, "");
   assert.equal(buildJob(pending, Object.assign({ kind: "bt" }, form)).job.kind, "", "the page does not decide");
+});
+
+test("a torrent is checked for its folder only, and named and connected as it was held", () => {
+  const torrent = Object.assign({}, pending, { kind: "bt", filename: "Film.torrent", connections: 8 });
+  // The dialog shows no name or connections for a torrent, so neither can be wrong.
+  const form = { filename: "", outDir: "E:\\Films", connections: "" };
+  assert.equal(firstProblem(form, true), "");
+  assert.notEqual(firstProblem(form, false), "", "a file still needs both");
+  assert.match(firstProblem({ filename: "", outDir: "Films", connections: "" }, true), /full folder path/);
+
+  const { job } = buildJob(torrent, { filename: "renamed", outDir: " E:\\Films ", connections: "99" });
+  assert.equal(job.filename, "Film.torrent", "the form does not rename a torrent");
+  assert.equal(job.connections, 8);
+  assert.equal(job.outDir, "E:\\Films");
+  assert.equal(buildJob(torrent, { outDir: "Films" }).error !== undefined, true, "a bad folder still stops it");
+
+  // A magnet goes without a name, as one nobody was asked about does.
+  const magnet = Object.assign({}, torrent, { url: "magnet:?xt=urn:btih:" + "a".repeat(40) + "&dn=Film", filename: "Film", magnet: true });
+  assert.equal(buildJob(magnet, { outDir: "" }).job.filename, "");
+  assert.equal(buildJob(magnet, { outDir: "" }).job.kind, "bt");
 });
 
 test("an empty folder goes through as empty so the daemon uses its own", () => {

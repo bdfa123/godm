@@ -117,8 +117,9 @@ browser and shows a notification. It never silently drops a file.
 
 By default a small dialog asks first, the way IDM does: change the file name,
 the folder or the connection count, then **Start**; **Cancel** or closing it
-downloads nothing. "Don't ask again" turns it off, and the options page turns
-it back on. Links picked in bulk skip the dialog.
+downloads nothing. The folder chosen is filled in the next time; empty the
+field to go back to godm's own. "Don't ask again" turns it off, and the options
+page turns it back on. Links picked in bulk skip the dialog.
 
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go. The list also holds the videos the page played
@@ -258,11 +259,12 @@ allows fewer (PikPak allows eight to a link).
 
 Paste magnet links into **Add links**, pick `.torrent` files with
 **Open .torrent…**, or just click a magnet link or a `.torrent` link in the
-browser: the extension hands either to godm as a torrent, whatever its size. A
-clicked magnet goes without the dialog, and a notification names what was
-added and the site it came from. A `.torrent` is a download like any other,
-which a page can start without a click, so the dialog asks first if it is on.
-godm fetches the `.torrent` before it accepts it, and one it cannot get (from a
+browser: the extension hands either to godm as a torrent, whatever its size.
+With the download dialog on, both open it first, as a magnet chosen from the
+right-click menu does; for a torrent it asks only where to save, since a torrent
+names itself and is fetched from peers. With the dialog off, a clicked magnet is
+added at once and a notification names what was added and the site it came
+from. godm fetches the `.torrent` before it accepts it, and one it cannot get (from a
 tracker that only lets a browser in, say) goes back to Chrome. Hold Ctrl or
 Shift while clicking to leave a magnet to the browser, or turn all this off on
 the extension's options page; right-clicking a magnet link and choosing
@@ -300,6 +302,10 @@ download:
 - **When all downloads finish**: sleep or shut down, once. Shutting down gives a
   60-second warning that `shutdown /a` cancels. It is never remembered across a
   restart.
+- **Download folder**: where a download goes when nothing names another. Left
+  empty it is the folder godm was started with (`godm daemon -o`, else
+  `GODM_DOWNLOAD_DIR`, else your Downloads folder). godm makes it if it is not
+  there and checks it can write to it before taking it.
 - **Sort into folders by type** (off by default): Video, Music, Archives,
   Documents, Programs and Images, under the download folder, each name editable.
   A folder chosen in the download dialog always wins.
