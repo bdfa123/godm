@@ -14,7 +14,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install, messagesFor, ownFiles } = require("./fakechrome.test.js");
 
-const IDS = ["form", "url", "name", "size", "sizeRow", "dir", "browse", "conns", "connsRow", "dontAsk", "status", "cancel", "start"];
+const IDS = ["form", "url", "name", "size", "sizeRow", "dir", "browse", "conns", "connsRow", "dontAsk", "status", "cancel", "later", "start"];
 
 class FakeElement {
   constructor() {
@@ -108,6 +108,22 @@ async function open(reply, language, held = HELD, local = {}) {
   await settle();
   return { ui, doc, sent, closed, timers };
 }
+
+// The stand-in document has whatever ids the test gives it, so this is what
+// says they are in the page. Add to list must also stay out of the way of
+// Enter, which means Start: only Start is a submit button, and it is last.
+test("every element the dialog's script looks for is in the page, and Add to list is not a submit button", () => {
+  const html = fs.readFileSync(path.join(__dirname, "confirm.html"), "utf8");
+  for (const id of IDS) assert.match(html, new RegExp('id="' + id + '"'), id);
+  const buttons = [...html.matchAll(/<button\b[^>]*>/g)].map((m) => m[0]);
+  const byId = (id) => buttons.find((b) => b.includes('id="' + id + '"'));
+  assert.match(byId("later"), /type="button"/);
+  assert.match(byId("start"), /type="submit"/);
+  assert.match(byId("later"), /data-i18n="confirm_later"/);
+  assert.match(byId("later"), /data-i18n-title="confirm_later_tip"/);
+  const order = ["cancel", "later", "start"].map((id) => html.indexOf('id="' + id + '"'));
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "Cancel, Add to list, Start");
+});
 
 const config = { ok: true, config: { out_dir: "C:\\Users\\me\\Downloads", sort_by_type: false, can_browse_folders: true } };
 const starts = (d) => d.sent.filter((m) => m.type === "godm-confirm-start");
@@ -221,6 +237,110 @@ test("a failed send leaves the dialog usable: Start again, or Cancel", async () 
   assert.equal(d.ui.cancel.disabled, false);
 });
 
+test("Add to list sends the same job as Start, marked as for the list", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }));
+  d.ui.dir.value = "E:\\Films";
+  d.ui.dir.fire("input");
+  d.ui.dontAsk.checked = true;
+  d.ui.later.fire("click");
+  await settle();
+  assert.equal(starts(d).length, 1);
+  assert.equal(starts(d)[0].later, true);
+  assert.equal(starts(d)[0].key, "confirm:1-abc");
+  assert.equal(starts(d)[0].filename, "setup.exe");
+  assert.equal(starts(d)[0].outDir, "E:\\Films");
+  assert.equal(starts(d)[0].dontAsk, true);
+  assert.deepEqual(d.closed, [7], "once godm has it the window closes");
+
+  // Start, by the button or by Enter in a field, is not for the list.
+  const s = await open((m) => (m.type === "godm-config" ? config : { ok: true }));
+  s.ui.form.fire("submit");
+  await settle();
+  assert.equal(starts(s).length, 1);
+  assert.notEqual(starts(s)[0].later, true);
+});
+
+test("Add to list is held back by a mistake in the form, as Start is", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }));
+  assert.equal(d.ui.later.disabled, false);
+  d.ui.name.value = "";
+  d.ui.name.fire("input");
+  assert.equal(d.ui.start.disabled, true);
+  assert.equal(d.ui.later.disabled, true);
+  d.ui.later.fire("click");
+  await settle();
+  assert.equal(starts(d).length, 0, "a disabled button does nothing");
+
+  // The page can be a step behind the field, as it can for Start.
+  const behind = await open((m) => (m.type === "godm-config" ? config : { ok: true }));
+  behind.ui.name.value = "";
+  behind.ui.later.fire("click");
+  await settle();
+  assert.equal(starts(behind).length, 0);
+  assert.match(behind.ui.status.textContent, /Enter a file name/);
+  assert.equal(behind.ui.later.disabled, true);
+
+  d.ui.name.value = "setup.exe";
+  d.ui.name.fire("input");
+  assert.equal(d.ui.later.disabled, false);
+  d.ui.dir.value = "relative\\folder";
+  d.ui.dir.fire("input");
+  assert.equal(d.ui.later.disabled, true);
+});
+
+test("Add to list is out of reach while the folder chooser is open, while sending, and when the dialog is over", async () => {
+  const picked = later();
+  const d = await open((m) => (m.type === "godm-config" ? config : m.type === "godm-browse" ? picked.promise : { ok: true }));
+  d.ui.browse.fire("click");
+  await settle();
+  assert.equal(d.ui.later.disabled, true, "while the chooser is open");
+  picked.resolve({ ok: true, path: "" });
+  await settle();
+  assert.equal(d.ui.later.disabled, false);
+
+  const answer = later();
+  const sending = await open((m) => (m.type === "godm-config" ? config : answer.promise));
+  sending.ui.later.fire("click");
+  await settle();
+  assert.equal(sending.ui.later.disabled, true, "while sending");
+  assert.equal(sending.ui.status.textContent, "Adding to godm's download list…", "and it says what it is doing");
+  sending.ui.later.fire("click");
+  await settle();
+  assert.equal(starts(sending).length, 1, "so a second press sends nothing");
+  answer.resolve({ ok: true });
+  await settle();
+
+  const gone = await open((m) => (m.type === "godm-config" ? config : { ok: false, expired: true, error: "gone" }));
+  gone.ui.later.fire("click");
+  await settle();
+  assert.equal(gone.ui.later.disabled, true, "once the request has expired");
+});
+
+test("Start says it is sending, and a failed Add to list leaves the dialog usable", async () => {
+  const starting = await open((m) => (m.type === "godm-config" ? config : later().promise));
+  starting.ui.form.fire("submit");
+  await settle();
+  assert.equal(starting.ui.status.textContent, "Sending to godm…");
+
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: false, error: "try again" }));
+  d.ui.later.fire("click");
+  await settle();
+  assert.equal(d.ui.status.textContent, "try again");
+  assert.equal(d.ui.later.disabled, false);
+  assert.equal(d.ui.start.disabled, false);
+  assert.equal(d.ui.cancel.disabled, false);
+});
+
+test("a request handed back to Chrome while adding to the list is dealt with as for Start", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: false, handedBack: true, error: "disk full" }));
+  d.ui.later.fire("click");
+  await settle();
+  assert.match(d.ui.status.textContent, /disk full.*handed back to Chrome/);
+  assert.equal(d.ui.later.disabled, true);
+  assert.equal(d.ui.start.disabled, true);
+  assert.ok(d.timers.find((t) => t.ms === 4000), "the window goes by itself");
+});
+
 const MAGNET_HELD = {
   url: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Some+Film",
   referrer: "https://tracker.test/t/42",
@@ -253,6 +373,18 @@ test("a torrent is asked only where it goes", async () => {
   assert.equal(file.ui.sizeRow.hidden, false);
   assert.equal(file.ui.connsRow.hidden, false);
   assert.equal(file.ui.name.focused, true);
+});
+
+test("a torrent can be added to the list from its dialog too", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }), undefined, MAGNET_HELD);
+  assert.equal(d.ui.later.disabled, false, "neither the name nor the connections hold it back");
+  d.ui.dir.value = "E:\\Films";
+  d.ui.dir.fire("input");
+  d.ui.later.fire("click");
+  await settle();
+  assert.equal(starts(d).length, 1);
+  assert.equal(starts(d)[0].later, true);
+  assert.equal(starts(d)[0].outDir, "E:\\Films");
 });
 
 test("the folder chosen last time is filled in, and emptying it goes back to godm's own", async () => {

@@ -131,7 +131,9 @@ function firstProblem(form, torrent) {
 // tracker's link seldom ends in .torrent. What a torrent is called and how many
 // connections it gets are what was held, not what the form says: the dialog
 // offers neither. A magnet goes without a name, as it does when nobody is asked,
-// and the daemon names it from the link.
+// and the daemon names it from the link. Whether the download goes onto godm's
+// download list instead of starting is yes only for a page that said so with
+// true itself; any other value it sends is taken for no.
 function buildJob(pending, form) {
   const torrent = pending.kind === "bt";
   const problem = firstProblem(form || {}, torrent);
@@ -144,7 +146,8 @@ function buildJob(pending, form) {
       filename: torrent ? (pending.magnet ? "" : String(pending.filename || "").trim()) : String(form.filename).trim(),
       referrer: pending.referrer || "",
       connections: torrent ? pending.connections : parseConnections(form.connections).value,
-      outDir: String(form.outDir == null ? "" : form.outDir).trim()
+      outDir: String(form.outDir == null ? "" : form.outDir).trim(),
+      later: form.later === true
     }
   };
 }

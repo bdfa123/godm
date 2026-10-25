@@ -695,6 +695,11 @@ async function buildMenus() {
       contexts: ["link", "video", "audio", "image"]
     });
     chrome.contextMenus.create({
+      id: "godm-link-later",
+      title: tr("menu_link_later"),
+      contexts: ["link", "video", "audio", "image"]
+    });
+    chrome.contextMenus.create({
       id: "godm-page-links",
       title: tr("menu_page_links"),
       contexts: ["page"]
@@ -746,7 +751,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     await pickLinksFromTab(tab, info.menuItemId === "godm-selection-links");
     return;
   }
-  if (info.menuItemId !== "godm-link") return;
+  if (info.menuItemId !== "godm-link" && info.menuItemId !== "godm-link-later") return;
+  const later = info.menuItemId === "godm-link-later";
   const url = info.linkUrl || info.srcUrl;
   if (!url) return;
   const cfg = await getConfig();
@@ -758,8 +764,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   // A magnet is asked about, as a clicked one is, so that it can be put
   // somewhere other than the default folder. A link of any other kind goes
   // straight in, as it always has: picking it from the menu was the asking.
-  if (magnet && cfg.confirmDownload && (await askAboutMagnet(magnetHeld(url, referrer, cfg)))) return;
-  const resp = await callHost({
+  // The menu item that adds to the download list goes straight in for a magnet
+  // too: it is the person's answer to being asked.
+  if (!later && magnet && cfg.confirmDownload && (await askAboutMagnet(magnetHeld(url, referrer, cfg)))) return;
+  const job = {
     type: "download",
     url: url,
     kind: magnet ? "bt" : "",
@@ -767,7 +775,9 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     cookie: magnet ? "" : await cookieHeader(url),
     userAgent: navigator.userAgent,
     connections: cfg.connections
-  });
+  };
+  if (later) job.later = true;
+  const resp = await callHost(job);
   await noteHost(resp);
   if (resp.ok) {
     bumpBadge(1);
@@ -869,7 +879,8 @@ async function pickLinksFromTab(tab, selectionOnly) {
 // played goes with its kind, so that godm runs it as one, and with the quality
 // the picker read from its playlist, if it did; with none, the best is taken.
 // Nothing else is passed on as a kind or a quality: that is all the host would
-// let through.
+// let through. The whole batch goes onto godm's download list instead of
+// starting when the picker said so with true, and not for any other value.
 async function submitPicked(msg) {
   const cfg = await getConfig();
   const items = [];
@@ -888,7 +899,8 @@ async function submitPicked(msg) {
     items: items,
     referrer: msg.referrer || "",
     userAgent: navigator.userAgent,
-    connections: msg.connections || cfg.connections
+    connections: msg.connections || cfg.connections,
+    later: msg.later === true
   });
   await noteHost(resp);
   if (resp.ok) bumpBadge(1);

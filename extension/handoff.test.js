@@ -105,8 +105,23 @@ test("the job carries what was held back and what the person chose", () => {
     filename: "renamed.zip",
     referrer: pending.referrer,
     connections: 16,
-    outDir: "E:\\Stuff"
+    outDir: "E:\\Stuff",
+    later: false
   });
+});
+
+test("a job goes onto the download list only when the form says so with true", () => {
+  const form = { filename: "a.zip", outDir: "", connections: "8" };
+  assert.equal(buildJob(pending, form).job.later, false, "the form says nothing");
+  assert.equal(buildJob(pending, Object.assign({ later: false }, form)).job.later, false);
+  assert.equal(buildJob(pending, Object.assign({ later: true }, form)).job.later, true);
+  // The page is only a form: anything but a real true is no.
+  for (const odd of ["true", 1, "yes", {}, [], null]) {
+    assert.equal(buildJob(pending, Object.assign({ later: odd }, form)).job.later, false, JSON.stringify(odd));
+  }
+  // A torrent can be listed too.
+  const torrent = Object.assign({}, pending, { kind: "bt", magnet: true });
+  assert.equal(buildJob(torrent, { outDir: "", later: true }).job.later, true);
 });
 
 test("a held .torrent goes out as a torrent, and nothing else can be named by the form", () => {
@@ -143,7 +158,7 @@ test("an empty folder goes through as empty so the daemon uses its own", () => {
 
 test("the dialog's own flags never leak into the job", () => {
   const { job } = buildJob(pending, { filename: "a.zip", outDir: "", connections: "8", dontAsk: true, key: "confirm:1" });
-  assert.deepEqual(Object.keys(job).sort(), ["connections", "filename", "kind", "outDir", "referrer", "type", "url"]);
+  assert.deepEqual(Object.keys(job).sort(), ["connections", "filename", "kind", "later", "outDir", "referrer", "type", "url"]);
 });
 
 test("a form that fails validation produces no job, whatever the page claims", () => {

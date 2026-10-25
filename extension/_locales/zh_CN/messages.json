@@ -8,6 +8,9 @@
   "menu_link": {
     "message": "使用 godm 下载"
   },
+  "menu_link_later": {
+    "message": "加入 godm 下载列表"
+  },
   "menu_page_links": {
     "message": "使用 godm 下载此页面的链接…"
   },
@@ -459,6 +462,12 @@
       }
     }
   },
+  "picker_later": {
+    "message": "加入列表"
+  },
+  "picker_later_tip": {
+    "message": "先下载一小段，之后在 godm 的下载列表里开始。"
+  },
   "picker_count": {
     "message": "已选择 $N$ / $TOTAL$ 个链接",
     "placeholders": {
@@ -508,6 +517,22 @@
       }
     }
   },
+  "picker_listed_one": {
+    "message": "已把 $N$ 个任务加入 godm 下载列表。",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_listed_other": {
+    "message": "已把 $N$ 个任务加入 godm 下载列表。",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
   "picker_expired": {
     "message": "此链接列表已过期"
   },
@@ -550,8 +575,17 @@
   "confirm_start": {
     "message": "开始"
   },
+  "confirm_later": {
+    "message": "加入列表"
+  },
+  "confirm_later_tip": {
+    "message": "先下载一小段，之后在 godm 的下载列表里开始。"
+  },
   "confirm_sending": {
     "message": "正在发送到 godm…"
+  },
+  "confirm_adding": {
+    "message": "正在加入下载列表…"
   },
   "confirm_handed_back": {
     "message": "$ERROR$ - 已交还给 Chrome。",
@@ -565,7 +599,7 @@
     "message": "godm 无法接管该下载"
   },
   "confirm_no_answer": {
-    "message": "godm 没有响应，请再点一次“开始”。"
+    "message": "godm 没有响应，请再试一次。"
   },
   "confirm_choose_folder": {
     "message": "请在桌面上打开的窗口中选择文件夹…"

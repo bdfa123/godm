@@ -19,11 +19,12 @@ const ui = {
   dontAsk: document.getElementById("dontAsk"),
   status: document.getElementById("status"),
   cancel: document.getElementById("cancel"),
+  later: document.getElementById("later"),
   start: document.getElementById("start")
 };
 
 let note = ""; // something worth saying that is not a mistake in the form
-let busy = false; // Start has been pressed and godm has not answered yet
+let busy = false; // Start or Add to list has been pressed and godm has not answered yet
 let browsing = false; // the folder chooser is open on the desktop
 let dirTouched = false; // the person has typed or picked a folder themselves
 let defaultDir = ""; // godm's own download folder, shown as the placeholder
@@ -42,12 +43,14 @@ function formValues() {
 }
 
 // render decides what the status line says and whether Start can be pressed.
-// A mistake in the form outranks a note, because it is what stops Start.
+// A mistake in the form outranks a note, because it is what stops Start. Adding
+// to the list takes the same form and is held back for the same reasons.
 function render() {
   const problem = over ? "" : firstProblem(formValues(), torrent);
   ui.status.textContent = problem || note;
   ui.status.className = problem ? "err" : "";
   ui.start.disabled = !!problem || busy || browsing || over;
+  ui.later.disabled = ui.start.disabled;
   ui.browse.disabled = busy || browsing || over;
   // Once Start is pressed the job is on its way to godm and closing the window
   // cannot call it back, so Cancel would only look as if it could.
@@ -84,8 +87,10 @@ async function send(message) {
   }
 }
 
-ui.form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+// submit is what both Start and Add to list do. Adding to the list only says so
+// to the worker, which passes it on to godm: the download is held there until
+// the person starts it, and everything else about the dialog is the same.
+async function submit(later) {
   if (busy || browsing || over) return;
   // Start is disabled while the form has a mistake in it, so getting here with
   // one means the page had not caught up. Say what is wrong rather than leave
@@ -95,12 +100,12 @@ ui.form.addEventListener("submit", async (e) => {
     return;
   }
   busy = true;
-  note = tr("confirm_sending");
+  note = tr(later ? "confirm_adding" : "confirm_sending");
   render();
 
-  const resp = await send(
-    Object.assign({ type: "godm-confirm-start", key: heldKey, dontAsk: ui.dontAsk.checked }, formValues())
-  );
+  const message = Object.assign({ type: "godm-confirm-start", key: heldKey, dontAsk: ui.dontAsk.checked }, formValues());
+  if (later) message.later = true;
+  const resp = await send(message);
 
   if (resp && resp.ok) {
     closeSelf();
@@ -118,12 +123,19 @@ ui.form.addEventListener("submit", async (e) => {
     return;
   }
   // Either the worker found a mistake the page missed, or it did not answer at
-  // all. Starting again is safe in both cases: it was not consumed, or it
+  // all. Trying again is safe in both cases: it was not consumed, or it
   // reports that it has expired.
   busy = false;
   note = (resp && resp.error) || tr("confirm_no_answer");
   render();
+}
+
+ui.form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  submit(false);
 });
+// Not a submit button, so Enter in a field still means Start.
+ui.later.addEventListener("click", () => submit(true));
 
 ui.cancel.addEventListener("click", () => {
   if (!busy) closeSelf();

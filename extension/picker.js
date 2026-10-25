@@ -147,6 +147,7 @@ function render() {
   const go = document.getElementById("go");
   go.disabled = n === 0;
   go.textContent = n > 1 ? tr("picker_download_many", n) : tr("picker_download");
+  document.getElementById("later").disabled = go.disabled;
 }
 
 function setStatus(msg, kind) {
@@ -217,24 +218,37 @@ function itemFor(link) {
   return item;
 }
 
-document.getElementById("go").addEventListener("click", async () => {
+// sendPicked is what both buttons do. Adding to the list sends the same links
+// the same way; godm holds them there until the person starts them.
+async function sendPicked(later) {
   // Keep page order: that is the order the queue will download in.
   const items = state.links.filter((l) => state.selected.has(l.url)).map(itemFor);
   if (!items.length) return;
   const go = document.getElementById("go");
+  const listButton = document.getElementById("later");
   go.disabled = true;
+  listButton.disabled = true;
   setStatus(tr("picker_sending", items.length));
   const connections = parseInt(document.getElementById("conns").value, 10) || DEFAULTS.connections;
-  const resp = await chrome.runtime.sendMessage({ type: "godm-batch", items, referrer: state.page, connections });
+  const message = { type: "godm-batch", items, referrer: state.page, connections };
+  if (later) message.later = true;
+  const resp = await chrome.runtime.sendMessage(message);
   if (resp && resp.ok) {
     const n = (resp.ids || []).length;
-    setStatus(tr(n === 1 ? "picker_added_one" : "picker_added_other", n), "ok");
+    const done = later
+      ? n === 1 ? "picker_listed_one" : "picker_listed_other"
+      : n === 1 ? "picker_added_one" : "picker_added_other";
+    setStatus(tr(done, n), "ok");
     setTimeout(() => window.close(), 1200);
   } else {
     setStatus((resp && resp.error) || tr("err_no_response"), "err");
     go.disabled = false;
+    listButton.disabled = false;
   }
-});
+}
+
+document.getElementById("go").addEventListener("click", () => sendPicked(false));
+document.getElementById("later").addEventListener("click", () => sendPicked(true));
 
 // streamText is what the row of a stream says of it, which is only what is
 // known. A master playlist and the playlists of its qualities are told apart by

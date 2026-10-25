@@ -8,6 +8,9 @@
   "menu_link": {
     "message": "Download with godm"
   },
+  "menu_link_later": {
+    "message": "Add to godm download list"
+  },
   "menu_page_links": {
     "message": "Download links on this page with godm…"
   },
@@ -459,6 +462,12 @@
       }
     }
   },
+  "picker_later": {
+    "message": "Add to list"
+  },
+  "picker_later_tip": {
+    "message": "Downloads a small part first, then waits. Start it later from godm's download list."
+  },
   "picker_count": {
     "message": "$N$ of $TOTAL$ links selected",
     "placeholders": {
@@ -508,6 +517,22 @@
       }
     }
   },
+  "picker_listed_one": {
+    "message": "Added $N$ download to godm's download list.",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
+  "picker_listed_other": {
+    "message": "Added $N$ downloads to godm's download list.",
+    "placeholders": {
+      "n": {
+        "content": "$1"
+      }
+    }
+  },
   "picker_expired": {
     "message": "This link list has expired"
   },
@@ -550,8 +575,17 @@
   "confirm_start": {
     "message": "Start"
   },
+  "confirm_later": {
+    "message": "Add to list"
+  },
+  "confirm_later_tip": {
+    "message": "Downloads a small part first, then waits. Start it later from godm's download list."
+  },
   "confirm_sending": {
     "message": "Sending to godm…"
+  },
+  "confirm_adding": {
+    "message": "Adding to godm's download list…"
   },
   "confirm_handed_back": {
     "message": "$ERROR$ - it was handed back to Chrome.",
@@ -565,7 +599,7 @@
     "message": "godm could not take the download"
   },
   "confirm_no_answer": {
-    "message": "godm did not respond. Try Start again."
+    "message": "godm did not respond. Try again."
   },
   "confirm_choose_folder": {
     "message": "Choose a folder in the window that opened on your desktop…"

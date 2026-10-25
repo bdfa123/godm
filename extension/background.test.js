@@ -73,7 +73,7 @@ const WEB_PAGE = {
 function start(options) {
   const opts = Object.assign({ host: () => ({ ok: true }), cookies: () => [], settings: {}, session: {} }, options);
   const data = { session: clone(opts.session), sync: Object.assign({}, opts.settings), local: clone(opts.local || {}) };
-  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [], titles: [] };
+  const seen = { host: [], cancelled: [], downloaded: [], notices: [], windows: [], timeouts: [], opened: [], badges: [], menus: [], menuItems: [], titles: [] };
   const events = {
     determining: event(),
     removed: event(),
@@ -132,7 +132,7 @@ function start(options) {
     webRequest: { onHeadersReceived: event() },
     contextMenus: {
       removeAll: (cb) => cb && cb(),
-      create: (o) => seen.menus.push(o.title),
+      create: (o) => (seen.menus.push(o.title), seen.menuItems.push(o)),
       onClicked: events.menu
     },
     cookies: { getAll: async (q) => opts.cookies(q) },
@@ -1028,7 +1028,7 @@ test("nothing is said before the chosen language has been read", async () => {
 });
 
 test("the right-click menu is made in the language that is spoken, and again when it is changed", async () => {
-  const titles = (locale) => ["menu_link", "menu_page_links", "menu_selection_links"].map((k) => messageIn(locale, k));
+  const titles = (locale) => ["menu_link", "menu_link_later", "menu_page_links", "menu_selection_links"].map((k) => messageIn(locale, k));
   const rest = async () => {
     for (let i = 0; i < 5; i++) await settle();
   };
@@ -1128,4 +1128,134 @@ test("a page that is navigated to, in the page or not, starts with no videos", a
   w.events.tabUpdated.fns[0](7, { title: "Video Two" }, PLAYER_TAB);
   await settle();
   assert.equal(w.data.session["media:7"].length, SNIFFED.length);
+});
+
+// ---------- adding to godm's download list ----------
+
+test("the right-click menu has an item for the download list, where the download item is", async () => {
+  const w = start();
+  await w.events.installed.fns[0]();
+  for (let i = 0; i < 5; i++) await settle();
+  const link = w.seen.menuItems.find((m) => m.id === "godm-link");
+  const list = w.seen.menuItems.find((m) => m.id === "godm-link-later");
+  assert.ok(list, "there is an item for it");
+  assert.deepEqual(list.contexts, link.contexts, "on the same links, videos, sounds and pictures");
+  assert.equal(list.title, messageIn("en", "menu_link_later"));
+  assert.notEqual(list.title, link.title);
+});
+
+test("the right-click item for the download list sends a link at once, marked as for the list", async () => {
+  const w = start({ cookies: () => [{ name: "uid", value: "1" }] });
+  await w.menu({ menuItemId: "godm-link-later", linkUrl: "https://example.test/a.zip", pageUrl: "https://example.test/" }, { id: 7, url: "https://example.test/" });
+  assert.equal(w.seen.windows.length, 0, "with asking on, no dialog: picking the item was the asking");
+  assert.equal(downloads(w).length, 1);
+  assert.equal(downloads(w)[0].later, true);
+  assert.equal(downloads(w)[0].url, "https://example.test/a.zip");
+  assert.equal(downloads(w)[0].kind, "");
+  assert.equal(downloads(w)[0].cookie, "uid=1", "a link is sent as the other item sends it");
+  assert.equal(downloads(w)[0].referrer, "https://example.test/");
+  assert.equal(await badge(w), "1");
+
+  // The other item says nothing of the list.
+  const plain = start();
+  await plain.menu({ menuItemId: "godm-link", linkUrl: "https://example.test/a.zip" }, { id: 7, url: "https://example.test/" });
+  assert.notEqual(downloads(plain)[0].later, true);
+});
+
+test("a magnet from the right-click item for the download list is not asked about either", async () => {
+  const w = start();
+  await w.menu({ menuItemId: "godm-link-later", linkUrl: MAGNET, pageUrl: "https://tracker.test/t/42" }, { id: 7, url: "https://tracker.test/t/42" });
+  assert.equal(w.seen.windows.length, 0, "the other item asks about a magnet; this one goes in");
+  assert.equal(downloads(w).length, 1);
+  assert.equal(downloads(w)[0].url, MAGNET);
+  assert.equal(downloads(w)[0].kind, "bt");
+  assert.equal(downloads(w)[0].later, true);
+  assert.ok(!downloads(w)[0].cookie, "a magnet carries no cookies");
+});
+
+test("a right-click job for the download list that fails is reported as the other item's is", async () => {
+  const w = start({ host: (m) => (m.type === "download" ? refusal("disk full") : { ok: true }), settings: { confirmDownload: false } });
+  await w.menu({ menuItemId: "godm-link-later", linkUrl: "https://example.test/a.zip" }, { url: "https://example.test/" });
+  assert.equal(w.seen.notices.length, 1, "the person is told at once");
+  assert.equal(w.seen.notices[0].message, "disk full");
+  assert.notEqual(await badge(w), "1", "and nothing is counted");
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [ITEM.id], "a refusal by the daemon leaves takeover on");
+
+  const down = start({
+    host: (m) => (m.type === "download" ? { ok: false, error: "Specified native messaging host not found." } : { ok: true }),
+    settings: { confirmDownload: false }
+  });
+  await down.menu({ menuItemId: "godm-link-later", linkUrl: "https://example.test/a.zip" }, { url: "https://example.test/" });
+  await down.download(ITEM);
+  assert.deepEqual(down.seen.cancelled, [], "a host that cannot be reached switches takeover off");
+});
+
+test("Add to list in the dialog sends the download marked as for the list, and Start does not", async () => {
+  const listed = start();
+  await listed.download(ITEM);
+  assert.deepEqual(await listed.message(Object.assign(form(listed.heldKey()), { later: true })), { ok: true });
+  assert.equal(downloads(listed).length, 1);
+  assert.equal(downloads(listed)[0].later, true);
+  assert.equal(downloads(listed)[0].url, ITEM.url, "it is the same job");
+  assert.equal(listed.heldKey(), undefined, "and nothing is left waiting");
+  assert.equal(await badge(listed), "1");
+
+  const started = start();
+  await started.download(ITEM);
+  await started.message(form(started.heldKey()));
+  assert.notEqual(downloads(started)[0].later, true);
+
+  // The dialog is only a form: nothing but a true counts.
+  const odd = start();
+  await odd.download(ITEM);
+  await odd.message(Object.assign(form(odd.heldKey()), { later: "true" }));
+  assert.notEqual(downloads(odd)[0].later, true);
+});
+
+test("adding to the list in the dialog keeps the folder and Don't ask again as Start does", async () => {
+  const w = start();
+  await w.download(ITEM);
+  await w.message(Object.assign(form(w.heldKey()), { later: true, dontAsk: true, outDir: "E:\\Stuff" }));
+  assert.equal(w.data.local.lastDir, "E:\\Stuff");
+  assert.equal(w.data.sync.confirmDownload, false);
+  assert.equal(downloads(w)[0].outDir, "E:\\Stuff");
+});
+
+test("a download godm refuses for the list goes back to Chrome as one refused for Start does", async () => {
+  const w = start({ host: refuse });
+  await w.download(ITEM);
+  const resp = await w.message(Object.assign(form(w.heldKey()), { later: true }));
+  assert.equal(resp.handedBack, true);
+  assert.deepEqual(w.seen.downloaded, [ITEM.url]);
+  assert.equal(w.data.local.lastDir, undefined, "and the folder is not remembered");
+});
+
+test("a magnet is added to the list from the dialog too, and stays there when godm refuses it", async () => {
+  let refusing = true;
+  const w = start({ host: (m) => (m.type === "download" && refusing ? refusal("cannot write to E:\\Films") : { ok: true }) });
+  await clicked(w);
+  const key = w.heldKey();
+  const refused = await w.message(Object.assign(magnetForm(key, "E:\\Films"), { later: true }));
+  assert.equal(refused.ok, false);
+  assert.ok(!refused.handedBack, "the dialog keeps it");
+  assert.equal(downloads(w)[0].later, true, "it was sent for the list");
+
+  refusing = false;
+  assert.deepEqual(await w.message(Object.assign(magnetForm(key, "D:\\Films"), { later: true })), { ok: true });
+  const sent = downloads(w).pop();
+  assert.equal(sent.later, true);
+  assert.equal(sent.kind, "bt");
+  assert.equal(sent.outDir, "D:\\Films");
+  assert.equal(w.heldKey(), undefined);
+});
+
+test("a picked batch goes onto the download list only when the picker says so with true", async () => {
+  const w = start();
+  const items = [{ url: "https://example.test/a.zip" }, { url: "https://example.test/b.zip" }];
+  await w.message({ type: "godm-batch", items, later: true });
+  await w.message({ type: "godm-batch", items });
+  await w.message({ type: "godm-batch", items, later: "true" });
+  assert.deepEqual(batches(w).map((m) => m.later === true), [true, false, false]);
+  assert.equal(batches(w)[0].items.length, 2, "the whole batch is for the list");
 });

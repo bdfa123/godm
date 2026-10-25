@@ -13,7 +13,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install, ownFiles } = require("./fakechrome.test.js");
 
-const IDS = ["title", "page", "chips", "rows", "empty", "toggleShown", "count", "go", "search", "selAll", "selNone", "selFiles", "cancel", "status", "conns"];
+const IDS = ["title", "page", "chips", "rows", "empty", "toggleShown", "count", "go", "later", "search", "selAll", "selNone", "selFiles", "cancel", "status", "conns"];
 
 class FakeElement {
   constructor() {
@@ -72,8 +72,9 @@ const LIVE = { ok: false, error: "this is a live stream with no end marker; reco
 // open runs the picker with this list of links and videos, as the worker would
 // have left it. language is what the options page saved, if anything. inspect
 // answers the worker's reading of a playlist, which the picker asks for as the
-// popup does; by default every playlist is a master.
-async function open(data, language, inspect) {
+// popup does; by default every playlist is a master. batch answers the links
+// that are sent, by default by saying every one was added.
+async function open(data, language, inspect, batch) {
   const ui = {};
   for (const id of IDS) ui[id] = new FakeElement();
   const doc = new FakeElement();
@@ -98,6 +99,7 @@ async function open(data, language, inspect) {
           return (inspect || (() => ({ ok: true, info: MASTER_INFO })))(message);
         }
         sent.push(message);
+        if (batch) return batch(message);
         return { ok: true, ids: message.items.map((_, i) => "t" + i) };
       }
     }
@@ -156,6 +158,17 @@ function chips(p) {
 const clickRow = (p, url) => p.ui.rows.fire("click", { target: { closest: () => ({ getAttribute: () => url }) } });
 const clickChip = (p, key) => p.ui.chips.fire("click", { target: { closest: () => ({ getAttribute: () => key }) } });
 const urls = (p) => rows(p).map((r) => r.url);
+
+// The stand-in document has whatever ids the test gives it, so this is what says
+// they are in the page.
+test("every element the picker's script looks for is in the page, Add to list beside Download", () => {
+  const html = fs.readFileSync(path.join(__dirname, "picker.html"), "utf8");
+  for (const id of IDS) assert.match(html, new RegExp('id="' + id + '"'), id);
+  const later = /<button\b[^>]*id="later"[^>]*>/.exec(html)[0];
+  assert.match(later, /data-i18n="picker_later"/);
+  assert.match(later, /data-i18n-title="picker_later_tip"/);
+  assert.ok(html.indexOf('id="later"') < html.indexOf('id="go"'), "the primary button stays last");
+});
 
 test("the videos a page played are listed first, each with its name, type and size", async () => {
   const p = await open(DATA);
@@ -218,6 +231,67 @@ test("a stream that was picked is sent as one, named for the page, with the rest
     { url: ZIP }
   ]);
   assert.match(p.ui.status.textContent, /Added 3 downloads/);
+});
+
+test("Add to list sends the same links as Download, marked as for the list", async () => {
+  const p = await open(DATA);
+  clickRow(p, HLS);
+  p.ui.later.fire("click");
+  await settle();
+
+  assert.equal(p.sent.length, 1);
+  assert.equal(p.sent[0].type, "godm-batch");
+  assert.equal(p.sent[0].later, true);
+  assert.equal(p.sent[0].referrer, PAGE);
+  assert.equal(p.sent[0].connections, 8);
+  assert.deepEqual(p.sent[0].items, [
+    { url: HLS, kind: "hls", filename: "The Film - video.test", variant: 2 },
+    { url: CLIP },
+    { url: ZIP }
+  ]);
+  assert.equal(p.ui.status.textContent, "Added 3 downloads to godm's download list.");
+  assert.equal(p.ui.status.className, "status ok");
+
+  const d = await open(DATA);
+  d.ui.go.fire("click");
+  await settle();
+  assert.notEqual(d.sent[0].later, true, "Download is not for the list");
+
+  const one = await open({ page: PAGE, title: "", links: [LINKS[0]] });
+  one.ui.later.fire("click");
+  await settle();
+  assert.equal(one.ui.status.textContent, "Added 1 download to godm's download list.");
+});
+
+test("Add to list can be pressed when Download can, and not while a send is out", async () => {
+  const p = await open(DATA);
+  assert.equal(p.ui.go.disabled, false);
+  assert.equal(p.ui.later.disabled, false);
+  p.ui.selNone.fire("click");
+  assert.equal(p.ui.go.disabled, true);
+  assert.equal(p.ui.later.disabled, true, "nothing is picked");
+  p.ui.selAll.fire("click");
+  assert.equal(p.ui.later.disabled, false);
+
+  const answer = {};
+  const sending = await open(DATA, undefined, undefined, () => new Promise((r) => (answer.resolve = r)));
+  sending.ui.later.fire("click");
+  await settle();
+  assert.equal(sending.ui.later.disabled, true);
+  assert.equal(sending.ui.go.disabled, true);
+  answer.resolve({ ok: false, error: "disk full" });
+  await settle();
+  assert.equal(sending.ui.status.textContent, "disk full");
+  assert.equal(sending.ui.status.className, "status err");
+  assert.equal(sending.ui.later.disabled, false, "a failed send can be tried again");
+  assert.equal(sending.ui.go.disabled, false);
+});
+
+test("what Add to list says is said in the language that was chosen", async () => {
+  const p = await open(DATA, "zh_CN");
+  p.ui.later.fire("click");
+  await settle();
+  assert.equal(p.ui.status.textContent, "已把 2 个任务加入 godm 下载列表。");
 });
 
 test("a stream with no name of its own is named for the page", async () => {
