@@ -105,6 +105,10 @@ type TaskView struct {
 	EndedAt      time.Time     `json:"ended_at,omitempty"`
 	Spent        time.Duration `json:"spent_ns,omitempty"`
 	RefreshUntil time.Time     `json:"refresh_until,omitempty"`
+	// Later says the download is on the download list, and TrySpeed how fast
+	// its try fetched, in bytes per second; see downloadlist.go.
+	Later    bool  `json:"later,omitempty"`
+	TrySpeed int64 `json:"try_speed,omitempty"`
 }
 
 type jobRequest struct {
@@ -125,6 +129,9 @@ type jobRequest struct {
 	// request with no variant in it asks for the best, see addRequest. A list
 	// saved before that has none for 0, and still reads as 0.
 	Variant int `json:"variant"`
+	// Later puts the download on the download list: it is tried, then waits
+	// to be started. See downloadlist.go.
+	Later bool `json:"later,omitempty"`
 }
 
 // addRequest is a jobRequest as a caller hands one in. The one difference is
@@ -194,6 +201,9 @@ type managedTask struct {
 	// while it waits in the queue, or whose first request fails, never gets
 	// that far, and the run after it has to know all the same.
 	relinked bool
+	// tryHeld is the generation of the run that watchTry stopped because the
+	// try had done its part, so that the run ends on the list.
+	tryHeld int
 
 	lastRecv int64
 	lastAt   time.Time
@@ -415,7 +425,13 @@ type Manager struct {
 	order   []string // queue order: insertion
 	limit   int
 	running int
-	wake    chan struct{} // closed and replaced whenever scheduling state changes
+	// trying counts the tries of the download list under way, which have
+	// lanes of their own beside the queue; see downloadlist.go.
+	trying int
+	wake   chan struct{} // closed and replaced whenever scheduling state changes
+	// listNext is when the download list is next started by the clock, zero
+	// for never. Guarded by mu.
+	listNext time.Time
 
 	outDir string
 	seq    atomic.Uint64
@@ -557,11 +573,14 @@ func validateURL(u string) error {
 	return nil
 }
 
+// sameActiveDownload reports whether t is the same download, to the same
+// folder, waiting, running or waiting on the download list, so that asking for
+// it twice does not fetch it twice.
 func sameActiveDownload(t *managedTask, req jobRequest, outDir string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	switch t.view.State {
-	case StateQueued, StateRunning:
+	case StateQueued, StateRunning, StateListed:
 	default:
 		return false
 	}
@@ -593,7 +612,7 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 		view: TaskView{
 			ID: id, URL: req.URL, Referrer: req.Referrer, Filename: req.Filename,
 			State: StateQueued, Size: -1, Conns: req.Connections, ConnsWanted: req.Connections,
-			AddedAt: time.Now(), SpeedLimit: req.SpeedLimit,
+			AddedAt: time.Now(), SpeedLimit: req.SpeedLimit, Later: req.Later,
 		},
 	}
 	gen := mt.queueRun() // nobody else can see the task yet
@@ -615,6 +634,11 @@ func (m *Manager) Add(req jobRequest) (string, error) {
 		if existing := m.tasks[existingID]; existing != nil &&
 			(sameActiveDownload(existing, req, outDir) || sameTorrent(existing, req)) {
 			m.mu.Unlock()
+			// The same download asked for now, while it waits on the list, is
+			// the list's copy started rather than a second one.
+			if !req.Later {
+				m.startLater(existingID)
+			}
 			return existingID, nil
 		}
 	}
@@ -684,15 +708,19 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 		return
 	}
 
-	if !m.acquire(ctx, mt, gen) {
+	line, ok := m.acquire(ctx, mt, gen)
+	if !ok {
 		m.finishRun(mt, gen, StatePaused, "", "")
 		return
 	}
-	defer m.release()
+	defer m.release(line)
 
 	mt.mu.Lock()
 	mt.inFlight = true
 	mt.mu.Unlock()
+	if line == laneTry {
+		go m.watchTry(ctx, mt, gen, cancel)
+	}
 
 	var donePath string
 	var err error
@@ -803,7 +831,9 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	case err == nil:
 		m.finishRun(mt, gen, StateDone, "", donePath)
 	case ctx.Err() != nil:
-		m.finishRun(mt, gen, StatePaused, "", "")
+		if m.finishRun(mt, gen, StatePaused, "", "") {
+			m.Resume(id)
+		}
 	case errors.As(err, &expired), errors.As(err, &mismatch):
 		m.finishRun(mt, gen, StateNeedsRefresh, err.Error(), "")
 	default:
@@ -817,10 +847,21 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 	}
 }
 
+// lane is which of the two lines a run took its slot from: the queue of
+// downloads, or the tries of the download list.
+type lane int
+
+const (
+	laneQueue lane = iota
+	laneTry
+)
+
 // acquire blocks until the task may run: a slot is free and no task added
 // before it is still waiting. A download list is only predictable if it
-// starts in the order it was built.
-func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
+// starts in the order it was built. A task on the download list waits in the
+// line of tries instead, and one taken off the list while it waits moves over
+// to the queue. It says which line the slot came from.
+func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) (lane, bool) {
 	mt.mu.Lock()
 	mt.waitingSlot = true
 	mt.mu.Unlock()
@@ -832,8 +873,22 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 
 	for {
 		m.mu.Lock()
-		if m.running < m.limit && m.nextInLineLocked() == mt {
+		mt.mu.Lock()
+		try := mt.req.Later
+		mt.mu.Unlock()
+		free := m.running < m.limit && m.nextInLineLocked() == mt
+		if try {
+			free = m.trying < tryLanes && m.nextTryLocked() == mt
+		}
+		if free {
 			mt.mu.Lock()
+			if mt.req.Later != try {
+				// Taken off the list since it was looked at: it waits in the
+				// queue's line now.
+				mt.mu.Unlock()
+				m.mu.Unlock()
+				continue
+			}
 			ok := mt.gen == gen && !mt.removed
 			if ok {
 				mt.waitingSlot = false
@@ -843,14 +898,20 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 				mt.view.StartedAt = time.Now().Add(-mt.view.Spent)
 			}
 			mt.mu.Unlock()
+			got := laneQueue
 			if ok {
-				m.running++
+				if try {
+					m.trying++
+					got = laneTry
+				} else {
+					m.running++
+				}
 				m.syncAwakeLocked()
 			}
 			m.broadcastLocked()
 			m.mu.Unlock()
 			m.dirty.Store(true)
-			return ok
+			return got, ok
 		}
 		ch := m.wake
 		m.mu.Unlock()
@@ -861,7 +922,7 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 			m.mu.Lock()
 			m.broadcastLocked() // the head of the line may have just changed
 			m.mu.Unlock()
-			return false
+			return laneQueue, false
 		}
 	}
 }
@@ -870,7 +931,8 @@ func (m *Manager) acquire(ctx context.Context, mt *managedTask, gen int) bool {
 // not by which goroutine happened to reach acquire first: goroutines start in
 // no particular order, and a list that runs 1, 3, 2 is not a queue. A task that
 // is busy checking whether it is a refreshed link is skipped so a slow probe
-// cannot hold up everything behind it.
+// cannot hold up everything behind it, and so is one waiting for its try on
+// the download list, which has a line of its own.
 func (m *Manager) nextInLineLocked() *managedTask {
 	for _, id := range m.order {
 		t := m.tasks[id]
@@ -878,7 +940,7 @@ func (m *Manager) nextInLineLocked() *managedTask {
 			continue
 		}
 		t.mu.Lock()
-		eligible := t.view.State == StateQueued && !t.matching
+		eligible := t.view.State == StateQueued && !t.matching && !t.req.Later
 		t.mu.Unlock()
 		if eligible {
 			return t
@@ -887,9 +949,13 @@ func (m *Manager) nextInLineLocked() *managedTask {
 	return nil
 }
 
-func (m *Manager) release() {
+func (m *Manager) release(l lane) {
 	m.mu.Lock()
-	m.running--
+	if l == laneTry {
+		m.trying--
+	} else {
+		m.running--
+	}
 	m.syncAwakeLocked()
 	m.broadcastLocked()
 	m.mu.Unlock()
@@ -942,7 +1008,10 @@ func (t *managedTask) discardYTDLP() {
 	}
 }
 
-func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path string) {
+// finishRun writes how a run ended. A run called off for the download list
+// (see stoppedLocked) may end on the list rather than paused, or ask, by
+// returning true, to be run again.
+func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path string) (again bool) {
 	finalSize, haveFinalSize := int64(0), false
 	if st == StateDone && path != "" {
 		if fi, err := os.Stat(path); err == nil && !fi.IsDir() {
@@ -952,7 +1021,10 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	mt.mu.Lock()
 	if mt.gen != gen {
 		mt.mu.Unlock()
-		return
+		return false
+	}
+	if st == StatePaused {
+		st, again = mt.stoppedLocked(gen)
 	}
 	now := time.Now()
 	if mt.view.State == StateRunning {
@@ -983,6 +1055,8 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		if haveFinalSize {
 			mt.view.Size = finalSize
 		}
+		// A file small enough to finish in its try is done, not waiting.
+		mt.setLaterLocked(false)
 		mt.view.EndedAt = now
 		mt.view.Received = mt.view.Size
 		mt.view.Segments = nil
@@ -1009,10 +1083,11 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	m.broadcastLocked()
 	m.mu.Unlock()
 
-	if st != StatePaused {
+	if st != StatePaused && st != StateListed {
 		m.checkAfterAll(st == StateDone)
 	}
 	go m.announceFinish(view, st)
+	return again
 }
 
 func (m *Manager) Pause(id string) bool {
@@ -1042,17 +1117,26 @@ func (m *Manager) Pause(id string) bool {
 	return true
 }
 
-func (m *Manager) Resume(id string) bool {
+// Resume lets a stopped download run again. One on the download list is taken
+// off it and runs in full: it is wanted now.
+func (m *Manager) Resume(id string) bool { return m.resume(id, false) }
+
+// resume is Resume, but with onList it leaves a download on the download list,
+// where it is tried again and then waits.
+func (m *Manager) resume(id string, onList bool) bool {
 	mt := m.get(id)
 	if mt == nil {
 		return false
 	}
 	mt.mu.Lock()
 	switch mt.view.State {
-	case StatePaused, StateError, StateNeedsRefresh, StateAwaitingRefresh:
+	case StatePaused, StateError, StateNeedsRefresh, StateAwaitingRefresh, StateListed:
 		gen := mt.queueRun()
 		mt.view.Error = ""
 		mt.view.RefreshUntil = time.Time{}
+		if !onList {
+			mt.setLaterLocked(false)
+		}
 		mt.mu.Unlock()
 		m.dirty.Store(true)
 		m.mu.Lock()
@@ -1073,10 +1157,13 @@ func (m *Manager) PauseAll() {
 	}
 }
 
+// ResumeAll continues what was paused or failed. What is on the download list
+// stays on it: one stopped before its try is done is tried again, and one that
+// waits goes on waiting for the list to be started.
 func (m *Manager) ResumeAll() {
 	for _, v := range m.list(true) { // oldest first, so the queue keeps its order
 		if v.State == StatePaused || v.State == StateError {
-			m.Resume(v.ID)
+			m.resume(v.ID, v.Later)
 		}
 	}
 }
@@ -1342,6 +1429,9 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 		target.req.Referrer, target.view.Referrer = req.Referrer, req.Referrer
 	}
 	target.view.URL = req.URL
+	// Whoever asked last decides whether it waits on the download list: it
+	// does only if both did.
+	target.setLaterLocked(target.req.Later && req.Later)
 	gen := target.queueRun()
 	target.view.RefreshUntil = time.Time{}
 	target.relinked = true
@@ -1775,6 +1865,14 @@ func (m *Manager) restore(list savedList) {
 		m.settings = *list.Settings
 		m.settings.Folders = folderNames(list.Settings.Folders)
 		m.settings.Language = cleanLang(list.Settings.Language)
+		if at, err := checkListAt(m.settings.ListAt); err == nil {
+			m.settings.ListAt = at
+		} else {
+			m.settings.ListAt = ""
+		}
+		// A start due a moment ago, missed while godm was being restarted, is
+		// made now rather than tomorrow.
+		m.planListLocked(time.Now().Add(-listLate))
 		m.syncAwakeLocked()
 	}
 	if list.Notify != nil {
@@ -1790,6 +1888,12 @@ func (m *Manager) restore(list savedList) {
 		switch v.State {
 		case StateRunning, StateQueued:
 			v.State = StatePaused
+			if st.Req.Later && v.Received > 0 {
+				// Its try was cut short, but got far enough to be one; it waits
+				// on the list as it would have. One that got nothing is
+				// paused, and Resume all tries it again.
+				v.State = StateListed
+			}
 		case StateAwaitingRefresh:
 			v.State, v.RefreshUntil = StateNeedsRefresh, time.Time{}
 		}
@@ -1812,6 +1916,7 @@ func (m *Manager) restore(list savedList) {
 		}
 		st.Req.SpeedLimit = max(st.Req.SpeedLimit, 0)
 		v.SpeedLimit = st.Req.SpeedLimit
+		v.Later = st.Req.Later
 		mt := &managedTask{
 			view: v, req: st.Req, outDir: st.OutDir,
 			relinked: st.Relinked,
@@ -1911,6 +2016,9 @@ func RunDaemon(port int, outDir string, parallel int) error {
 	}
 	mgr.SetPower(osPower())
 	go mgr.saveLoop()
+	stopClock := make(chan struct{})
+	defer close(stopClock)
+	go mgr.listClock(stopClock)
 	s := &server{mgr: mgr, token: token, port: actual}
 
 	if err := writePort(actual); err != nil {
@@ -1966,6 +2074,7 @@ func (s *server) routes() *http.ServeMux {
 	mux.HandleFunc("/api/resume", s.guard(post(s.idAction(s.mgr.Resume))))
 	mux.HandleFunc("/api/pause-all", s.guard(post(s.handlePauseAll)))
 	mux.HandleFunc("/api/resume-all", s.guard(post(s.handleResumeAll)))
+	mux.HandleFunc("/api/list/start", s.guard(post(s.handleListStart)))
 	mux.HandleFunc("/api/remove", s.guard(post(s.handleRemove)))
 	mux.HandleFunc("/api/refresh", s.guard(post(s.handleRefresh)))
 	mux.HandleFunc("/api/address", s.guard(post(s.handleAddress)))
@@ -2152,7 +2261,14 @@ func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		// Carried here so that a page left open in another window follows a
 		// change of language made in this one.
 		"language": s.mgr.LanguageSetting(),
+		// And the download list's start by the clock, which its tab shows.
+		"list_at": s.mgr.listAt(), "list_daily": s.mgr.listDaily(), "list_next": s.mgr.ListNext(),
 	})
+}
+
+// handleListStart starts everything on the download list.
+func (s *server) handleListStart(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, map[string]any{"ok": true, "started": s.mgr.StartList()})
 }
 
 func (s *server) handlePauseAll(w http.ResponseWriter, r *http.Request) {

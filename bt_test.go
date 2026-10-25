@@ -597,7 +597,7 @@ func TestAHybridTorrentOfOneFileIsWrittenAsThatFile(t *testing.T) {
 	if err := mi.Write(&body); err != nil {
 		t.Fatal(err)
 	}
-	id, err := m.AddTorrentFile(body.Bytes(), "")
+	id, err := m.AddTorrentFile(body.Bytes(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

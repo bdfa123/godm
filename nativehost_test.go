@@ -672,3 +672,41 @@ func TestNativeConfigPassesTheDefaultsThrough(t *testing.T) {
 		t.Errorf("reached the daemon at %s", last.URL.Path)
 	}
 }
+
+// "Add to list" in the dialog, the menu and the picker sends later, which has
+// to reach the daemon for one download and for every link of a batch; a
+// message without it, as every other one is, starts at once.
+func TestNativeLaterReachesTheDaemon(t *testing.T) {
+	var got jobRequest
+	c, last := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("daemon got bad json: %v", err)
+		}
+		writeJSON(w, map[string]any{"ok": true, "id": "t1"})
+	})
+	for _, later := range []bool{true, false} {
+		got = jobRequest{}
+		var req nativeRequest
+		wire := `{"type":"download","url":"https://files.test/a.zip","later":` + strconv.FormatBool(later) + `}`
+		if err := json.Unmarshal([]byte(wire), &req); err != nil {
+			t.Fatal(err)
+		}
+		if resp := forwardNative(c, req); !resp.OK || last.URL.Path != "/api/download" {
+			t.Fatalf("got %+v at %s", resp, last.URL.Path)
+		}
+		if got.Later != later {
+			t.Errorf("a download sent with later %v reached the daemon with %v", later, got.Later)
+		}
+	}
+
+	var req nativeRequest
+	wire := `{"later":true,"items":[{"url":"https://files.test/a.zip"},{"url":"https://cdn.test/p","kind":"hls"}]}`
+	if err := json.Unmarshal([]byte(wire), &req); err != nil {
+		t.Fatal(err)
+	}
+	for i, j := range sentBatch(t, req) {
+		if !j.Later {
+			t.Errorf("item %d of a batch for the list was sent to start at once", i)
+		}
+	}
+}

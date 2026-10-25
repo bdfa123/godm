@@ -120,6 +120,13 @@ func TestTheSettingsDialogChoosesTheDownloadFolder(t *testing.T) {
 	}
 }
 
+// The manager page's download list: its tab, its bar and Add to list.
+func TestThePageShowsTheDownloadList(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "downloadlist", lang) })
+	}
+}
+
 // pageHarness is node code with no backtick in it. A scenario is an async
 // function; one that throws fails the run.
 const pageHarness = `
@@ -954,6 +961,93 @@ scenarios.downloaddir = async function () {
   same(els.setDlg.hidden, false, "the dialog closed on a mistake");
   assert(/ err/.test(toast().className), "the mistake should be shown as one");
   assert(toast().textContent.indexOf(words("full path", "完整路径")) >= 0, "the toast says why: " + toast().textContent);
+};
+
+// The download list: a tab of its own that the Unfinished tab leaves out, what
+// a try found, Start rather than Resume, starting the whole list, the time it
+// starts by itself, removing what a try left, and Add to list in Add links.
+scenarios.downloadlist = async function () {
+  const onList = (id, state, extra) => task(id, Object.assign({ state: state, size: 1 << 30, received: 8 << 20, later: true }, extra));
+  tasks = [
+    onList("w", "listed", { try_speed: 5 << 20, path: "C:\\d\\w.zip", speed: 0 }),
+    onList("t", "running"),
+    onList("q", "queued", { received: 0, size: -1 }),
+    task("p", { state: "paused" }),
+  ];
+  let started = 0, saved = null, batch = null;
+  routes["/api/list/start"] = () => { started++; return { ok: true, started: 3 }; };
+  routes["/api/settings"] = (body) => {
+    saved = body;
+    return { ok: true, list_at: body.list_at, list_daily: body.list_daily, list_next: body.list_at ? "2030-01-02T03:15:00Z" : "0001-01-01T00:00:00Z" };
+  };
+  routes["/api/batch"] = (body) => { batch = body; return { ok: true, ids: body.items.map((_, i) => "n" + i) }; };
+  await boot();
+
+  const tabs = els.tabs.innerHTML;
+  assert(/data-tab="list">[^<]*<span class="n">3</.test(tabs), "the list's tab should count what is on it: " + tabs);
+  assert(/data-tab="active">[^<]*<span class="n">1</.test(tabs), "Unfinished should leave the list out: " + tabs);
+  same(els.listBar.hidden, true, "the list's bar shows on another tab");
+
+  dispatch(child(els.tabs, "button", { "data-tab": "list" }), "click");
+  same(els.listBar.hidden, false, "the list's bar is missing on its tab");
+  const html = els.list.innerHTML;
+  assert(html.indexOf('data-task="w"') >= 0 && html.indexOf('data-task="t"') >= 0 && html.indexOf('data-task="q"') >= 0, "the list's tab should show what is on it");
+  assert(html.indexOf('data-task="p"') < 0, "the list's tab shows a download that is not on it");
+  assert(html.indexOf(words("Waiting", "待下载")) >= 0, "a download waiting on the list should say so");
+  assert(html.indexOf(words("Trying", "试下中")) >= 0, "a try under way should say so");
+  assert(html.indexOf(words("Tried 8.0 MB of 1.0 GB", "已试下 8.0 MB，共 1.0 GB")) >= 0, "a waiting download should say what its try fetched");
+  assert(html.indexOf(words("5.0 MB/s in the try", "试下速度 5.0 MB/s")) >= 0, "and how fast");
+  assert(html.indexOf(words("Waiting to be tried", "等待试下")) >= 0, "one not yet tried should say so, not where it is in the queue");
+  assert(html.indexOf('data-act="resume" data-id="w">' + words("Start", "开始") + "<") >= 0, "a waiting download is started with Start");
+  same(els.listStart.disabled, false, "Start all is off with downloads on the list");
+
+  dispatch(els.listStart, "click");
+  await tick();
+  same(started, 1, "Start all did not ask the daemon to start the list");
+
+  // Starting by the clock: nothing is sent while the time is being typed, then
+  // the last of it is.
+  els.listTimed.checked = true;
+  els.listAt.value = "03:15";
+  els.listDaily.value = "1";
+  dispatch(els.listAt, "change");
+  dispatch(els.listDaily, "change");
+  same(saved, null, "a time being typed was sent at once");
+  // The list is polled while the send waits, and the daemon still says the
+  // clock is off: that must not undo what was just chosen.
+  await poll();
+  same(els.listTimed.checked, true, "a poll undid the box just ticked");
+  runTimers();
+  await tick();
+  same(saved && saved.list_at, "03:15", "the time set");
+  same(saved.list_daily, true, "every day");
+  assert(els.listNext.textContent.indexOf("03:15") >= 0 || els.listNext.textContent.indexOf(":15") >= 0, "the bar should say when the list starts next: " + els.listNext.textContent);
+  els.listTimed.checked = false;
+  dispatch(els.listTimed, "change");
+  runTimers();
+  await tick();
+  same(saved.list_at, "", "turning the clock off sends no time");
+
+  // What a try left behind goes with the download it was for; anything else
+  // is kept unless asked.
+  dispatch(child(els.list, "button", { "data-act": "remove", "data-id": "w" }), "click");
+  same(els.rmDelete.checked, true, "removing a download on the list should take its tried part too");
+  dispatch(child(els.list, "button", { "data-act": "remove", "data-id": "p" }), "click");
+  same(els.rmDelete.checked, false, "removing another download should keep its file unless asked");
+
+  // Add links has Add to list beside Add.
+  els.addText.value = "https://files.test/a.zip\nhttps://files.test/b.zip";
+  dispatch(els.addText, "input");
+  same(els.addLater.disabled, false, "Add to list is off with links in the box");
+  dispatch(els.addLater, "click");
+  await tick();
+  assert(batch && batch.items.length === 2 && batch.items.every((i) => i.later === true), "Add to list should send the links for the list: " + JSON.stringify(batch));
+  same(page("S.tab"), "list", "after adding to the list the page should show the list");
+  els.addText.value = "https://files.test/c.zip";
+  dispatch(els.addText, "input");
+  dispatch(els.addGo, "click");
+  await tick();
+  same(batch.items[0].later, false, "Add should send the link to start now");
 };
 
 const run = scenarios[which];

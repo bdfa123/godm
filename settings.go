@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Settings are the daemon-wide choices the Settings dialog edits. They are
@@ -27,6 +28,11 @@ type Settings struct {
 	// chosen in the Settings dialog. Empty means the folder godm was started
 	// with: the -o flag, GODM_DOWNLOAD_DIR, or the Downloads folder.
 	DownloadDir string `json:"download_dir,omitempty"`
+	// ListAt is the time of day, "15:04", at which the download list starts by
+	// itself, empty for never; ListDaily makes that every day rather than
+	// once. See downloadlist.go.
+	ListAt    string `json:"list_at,omitempty"`
+	ListDaily bool   `json:"list_daily,omitempty"`
 }
 
 func defaultSettings() Settings {
@@ -59,6 +65,9 @@ type settingsUpdate struct {
 	// DownloadDir is a full path, or empty to go back to the folder godm was
 	// started with.
 	DownloadDir *string `json:"download_dir"`
+	// ListAt is "15:04", or empty to stop starting the list by the clock.
+	ListAt    *string `json:"list_at"`
+	ListDaily *bool   `json:"list_daily"`
 }
 
 // defaultDirLocked is the folder a new download goes to when it names none.
@@ -125,6 +134,13 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	if u.Language != nil && !validLang(*u.Language) {
 		return fmt.Errorf("unknown language %q: use %s, %s or %s", *u.Language, langAuto, langEN, langZH)
 	}
+	var listAt string
+	if u.ListAt != nil {
+		var err error
+		if listAt, err = checkListAt(*u.ListAt); err != nil {
+			return err
+		}
+	}
 	// Checked outside the lock: it touches the disk, which can be a slow one.
 	var dir string
 	if u.DownloadDir != nil {
@@ -161,6 +177,15 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 		}
 		m.settings.DownloadDir = dir
 	}
+	if u.ListAt != nil {
+		m.settings.ListAt = listAt
+	}
+	if u.ListDaily != nil {
+		m.settings.ListDaily = *u.ListDaily
+	}
+	if u.ListAt != nil || u.ListDaily != nil {
+		m.planListLocked(time.Now())
+	}
 	if u.AfterAll != nil {
 		// Choosing the same thing again changes nothing. Choosing something else
 		// starts counting finished downloads afresh.
@@ -192,6 +217,10 @@ func (m *Manager) settingsView() map[string]any {
 		"out_dir":      m.defaultDirLocked(),
 		"download_dir": s.DownloadDir,
 		"started_dir":  m.outDir,
+		// When the download list starts by itself, and next does.
+		"list_at":    s.ListAt,
+		"list_daily": s.ListDaily,
+		"list_next":  m.listNext,
 		// What was chosen, and what that comes to on this computer right now.
 		"language":        cleanLang(s.Language),
 		"language_active": resolveLang(s.Language),
@@ -216,4 +245,16 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, s.mgr.settingsView())
+}
+
+func (m *Manager) listAt() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.settings.ListAt
+}
+
+func (m *Manager) listDaily() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.settings.ListDaily
 }

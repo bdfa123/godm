@@ -108,6 +108,6 @@ func (m *Manager) SetPower(p powerOps) {
 // a slot, and the user has not switched the feature off. Callers hold m.mu.
 func (m *Manager) syncAwakeLocked() {
 	if m.awake != nil {
-		m.awake.Want(m.settings.KeepAwake && m.running > 0)
+		m.awake.Want(m.settings.KeepAwake && m.running+m.trying > 0)
 	}
 }

@@ -484,8 +484,14 @@ func (s *server) handlePlay(w http.ResponseWriter, r *http.Request) {
 	case StateAwaitingRefresh:
 		writeJSON(w, map[string]any{"ok": false, "error": "the download is waiting for a fresh link: play it once it continues"})
 		return
-	case StatePaused, StateError:
+	case StatePaused, StateError, StateListed:
 		s.mgr.Resume(id)
+	default:
+		if v.Later {
+			// A try stops at its few megabytes and would leave the player
+			// waiting; one that is to be watched is wanted in full.
+			s.mgr.startLater(id)
+		}
 	}
 	link := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
 		s.port, url.PathEscape(id), url.PathEscape(name), url.QueryEscape(s.token))

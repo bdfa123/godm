@@ -89,6 +89,9 @@ const uiHTML = `<!doctype html>
   .tab.attn .n { color: var(--warn); font-weight: 700; }
 
   main { padding: 10px 18px 40px; max-width: 1100px; margin: 0 auto; }
+  .listbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 18px 0; max-width: 1100px; margin: 0 auto; }
+  .listbar .check { margin: 0; }
+  .listbar .grow { flex: 1; color: var(--muted); font-size: 12.5px; }
 
   /* ---------- task card ---------- */
   .task {
@@ -121,7 +124,7 @@ const uiHTML = `<!doctype html>
   .fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width .35s ease; }
   .fill.done { background: var(--ok); } .fill.error { background: var(--err); }
   .fill.needs_refresh, .fill.awaiting_refresh { background: var(--warn); }
-  .fill.paused, .fill.queued { background: var(--faint); }
+  .fill.paused, .fill.queued, .fill.listed { background: var(--faint); }
 
   .segmap { position: relative; height: 12px; background: var(--track); border-radius: 3px; overflow: hidden; margin: 2px 0 6px; }
   .seg { position: absolute; top: 0; bottom: 0; border-right: 2px solid var(--gap); overflow: hidden; }
@@ -237,6 +240,13 @@ const uiHTML = `<!doctype html>
 </div>
 
 <div class="tabs" id="tabs"></div>
+<div class="listbar" id="listBar" hidden>
+  <button class="btn primary small" id="listStart" data-i18n="list.start"></button>
+  <label class="check"><input type="checkbox" id="listTimed"> <span data-i18n="list.timed"></span></label>
+  <input type="time" id="listAt">
+  <select id="listDaily"><option value="1" data-i18n="list.daily"></option><option value="0" data-i18n="list.once"></option></select>
+  <span class="grow" id="listNext"></span>
+</div>
 <main id="list"></main>
 
 <div class="scrim" id="addDlg" hidden>
@@ -250,6 +260,7 @@ const uiHTML = `<!doctype html>
       <input type="file" id="torrentFile" accept=".torrent,application/x-bittorrent" multiple hidden>
       <label class="field"><span data-i18n="add.conns"></span> <input type="number" id="addConns" value="8" min="1" max="32" style="width:64px"></label>
       <button class="btn" data-close="addDlg" data-i18n="common.cancel"></button>
+      <button class="btn" id="addLater" disabled data-i18n="add.later" data-i18n-title="add.later.tip"></button>
       <button class="btn primary" id="addGo" disabled></button>
     </div>
   </div>
@@ -382,6 +393,7 @@ I18N.en = {
   "net.offline": "Not connected to the godm service",
 
   "tab.all": "All",
+  "tab.list": "Download list",
   "tab.active": "Unfinished",
   "tab.done": "Finished",
   "tab.attn": "Needs attention",
@@ -391,6 +403,8 @@ I18N.en = {
   "empty.first.text": "Downloads you start in Chrome appear here automatically.<br>You can also press Ctrl+V anywhere in this window to paste links, or use Add links.",
 
   "state.queued": "Queued",
+  "state.listed": "Waiting",
+  "state.trying": "Trying",
   "state.running": "Downloading",
   "state.paused": "Paused",
   "state.done": "Finished",
@@ -439,6 +453,7 @@ I18N.en = {
   "act.playNow": "Play now",
   "act.pause": "Pause",
   "act.resume": "Resume",
+  "act.start": "Start",
   "act.showFolder": "Show in folder",
   "act.openFolder": "Open folder",
   "act.conns": "Connections",
@@ -488,6 +503,28 @@ I18N.en = {
   "toast.address.check": "Checking the new link…",
   "toast.added.one": "Added {n} download",
   "toast.added.other": "Added {n} downloads",
+  "toast.listed.one": "Added {n} download to the download list",
+  "toast.listed.other": "Added {n} downloads to the download list",
+  "toast.list.one": "Started {n} download",
+  "toast.list.other": "Started {n} downloads",
+  "toast.list.none": "There is nothing on the list to start",
+  "toast.listAt": "The list starts {when}",
+  "toast.listAtOff": "The list no longer starts by itself",
+  "list.start": "Start all",
+  "list.timed": "Start at",
+  "list.daily": "every day",
+  "list.once": "once",
+  "list.next": "Next start: {when}",
+  "list.today": "today at {time}",
+  "list.tomorrow": "tomorrow at {time}",
+  "list.on": "on {d}/{m} at {time}",
+  "list.empty.title": "The download list is empty",
+  "list.empty.text": "Choose Add to list in the browser's download window, in Add links, in the window for picking links or on a link's right-click menu. godm fetches a little of each to check the link, then it waits here until you start it, or until the time set above.",
+  "meta.tried": "Tried {received} of {size}",
+  "meta.triedNoSize": "Tried {received}",
+  "meta.trySpeed": "{speed} in the try",
+  "meta.triedNothing": "Nothing came in during the try",
+  "meta.tryWait": "Waiting to be tried",
   "toast.torrent.one": "Added {n} torrent",
   "toast.torrent.other": "Added {n} torrents",
   "toast.torrent.some": "Added {n}.",
@@ -506,6 +543,8 @@ I18N.en = {
   "add.conns": "Connections",
   "add.go": "Add",
   "add.goMany": "Add {n} downloads",
+  "add.later": "Add to list",
+  "add.later.tip": "Fetch a little of each now, and start them later from the download list",
   "rm.title": "Remove download",
   "rm.delete": "Also delete the file from disk",
   "rm.go": "Remove",
@@ -616,6 +655,7 @@ I18N.zh = {
   "net.offline": "未连接到 godm 服务",
 
   "tab.all": "全部",
+  "tab.list": "下载列表",
   "tab.active": "未完成",
   "tab.done": "已完成",
   "tab.attn": "需要处理",
@@ -625,6 +665,8 @@ I18N.zh = {
   "empty.first.text": "在 Chrome 中开始的下载会自动显示在这里。<br>您也可以在此窗口任意位置按 Ctrl+V 粘贴链接，或使用“添加链接”。",
 
   "state.queued": "排队中",
+  "state.listed": "待下载",
+  "state.trying": "试下中",
   "state.running": "下载中",
   "state.paused": "已暂停",
   "state.done": "已完成",
@@ -673,6 +715,7 @@ I18N.zh = {
   "act.playNow": "立即播放",
   "act.pause": "暂停",
   "act.resume": "继续",
+  "act.start": "开始",
   "act.showFolder": "在文件夹中显示",
   "act.openFolder": "打开文件夹",
   "act.conns": "查看连接",
@@ -722,6 +765,28 @@ I18N.zh = {
   "toast.address.check": "正在检查新链接…",
   "toast.added.one": "已添加 {n} 个任务",
   "toast.added.other": "已添加 {n} 个任务",
+  "toast.listed.one": "已把 {n} 个任务加入下载列表",
+  "toast.listed.other": "已把 {n} 个任务加入下载列表",
+  "toast.list.one": "已开始 {n} 个下载",
+  "toast.list.other": "已开始 {n} 个下载",
+  "toast.list.none": "列表里没有可以开始的下载",
+  "toast.listAt": "列表将在{when}开始",
+  "toast.listAtOff": "已关闭定时开始",
+  "list.start": "全部开始",
+  "list.timed": "定时开始",
+  "list.daily": "每天",
+  "list.once": "仅一次",
+  "list.next": "下次开始：{when}",
+  "list.today": "今天 {time}",
+  "list.tomorrow": "明天 {time}",
+  "list.on": "{m}月{d}日 {time}",
+  "list.empty.title": "下载列表是空的",
+  "list.empty.text": "在浏览器的下载确认窗口、“添加链接”、选择链接窗口或链接的右键菜单里选“加入列表”。godm 会先每个下一小段确认链接能用，然后在这里等你开始，或等到上面设定的时间。",
+  "meta.tried": "已试下 {received}，共 {size}",
+  "meta.triedNoSize": "已试下 {received}",
+  "meta.trySpeed": "试下速度 {speed}",
+  "meta.triedNothing": "试下时没有收到数据",
+  "meta.tryWait": "等待试下",
   "toast.torrent.one": "已添加 {n} 个种子",
   "toast.torrent.other": "已添加 {n} 个种子",
   "toast.torrent.some": "已添加 {n} 个。",
@@ -740,6 +805,8 @@ I18N.zh = {
   "add.conns": "连接数",
   "add.go": "添加",
   "add.goMany": "添加 {n} 个任务",
+  "add.later": "加入列表",
+  "add.later.tip": "先每个下一小段，之后在“下载列表”里开始",
   "rm.title": "移除任务",
   "rm.delete": "同时从磁盘删除文件",
   "rm.go": "移除",
@@ -909,7 +976,7 @@ function hostOf(u) { try { return new URL(u).host; } catch (e) { return ""; } }
 
 // The keys of the words for each state of a download and of a connection.
 var LABEL = {
-  queued: "state.queued", running: "state.running", paused: "state.paused", done: "state.done",
+  queued: "state.queued", running: "state.running", paused: "state.paused", done: "state.done", listed: "state.listed",
   error: "state.error", needs_refresh: "state.needs_refresh", awaiting_refresh: "state.awaiting_refresh"
 };
 var SEG_LABEL = {
@@ -920,6 +987,7 @@ function word(map, state) { return map[state] ? tr(map[state]) : state; }
 // A torrent says more than its state: it may still be learning what files it
 // has, or be finished and uploading.
 function stateLabel(t) {
+  if (t.later && t.state === "running") return tr("state.trying");
   if (t.kind === "bt" && t.state === "running" && t.stage === "metadata") return tr("state.metadata");
   if (t.kind === "bt" && t.state === "done" && t.stage === "seeding") return tr("state.seeding");
   return word(LABEL, t.state);
@@ -928,7 +996,9 @@ function attention(t) { return t.state === "needs_refresh" || t.state === "await
 function inTab(t, tab) {
   // Paused belongs with unfinished work: pausing a download must not make it
   // vanish from the view the user just clicked Pause in.
-  if (tab === "active") return t.state === "running" || t.state === "queued" || t.state === "paused";
+  if (tab === "active") return (t.state === "running" || t.state === "queued" || t.state === "paused") && !t.later;
+  // The download list is what waits to be started, and what is being tried.
+  if (tab === "list") return !!t.later && t.state !== "done";
   if (tab === "done") return t.state === "done";
   if (tab === "attn") return attention(t);
   return true;
@@ -1105,7 +1175,7 @@ function taskControls(t) {
 }
 
 function queuePosition(t) {
-  var queued = S.tasks.filter(function (x) { return x.state === "queued"; })
+  var queued = S.tasks.filter(function (x) { return x.state === "queued" && !x.later; })
     .sort(function (a, b) { return new Date(a.added_at) - new Date(b.added_at); });
   for (var i = 0; i < queued.length; i++) if (queued[i].id === t.id) return i + 1;
   return 0;
@@ -1182,6 +1252,7 @@ function metaLine(t) {
       else if (t.stage === "processing") bits.push(tr("meta.processing"));
       break;
     case "queued":
+      if (t.later) { bits.push(tr("meta.tryWait")); break; }
       var pos = queuePosition(t);
       bits.push(pos ? tr("meta.inLine", { n: pos }) : tr("meta.starting"));
       if (t.received > 0) bits.push(tr("meta.kept", { size: human(t.received) }));
@@ -1192,6 +1263,12 @@ function metaLine(t) {
         var secs = (new Date(t.ended_at) - new Date(t.started_at)) / 1000;
         if (secs > 0) bits.push(tr("meta.finishedIn", { time: dur(secs), speed: human(t.size / secs) + "/s" }));
       }
+      break;
+    case "listed":
+      if (t.received > 0) {
+        bits.push(hasSize ? tr("meta.tried", { received: human(t.received), size: human(t.size) }) : tr("meta.triedNoSize", { received: human(t.received) }));
+        if (t.try_speed > 0) bits.push(tr("meta.trySpeed", { speed: human(t.try_speed) + "/s" }));
+      } else bits.push(tr("meta.triedNothing"));
       break;
     default:
       if (t.received > 0) {
@@ -1234,10 +1311,11 @@ function playable(t, ext) {
   // list is known; pieces near where the player reads are fetched first.
   if (t.kind === "bt") ext = extOf(t.media);
   if (kindOf(ext) !== "video" && kindOf(ext) !== "audio") return false;
-  if (t.kind === "bt") return t.state === "done" || t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error";
+  if (t.kind === "bt") return t.state === "done" || t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error" || t.state === "listed";
   if (t.state === "done") return !!t.path;
   if (t.kind || !(t.size > 0) || t.resumable === false) return false;
-  return t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error";
+  // One on the download list is taken off it to be played: it is wanted now.
+  return t.state === "running" || t.state === "queued" || t.state === "paused" || t.state === "error" || t.state === "listed";
 }
 
 function card(t) {
@@ -1249,7 +1327,9 @@ function card(t) {
   var acts = [];
   if (playable(t, ext)) acts.push(["play", tr(t.state === "done" ? "act.play" : "act.playNow")]);
   if (t.state === "running" || t.state === "queued") acts.push(["pause", tr("act.pause")]);
-  if (t.state === "paused") acts.push(["resume", tr("act.resume")]);
+  // Starting one on the list takes it off the list and downloads all of it.
+  if (t.state === "listed" || (t.state === "paused" && t.later)) acts.push(["resume", tr("act.start")]);
+  else if (t.state === "paused") acts.push(["resume", tr("act.resume")]);
   if (t.path) acts.push(["open", tr(t.state === "done" ? "act.showFolder" : "act.openFolder")]);
   if (t.state !== "done" && (t.segments || []).length) acts.push(["conns", tr(open ? "act.connsHide" : "act.conns")]);
   if ((t.state === "paused" || t.state === "error") && !bt) acts.push(["address", tr("act.address")]);
@@ -1315,7 +1395,7 @@ function render() {
   var tasks = S.tasks, running = 0, speed = 0, queued = 0;
   tasks.forEach(function (t) {
     if (t.state === "running") { running++; speed += t.speed || 0; }
-    if (t.state === "queued") queued++;
+    if (t.state === "queued" && !t.later) queued++;
   });
   var line = running
     ? tr("stats.running", { n: running, speed: human(speed) + "/s" }) + (queued ? " · " + tr("stats.waiting", { n: queued }) : "")
@@ -1324,13 +1404,14 @@ function render() {
   var armed = { sleep: "stats.sleep", shutdown: "stats.shutdown" }[S.afterAll];
   document.getElementById("stats").innerHTML = line + (armed ? (line ? " · " : "") + "<b>" + tr(armed) + "</b>" : "");
 
-  var c = { all: tasks.length, active: 0, done: 0, attn: 0 };
+  var c = { all: tasks.length, list: 0, active: 0, done: 0, attn: 0 };
   tasks.forEach(function (t) {
+    if (inTab(t, "list")) c.list++;
     if (inTab(t, "active")) c.active++;
     if (inTab(t, "done")) c.done++;
     if (inTab(t, "attn")) c.attn++;
   });
-  var tabs = [["all", "tab.all"], ["active", "tab.active"], ["done", "tab.done"], ["attn", "tab.attn"]];
+  var tabs = [["all", "tab.all"], ["list", "tab.list"], ["active", "tab.active"], ["done", "tab.done"], ["attn", "tab.attn"]];
   document.getElementById("tabs").innerHTML = tabs.map(function (x) {
     return '<button class="tab' + (S.tab === x[0] ? " on" : "") + (x[0] === "attn" && c.attn ? " attn" : "") +
       '" data-tab="' + x[0] + '">' + esc(tr(x[1])) + '<span class="n">' + c[x[0]] + "</span></button>";
@@ -1345,7 +1426,10 @@ function render() {
   // select stays where it is and everything around it is refreshed.
   var a = document.activeElement;
   var held = a && a.tagName === "SELECT" && list.contains(a) ? a : null;
-  if (!shown.length) {
+  renderListBar(c.list);
+  if (!shown.length && S.tab === "list") {
+    list.innerHTML = '<div class="empty"><b>' + tr("list.empty.title") + "</b>" + tr("list.empty.text") + "</div>";
+  } else if (!shown.length) {
     list.innerHTML = tasks.length
       ? '<div class="empty"><b>' + tr("empty.view.title") + "</b>" + tr("empty.view.text") + "</div>"
       : '<div class="empty"><b>' + tr("empty.first.title") + "</b>" + tr("empty.first.text") + "</div>";
@@ -1397,6 +1481,9 @@ function poll() {
     if (d.language && d.language !== LANG_SETTING && asked > S.langAt) setLang(d.language);
     S.tasks = d.tasks || [];
     S.afterAll = d.after_all;
+    S.listAt = d.list_at || "";
+    S.listDaily = !!d.list_daily;
+    S.listNext = d.list_next;
     if (d.limit && d.limit !== S.limit) { S.limit = d.limit; document.getElementById("limit").value = d.limit; }
     var sp = document.getElementById("speed");
     if (d.speed_limit !== undefined && d.speed_limit !== S.speed && document.activeElement !== sp) {
@@ -1469,7 +1556,8 @@ document.getElementById("list").addEventListener("click", function (e) {
     S.target = id;
     document.getElementById("rmName").textContent = t ? nameOf(t) : "";
     var del = document.getElementById("rmDelete");
-    del.checked = false;
+    // What a try fetched of a download on the list is of no use on its own.
+    del.checked = !!(t && t.later && t.state !== "done");
     del.parentElement.hidden = !(t && t.path);
     show("rmDlg");
   }
@@ -1565,6 +1653,7 @@ function updateAddCount() {
   var go = document.getElementById("addGo");
   go.disabled = !n;
   go.textContent = n > 1 ? tr("add.goMany", { n: n }) : tr("add.go");
+  document.getElementById("addLater").disabled = !n;
 }
 function openAdd(prefill) {
   var ta = document.getElementById("addText");
@@ -1578,12 +1667,14 @@ document.getElementById("addBtn").addEventListener("click", function () {
   openAdd("");
 });
 document.getElementById("addText").addEventListener("input", updateAddCount);
-document.getElementById("addGo").addEventListener("click", function () {
+// addLinks adds what is in the box, to download now or, with later, to the
+// download list, where each is tried and then waits to be started.
+function addLinks(later) {
   var links = parseLinks(document.getElementById("addText").value);
   var conns = parseInt(document.getElementById("addConns").value, 10) || 8;
   if (!links.length) return;
   hide("addDlg");
-  post("/api/batch", { items: links.map(function (u) { return { url: u, connections: conns }; }) }).then(function (r) {
+  post("/api/batch", { items: links.map(function (u) { return { url: u, connections: conns, later: later }; }) }).then(function (r) {
     var n = (r.ids || []).length, errors = r.errors || [];
     // Each reason starts with the link it is about. Those links stay in the
     // box, in the dialog, to be corrected; the rest were taken.
@@ -1595,12 +1686,71 @@ document.getElementById("addGo").addEventListener("click", function () {
       // A pasted list can be long; the box holds every link that was refused,
       // and the toast only has to say what kind of trouble it was.
       var why = errors.slice(0, 3).join("; ") + (errors.length > 3 ? " …" : "");
-      toast((n ? trn("toast.added", n) + " · " : "") + tr("toast.rejected", { n: errors.length, why: why }), "err");
+      toast((n ? (later ? trn("toast.listed", n) : trn("toast.added", n)) + " · " : "") + tr("toast.rejected", { n: errors.length, why: why }), "err");
       openAdd("");
     } else {
-      toast(trn("toast.added", n));
+      toast((later ? trn("toast.listed", n) : trn("toast.added", n)));
     }
-    S.tab = "all";
+    S.tab = later ? "list" : "all";
+    poll();
+  }).catch(fail);
+}
+document.getElementById("addGo").addEventListener("click", function () { addLinks(false); });
+document.getElementById("addLater").addEventListener("click", function () { addLinks(true); });
+
+// ---------- the download list ----------
+// The bar above the list starts it now, or says when it starts by itself. What
+// is on the screen is not written over while the person is changing it.
+function whenText(iso) {
+  var d = iso ? new Date(iso) : null;
+  if (!d || isNaN(d) || d.getFullYear() < 2000) return "";
+  var time = ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+  var day = new Date(); day.setHours(0, 0, 0, 0);
+  var then = new Date(d); then.setHours(0, 0, 0, 0);
+  var days = Math.round((then - day) / 86400000);
+  if (days === 0) return tr("list.today", { time: time });
+  if (days === 1) return tr("list.tomorrow", { time: time });
+  return tr("list.on", { m: d.getMonth() + 1, d: d.getDate(), time: time });
+}
+function renderListBar(count) {
+  var bar = document.getElementById("listBar");
+  bar.hidden = S.tab !== "list";
+  if (bar.hidden) return;
+  document.getElementById("listStart").disabled = !count;
+  var when = S.listAt ? whenText(S.listNext) : "";
+  document.getElementById("listNext").textContent = when ? tr("list.next", { when: when }) : "";
+  if (bar.contains(document.activeElement) || S.listSaving) return;
+  document.getElementById("listTimed").checked = !!S.listAt;
+  var at = document.getElementById("listAt");
+  if (S.listAt) at.value = S.listAt; else if (!at.value) at.value = "02:00";
+  document.getElementById("listDaily").value = S.listDaily ? "1" : "0";
+}
+var listSaveTimer;
+function saveListTime() {
+  // What is sent is what the controls say now. The list is drawn again while
+  // the send waits, and would put back what the daemon last said.
+  var on = document.getElementById("listTimed").checked;
+  var at = document.getElementById("listAt").value || "02:00";
+  var daily = document.getElementById("listDaily").value === "1";
+  S.listSaving = true;
+  clearTimeout(listSaveTimer);
+  // A time typed digit by digit changes several times; only the last is sent.
+  listSaveTimer = setTimeout(function () {
+    post("/api/settings", { list_at: on ? at : "", list_daily: daily }).then(function (r) {
+      S.listAt = r.list_at || ""; S.listDaily = !!r.list_daily; S.listNext = r.list_next;
+      toast(S.listAt ? tr("toast.listAt", { when: whenText(S.listNext) }) : tr("toast.listAtOff"));
+    }).catch(fail).then(function () {
+      S.listSaving = false;
+      render();
+    });
+  }, 500);
+}
+["listTimed", "listAt", "listDaily"].forEach(function (id) {
+  document.getElementById(id).addEventListener("change", saveListTime);
+});
+document.getElementById("listStart").addEventListener("click", function () {
+  post("/api/list/start").then(function (r) {
+    toast(r.started ? trn("toast.list", r.started) : tr("toast.list.none"));
     poll();
   }).catch(fail);
 });

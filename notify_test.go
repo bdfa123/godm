@@ -243,12 +243,12 @@ func TestTimeSpentIsCarriedFromRunToRun(t *testing.T) {
 
 	// One that runs adds what it took.
 	gen = queue()
-	if !m.acquire(context.Background(), mt, gen) {
+	if _, ok := m.acquire(context.Background(), mt, gen); !ok {
 		t.Fatal("no slot")
 	}
 	time.Sleep(60 * time.Millisecond)
 	m.finishRun(mt, gen, StatePaused, "", "")
-	m.release()
+	m.release(laneQueue)
 	first := mt.snapshot().Spent
 	if first < before+60*time.Millisecond || first > before+time.Second {
 		t.Errorf("after a run of 60 ms on top of %v the time spent is %v", before, first)
@@ -257,12 +257,12 @@ func TestTimeSpentIsCarriedFromRunToRun(t *testing.T) {
 	// And the one that finishes says the whole of it.
 	time.Sleep(800 * time.Millisecond) // paused: not to be counted
 	gen = queue()
-	if !m.acquire(context.Background(), mt, gen) {
+	if _, ok := m.acquire(context.Background(), mt, gen); !ok {
 		t.Fatal("no slot")
 	}
 	time.Sleep(60 * time.Millisecond)
 	m.finishRun(mt, gen, StateDone, "", "")
-	m.release()
+	m.release(laneQueue)
 	v := mt.snapshot()
 	took := v.EndedAt.Sub(v.StartedAt)
 	if took < first+60*time.Millisecond || took > first+500*time.Millisecond {

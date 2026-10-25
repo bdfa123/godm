@@ -39,6 +39,9 @@ type nativeRequest struct {
 	Variant *int   `json:"variant"`
 	// Current is the folder a "browse" request should open the chooser at.
 	Current string `json:"current"`
+	// Later puts a download, or every link of a batch, on the download list
+	// instead of starting it.
+	Later bool `json:"later"`
 }
 
 // batchItem is one link picked from a page. Cookies are per item because the
@@ -337,6 +340,7 @@ func (req nativeRequest) job(url, filename, cookie string) jobRequest {
 		OutDir:      req.OutDir,
 		Kind:        req.Kind,
 		Variant:     variant,
+		Later:       req.Later,
 	}
 }
 

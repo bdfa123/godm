@@ -121,6 +121,18 @@ downloads nothing. The folder chosen is filled in the next time; empty the
 field to go back to godm's own. "Don't ask again" turns it off, and the options
 page turns it back on. Links picked in bulk skip the dialog.
 
+**Add to list** in that dialog, in **Add links**, in the window for picking
+links, or on a link's right-click menu puts the download on godm's **download
+list** instead, the way IDM's "Download Later" does. godm tries it at once: it
+fetches about 8 MB, or for 30 seconds if the link is slow (a little more on a
+fast link, since it checks a few times a second), which shows the link works,
+how large the file is and how fast it comes. Then the download waits on the list's tab until
+**Start** on its card, **Start all**, or the time set beside them (every day or
+once; godm has to be running then, and a start missed by more than half an
+hour is skipped). Tries run beside the queue, two at a time, so a list can be
+built while other downloads fill every slot. **Resume all** leaves the list
+alone.
+
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go. The list also holds the videos the page played
 while you watched it, which are not in its HTML: files and HLS streams, in a

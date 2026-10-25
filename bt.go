@@ -812,7 +812,7 @@ func magnetFor(mi *metainfo.MetaInfo) (string, error) {
 // AddTorrentFile queues the torrent a .torrent file describes. A copy is kept
 // in the config folder, so the task does not depend on wherever the user
 // picked the file from.
-func (m *Manager) AddTorrentFile(data []byte, outDir string) (string, error) {
+func (m *Manager) AddTorrentFile(data []byte, outDir string, later bool) (string, error) {
 	mi, ih, err := parseTorrentFile(data)
 	if err != nil {
 		return "", err
@@ -824,7 +824,7 @@ func (m *Manager) AddTorrentFile(data []byte, outDir string) (string, error) {
 	if err := m.bt.saveMetainfo(ih, mi); err != nil {
 		return "", err
 	}
-	id, err := m.Add(jobRequest{URL: link, Kind: "bt", OutDir: outDir})
+	id, err := m.Add(jobRequest{URL: link, Kind: "bt", OutDir: outDir, Later: later})
 	if err != nil {
 		m.dropUnownedMetainfo(ih, nil)
 	}
@@ -1836,7 +1836,8 @@ func (s *server) handleTorrentFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "that file is too large to be a .torrent", http.StatusRequestEntityTooLarge)
 		return
 	}
-	id, err := s.mgr.AddTorrentFile(data, r.URL.Query().Get("out_dir"))
+	q := r.URL.Query()
+	id, err := s.mgr.AddTorrentFile(data, q.Get("out_dir"), q.Get("later") == "1")
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2034,8 +2035,11 @@ func (s *server) playTorrent(w http.ResponseWriter, id string, mt *managedTask) 
 		}
 		open = playerLaunch{Target: p, Title: name}
 	} else {
-		if v.State == StatePaused || v.State == StateError {
+		if v.State == StatePaused || v.State == StateError || v.State == StateListed {
 			s.mgr.Resume(id)
+		} else if v.Later {
+			// See handlePlay: a torrent being tried is wanted in full now.
+			s.mgr.startLater(id)
 		}
 		link := fmt.Sprintf("http://127.0.0.1:%d/stream/%s/%s?token=%s",
 			s.port, url.PathEscape(id), url.PathEscape(name), url.QueryEscape(s.token))

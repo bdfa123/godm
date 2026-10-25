@@ -89,7 +89,7 @@ func TestARunCalledOffInTheQueueDoesNotTakeTheSlot(t *testing.T) {
 	m.mu.Unlock()
 	calledOff, cancel := context.WithCancel(context.Background())
 	cancel()
-	took := m.acquire(calledOff, mt, waiting)
+	_, took := m.acquire(calledOff, mt, waiting)
 	st := mt.snapshot().State
 	restore()
 	if took {
