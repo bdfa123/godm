@@ -92,6 +92,7 @@ const uiHTML = `<!doctype html>
   .listbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 18px 0; max-width: 1100px; margin: 0 auto; }
   .listbar .check { margin: 0; }
   .listbar .grow { flex: 1; color: var(--muted); font-size: 12.5px; }
+  .listbar .listq { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; color: var(--warn); font-size: 12.5px; }
 
   /* ---------- task card ---------- */
   .task {
@@ -246,6 +247,10 @@ const uiHTML = `<!doctype html>
   <input type="time" id="listAt">
   <select id="listDaily"><option value="1" data-i18n="list.daily"></option><option value="0" data-i18n="list.once"></option></select>
   <span class="grow" id="listNext"></span>
+  <div class="listq" id="listQueue" hidden>
+    <span id="listQueueText"></span>
+    <label class="field"><span data-i18n="top.limit"></span><select id="listLimit"></select></label>
+  </div>
 </div>
 <main id="list"></main>
 
@@ -518,8 +523,10 @@ I18N.en = {
   "list.today": "today at {time}",
   "list.tomorrow": "tomorrow at {time}",
   "list.on": "on {d}/{m} at {time}",
+  "list.full.one": "{n} download from the list is waiting for a slot: {running} of {limit} downloads at once are running, and it starts when one of them finishes. Allow more to start it now:",
+  "list.full.other": "{n} downloads from the list are waiting for a slot: {running} of {limit} downloads at once are running, and they start as those finish. Allow more to start them now:",
   "list.empty.title": "The download list is empty",
-  "list.empty.text": "Choose Add to list in the browser's download window, in Add links, in the window for picking links or on a link's right-click menu. godm fetches a little of each to check the link, then it waits here until you start it, or until the time set above.",
+  "list.empty.text": "Choose Add to list in the browser's download window, in Add links, in the window for picking links or on a link's right-click menu. godm fetches a little of each to check the link, then it waits here until you start it, or until the time set above. Once started it stays here until it is done.",
   "meta.tried": "Tried {received} of {size}",
   "meta.triedNoSize": "Tried {received}",
   "meta.trySpeed": "{speed} in the try",
@@ -780,8 +787,10 @@ I18N.zh = {
   "list.today": "今天 {time}",
   "list.tomorrow": "明天 {time}",
   "list.on": "{m}月{d}日 {time}",
+  "list.full.one": "列表里 {n} 个在排队等空位：同时下载数已满（{running}/{limit}），正在下的有一个下完就轮到它。调大就能马上开始：",
+  "list.full.other": "列表里 {n} 个在排队等空位：同时下载数已满（{running}/{limit}），正在下的下完一个就轮到下一个。调大就能马上开始：",
   "list.empty.title": "下载列表是空的",
-  "list.empty.text": "在浏览器的下载确认窗口、“添加链接”、选择链接窗口或链接的右键菜单里选“加入列表”。godm 会先每个下一小段确认链接能用，然后在这里等你开始，或等到上面设定的时间。",
+  "list.empty.text": "在浏览器的下载确认窗口、“添加链接”、选择链接窗口或链接的右键菜单里选“加入列表”。godm 会先每个下一小段确认链接能用，然后在这里等你开始，或等到上面设定的时间。开始后会一直留在这里，下完才移走。",
   "meta.tried": "已试下 {received}，共 {size}",
   "meta.triedNoSize": "已试下 {received}",
   "meta.trySpeed": "试下速度 {speed}",
@@ -997,8 +1006,10 @@ function inTab(t, tab) {
   // Paused belongs with unfinished work: pausing a download must not make it
   // vanish from the view the user just clicked Pause in.
   if (tab === "active") return (t.state === "running" || t.state === "queued" || t.state === "paused") && !t.later;
-  // The download list is what waits to be started, and what is being tried.
-  if (tab === "list") return !!t.later && t.state !== "done";
+  // The download list is what waits to be started, what is being tried, and
+  // what was started from it, until it is done: one waiting in the queue for
+  // a slot is still the list's.
+  if (tab === "list") return (!!t.later || !!t.from_list) && t.state !== "done";
   if (tab === "done") return t.state === "done";
   if (tab === "attn") return attention(t);
   return true;
@@ -1426,7 +1437,7 @@ function render() {
   // select stays where it is and everything around it is refreshed.
   var a = document.activeElement;
   var held = a && a.tagName === "SELECT" && list.contains(a) ? a : null;
-  renderListBar(c.list);
+  renderListBar();
   if (!shown.length && S.tab === "list") {
     list.innerHTML = '<div class="empty"><b>' + tr("list.empty.title") + "</b>" + tr("list.empty.text") + "</div>";
   } else if (!shown.length) {
@@ -1613,15 +1624,21 @@ document.getElementById("addrGo").addEventListener("click", function () {
 });
 
 // ---------- queue controls ----------
-(function () {
-  var sel = document.getElementById("limit");
+// The list bar has a second copy of the limit, beside the line saying that
+// the list waits for it; the two set the same thing.
+["limit", "listLimit"].forEach(function (id) {
+  var sel = document.getElementById(id);
   // The daemon allows up to 16, whatever -parallel it was started with.
   for (var i = 1; i <= 16; i++) sel.insertAdjacentHTML("beforeend", '<option value="' + i + '">' + i + "</option>");
   sel.value = S.limit;
   sel.addEventListener("change", function () {
-    post("/api/limit?n=" + sel.value).then(function (r) { S.limit = r.limit; poll(); }).catch(fail);
+    post("/api/limit?n=" + sel.value).then(function (r) {
+      S.limit = r.limit;
+      document.getElementById("limit").value = r.limit;
+      poll();
+    }).catch(fail);
   });
-})();
+});
 (function () {
   var sel = document.getElementById("speed");
   sel.innerHTML = speedOptions(S.speed);
@@ -1712,11 +1729,24 @@ function whenText(iso) {
   if (days === 1) return tr("list.tomorrow", { time: time });
   return tr("list.on", { m: d.getMonth() + 1, d: d.getDate(), time: time });
 }
-function renderListBar(count) {
+function renderListBar() {
   var bar = document.getElementById("listBar");
   bar.hidden = S.tab !== "list";
   if (bar.hidden) return;
-  document.getElementById("listStart").disabled = !count;
+  // Start all is for what waits on the list. What was started from it is
+  // shown with it, but has nothing left to start.
+  var startable = S.tasks.filter(function (t) { return t.later && t.state !== "done"; }).length;
+  document.getElementById("listStart").disabled = !startable;
+  // What was started from the list but waits for a slot is said to wait for
+  // one, beside the limit that would let it in, or Start all looks as if it
+  // had done nothing.
+  var running = S.tasks.filter(function (t) { return t.state === "running" && !t.later; }).length;
+  var waiting = S.tasks.filter(function (t) { return t.state === "queued" && t.from_list; }).length;
+  var full = waiting > 0 && running >= S.limit;
+  document.getElementById("listQueue").hidden = !full;
+  if (full) document.getElementById("listQueueText").textContent = trn("list.full", waiting, { running: running, limit: S.limit });
+  var limitSel = document.getElementById("listLimit");
+  if (document.activeElement !== limitSel) limitSel.value = S.limit;
   var when = S.listAt ? whenText(S.listNext) : "";
   document.getElementById("listNext").textContent = when ? tr("list.next", { when: when }) : "";
   if (bar.contains(document.activeElement) || S.listSaving) return;

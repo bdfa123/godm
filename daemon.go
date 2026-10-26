@@ -106,9 +106,11 @@ type TaskView struct {
 	Spent        time.Duration `json:"spent_ns,omitempty"`
 	RefreshUntil time.Time     `json:"refresh_until,omitempty"`
 	// Later says the download is on the download list, and TrySpeed how fast
-	// its try fetched, in bytes per second; see downloadlist.go.
+	// its try fetched, in bytes per second; FromList that it was started from
+	// the list, which goes on showing it until it is done. See downloadlist.go.
 	Later    bool  `json:"later,omitempty"`
 	TrySpeed int64 `json:"try_speed,omitempty"`
+	FromList bool  `json:"from_list,omitempty"`
 }
 
 type jobRequest struct {

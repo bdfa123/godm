@@ -69,6 +69,9 @@ func TestADownloadOnTheListIsTriedThenWaits(t *testing.T) {
 	if n := m.StartList(); n != 1 {
 		t.Fatalf("StartList started %d, want 1", n)
 	}
+	if v, _ := findTask(m, id); v.Later || !v.FromList {
+		t.Errorf("once started it is on the list %v, started from it %v; want off it, and shown with it until done", v.Later, v.FromList)
+	}
 	waitFor(t, 30*time.Second, "the download", stateIs(m, id, StateDone))
 	v, _ = findTask(m, id)
 	if v.Later {
@@ -108,8 +111,8 @@ func TestAFileSmallEnoughToFinishInItsTryIsDone(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, 20*time.Second, "the download", stateIs(m, id, StateDone))
-	if v, _ := findTask(m, id); v.Later {
-		t.Error("a finished download is still on the list")
+	if v, _ := findTask(m, id); v.Later || v.FromList {
+		t.Errorf("a download finished in its try is on the list %v, started from it %v; want neither", v.Later, v.FromList)
 	}
 }
 
@@ -225,10 +228,14 @@ func TestTheListIsKeptAcrossARestart(t *testing.T) {
 	cut.ID, cut.State = "t-cut", StateRunning
 	untried := cut
 	untried.ID, untried.State, untried.Received = "t-untried", StateQueued, 0
+	// And one started from the list, waiting in the queue.
+	started := cut
+	started.ID, started.State, started.Later, started.FromList = "t-started", StateQueued, false, true
 	m.mu.Lock()
 	m.tasks[cut.ID] = &managedTask{view: cut, req: jobRequest{URL: link + "?2", Later: true}}
 	m.tasks[untried.ID] = &managedTask{view: untried, req: jobRequest{URL: link + "?3", Later: true}}
-	m.order = append(m.order, cut.ID, untried.ID)
+	m.tasks[started.ID] = &managedTask{view: started, req: jobRequest{URL: link + "?4"}}
+	m.order = append(m.order, cut.ID, untried.ID, started.ID)
 	m.mu.Unlock()
 	if err := m.save(); err != nil {
 		t.Fatal(err)
@@ -247,6 +254,9 @@ func TestTheListIsKeptAcrossARestart(t *testing.T) {
 	}
 	if v, ok := findTask(m2, "t-untried"); !ok || v.State != StatePaused || !v.Later {
 		t.Errorf("after a restart one never tried is %s, on the list %v; want it paused on the list", v.State, v.Later)
+	}
+	if v, ok := findTask(m2, "t-started"); !ok || v.State != StatePaused || v.Later || !v.FromList {
+		t.Errorf("after a restart one started from the list is %s, on the list %v, started from it %v; want it paused, still shown with the list", v.State, v.Later, v.FromList)
 	}
 }
 
@@ -421,6 +431,9 @@ func TestStartingATryMovesItToTheQueue(t *testing.T) {
 	m.mu.Unlock()
 	if v.State != StateQueued || v.Later || trying != 0 {
 		t.Fatalf("after starting a try it is %s, on the list %v, with %d tries running; want it queued, off the list, none", v.State, v.Later, trying)
+	}
+	if !v.FromList {
+		t.Error("a download started from the list and waiting in the queue is not shown with the list")
 	}
 	m.mu.Lock()
 	m.running = 0

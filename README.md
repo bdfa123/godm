@@ -130,8 +130,10 @@ how large the file is and how fast it comes. Then the download waits on the list
 **Start** on its card, **Start all**, or the time set beside them (every day or
 once; godm has to be running then, and a start missed by more than half an
 hour is skipped). Tries run beside the queue, two at a time, so a list can be
-built while other downloads fill every slot. **Resume all** leaves the list
-alone.
+built while other downloads fill every slot. A download started from the list
+stays on its tab until it is done; while it waits for a slot, the list's bar
+says that every slot is taken, with the number of downloads at once beside it
+to raise. **Resume all** leaves the list alone.
 
 Right-click a page or a selection to pick several links at once, filtered by
 type, and queue them in one go. The list also holds the videos the page played

@@ -146,7 +146,7 @@ function matches(n, part) {
   return false;
 }
 
-const SELECTS = ["limit", "speed", "setSeed", "setLang", "setAfter"];
+const SELECTS = ["limit", "listLimit", "speed", "setSeed", "setLang", "setAfter"];
 const DIALOGS = ["addDlg", "rmDlg", "addrDlg", "setDlg"];
 
 class El {
@@ -968,14 +968,19 @@ scenarios.downloaddir = async function () {
 // starts by itself, removing what a try left, and Add to list in Add links.
 scenarios.downloadlist = async function () {
   const onList = (id, state, extra) => task(id, Object.assign({ state: state, size: 1 << 30, received: 8 << 20, later: true }, extra));
+  // One slot, taken by r; s was started from the list and waits for it.
+  limit = 1;
   tasks = [
     onList("w", "listed", { try_speed: 5 << 20, path: "C:\\d\\w.zip", speed: 0 }),
     onList("t", "running"),
     onList("q", "queued", { received: 0, size: -1 }),
     task("p", { state: "paused" }),
+    task("r", { state: "running" }),
+    task("s", { state: "queued", from_list: true, received: 8 << 20, size: 1 << 30 }),
   ];
-  let started = 0, saved = null, batch = null;
+  let started = 0, saved = null, batch = null, limited = null;
   routes["/api/list/start"] = () => { started++; return { ok: true, started: 3 }; };
+  routes["/api/limit"] = (_, path) => { limited = path; limit = 4; return { ok: true, limit: 4 }; };
   routes["/api/settings"] = (body) => {
     saved = body;
     return { ok: true, list_at: body.list_at, list_daily: body.list_daily, list_next: body.list_at ? "2030-01-02T03:15:00Z" : "0001-01-01T00:00:00Z" };
@@ -984,15 +989,33 @@ scenarios.downloadlist = async function () {
   await boot();
 
   const tabs = els.tabs.innerHTML;
-  assert(/data-tab="list">[^<]*<span class="n">3</.test(tabs), "the list's tab should count what is on it: " + tabs);
-  assert(/data-tab="active">[^<]*<span class="n">1</.test(tabs), "Unfinished should leave the list out: " + tabs);
+  assert(/data-tab="list">[^<]*<span class="n">4</.test(tabs), "the list's tab should count what is on it and what was started from it: " + tabs);
+  assert(/data-tab="active">[^<]*<span class="n">3</.test(tabs), "Unfinished should leave out what waits on the list, not what was started from it: " + tabs);
   same(els.listBar.hidden, true, "the list's bar shows on another tab");
 
   dispatch(child(els.tabs, "button", { "data-tab": "list" }), "click");
   same(els.listBar.hidden, false, "the list's bar is missing on its tab");
   const html = els.list.innerHTML;
   assert(html.indexOf('data-task="w"') >= 0 && html.indexOf('data-task="t"') >= 0 && html.indexOf('data-task="q"') >= 0, "the list's tab should show what is on it");
-  assert(html.indexOf('data-task="p"') < 0, "the list's tab shows a download that is not on it");
+  assert(html.indexOf('data-task="s"') >= 0, "the list's tab should go on showing what was started from it until it is done");
+  assert(html.indexOf(words("#1 in line", "排队第 1 位")) >= 0, "and where it waits in the queue");
+  assert(html.indexOf('data-task="p"') < 0 && html.indexOf('data-task="r"') < 0, "the list's tab shows a download that is not on it");
+
+  // s waits because every slot is taken, and the bar says so beside the limit.
+  same(els.listQueue.hidden, false, "the bar does not say the list waits for a slot");
+  assert(els.listQueueText.textContent.indexOf(words("1 download from the list is waiting", "列表里 1 个在排队")) >= 0, "the bar should say how many wait: " + els.listQueueText.textContent);
+  assert(els.listQueueText.textContent.indexOf("1/1") >= 0 || els.listQueueText.textContent.indexOf("1 of 1") >= 0, "and that the slots are full: " + els.listQueueText.textContent);
+  same(els.listLimit.value, "1", "the bar's limit should be the limit");
+  els.listLimit.value = "4";
+  dispatch(els.listLimit, "change");
+  await tick();
+  assert(limited && limited.indexOf("n=4") >= 0, "changing the bar's limit should send it: " + limited);
+  same(els.limit.value, "4", "the top bar's limit should follow the one changed in the list bar");
+  await poll();
+  same(els.listQueue.hidden, true, "with slots free the bar still says the list waits for one");
+  tasks = tasks.map((x) => (x.id === "s" ? Object.assign({}, x, { state: "done" }) : x));
+  await poll();
+  assert(els.list.innerHTML.indexOf('data-task="s"') < 0, "a download started from the list should leave it once done");
   assert(html.indexOf(words("Waiting", "待下载")) >= 0, "a download waiting on the list should say so");
   assert(html.indexOf(words("Trying", "试下中")) >= 0, "a try under way should say so");
   assert(html.indexOf(words("Tried 8.0 MB of 1.0 GB", "已试下 8.0 MB，共 1.0 GB")) >= 0, "a waiting download should say what its try fetched");
@@ -1048,6 +1071,14 @@ scenarios.downloadlist = async function () {
   dispatch(els.addGo, "click");
   await tick();
   same(batch.items[0].later, false, "Add should send the link to start now");
+
+  // What was started from the list is shown with it, but Start all has
+  // nothing to start in it.
+  tasks = [task("r", { state: "running" }), task("s", { state: "queued", from_list: true })];
+  await poll();
+  dispatch(child(els.tabs, "button", { "data-tab": "list" }), "click");
+  assert(els.list.innerHTML.indexOf('data-task="s"') >= 0, "the list should still show what was started from it");
+  same(els.listStart.disabled, true, "Start all is on with nothing on the list left to start");
 };
 
 const run = scenarios[which];

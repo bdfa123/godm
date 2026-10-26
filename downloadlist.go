@@ -43,8 +43,15 @@ var (
 // tryLanes is how many tries run at once, beside the downloads.
 const tryLanes = 2
 
-// setLaterLocked puts the task on the list or takes it off. Callers hold t.mu.
+// setLaterLocked puts the task on the list or takes it off. One taken off
+// before it is done was started from the list, and the list goes on showing it
+// (FromList) until it is: a list that empties the moment it is started looks
+// as if nothing happened, when its downloads may only be waiting their turn in
+// the queue. Callers hold t.mu.
 func (t *managedTask) setLaterLocked(on bool) {
+	if t.req.Later && !on && t.view.State != StateDone {
+		t.view.FromList = true
+	}
 	t.req.Later = on
 	t.view.Later = on
 }
