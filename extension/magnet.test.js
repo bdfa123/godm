@@ -10,11 +10,11 @@ const assert = require("node:assert");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { magnetLink, magnetName, magnetToTake } = require("./magnet.js");
+const { magnetLink, magnetName, magnetToTake, settleTorrentSwitches } = require("./magnet.js");
 
 const HEX = "0123456789abcdef0123456789abcdef01234567";
 const MAGNET = "magnet:?xt=urn:btih:" + HEX + "&dn=Some+Film";
-const ON = { enabled: true, takeTorrents: true };
+const ON = { enabled: true, takeMagnets: true };
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -118,8 +118,28 @@ test("a click the page made, or one with another button or a modifier, is left t
 test("nothing is taken before the settings are read, or with either switch off", () => {
   const ev = click([link(MAGNET)]);
   assert.equal(magnetToTake(ev, null), "");
-  assert.equal(magnetToTake(ev, { enabled: false, takeTorrents: true }), "");
-  assert.equal(magnetToTake(ev, { enabled: true, takeTorrents: false }), "");
+  assert.equal(magnetToTake(ev, { enabled: false, takeMagnets: true }), "");
+  assert.equal(magnetToTake(ev, { enabled: true, takeMagnets: false }), "");
+});
+
+test("each torrent switch never saved follows the one switch they replaced", () => {
+  const unset = { takeMagnets: null, takeTorrentFiles: null, takeTorrents: null };
+  assert.deepEqual(settleTorrentSwitches(unset), { takeMagnets: true, takeTorrentFiles: true }, "nothing saved: both on");
+  assert.deepEqual(
+    settleTorrentSwitches(Object.assign({}, unset, { takeTorrents: false })),
+    { takeMagnets: false, takeTorrentFiles: false },
+    "the old switch off: both off"
+  );
+  assert.deepEqual(
+    settleTorrentSwitches({ takeMagnets: true, takeTorrentFiles: null, takeTorrents: false }),
+    { takeMagnets: true, takeTorrentFiles: false },
+    "one that was saved keeps its own value"
+  );
+  assert.deepEqual(settleTorrentSwitches({ enabled: false, takeMagnets: false, takeTorrentFiles: true }), {
+    enabled: false,
+    takeMagnets: false,
+    takeTorrentFiles: true
+  });
 });
 
 test("only the link nearest the click counts, and it must be a magnet godm can read", () => {
@@ -164,6 +184,14 @@ test("a magnet link is known by the name it carries, or by its hash", () => {
 
 const SOURCE = fs.readFileSync(path.join(__dirname, "magnet.js"), "utf8");
 
+// asked is what storage answers to an object of defaults: each key asked for,
+// as stored or else at its default, and nothing that was not asked for.
+function asked(defaults, stored) {
+  const out = {};
+  for (const k of Object.keys(defaults)) out[k] = k in stored ? stored[k] : defaults[k];
+  return out;
+}
+
 // page runs magnet.js as a frame would, with opts.stored in sync storage and
 // opts.reply answering what it sends the worker. The storage answer is held
 // until the test calls loaded(), as the real one arrives a moment after start.
@@ -185,7 +213,7 @@ function page(opts) {
       }
     },
     storage: {
-      sync: { get: (defaults, cb) => (answer = () => cb(Object.assign({}, defaults, o.stored))) },
+      sync: { get: (defaults, cb) => (answer = () => cb(asked(defaults, o.stored))) },
       onChanged: { addListener: (fn) => storageListeners.push(fn) }
     }
   };
@@ -276,10 +304,12 @@ test("a click is taken once the settings are in, and the page never sees it", ()
 test("the switch is followed as it changes, including a change made before the settings arrived", () => {
   const p = page();
   p.loaded();
-  p.change({ takeTorrents: { oldValue: true, newValue: false } });
+  p.change({ takeMagnets: { oldValue: true, newValue: false } });
   assert.equal(p.click().prevented, false, "switched off");
-  p.change({ takeTorrents: { oldValue: false } });
+  p.change({ takeMagnets: { oldValue: false } });
   assert.equal(p.click().prevented, true, "a setting removed is back at its default, which is on");
+  p.change({ takeTorrentFiles: { oldValue: true, newValue: false } });
+  assert.equal(p.click().prevented, true, "the switch for .torrent files is not this one");
   p.change({ enabled: { oldValue: true, newValue: false } }, "local");
   assert.equal(p.click().prevented, true, "another storage area is not the settings");
 
@@ -288,9 +318,20 @@ test("the switch is followed as it changes, including a change made before the s
   early.loaded(); // an answer read before the change
   assert.equal(early.click().prevented, false);
 
-  const off = page({ stored: { takeTorrents: false } });
+  const off = page({ stored: { takeMagnets: false } });
   off.loaded();
   assert.equal(off.click().prevented, false);
+
+  // The switch magnets shared with .torrent files counts until magnets' own is saved.
+  const old = page({ stored: { takeTorrents: false } });
+  old.loaded();
+  assert.equal(old.click().prevented, false);
+  const saved = page({ stored: { takeTorrents: false, takeMagnets: true } });
+  saved.loaded();
+  assert.equal(saved.click().prevented, true);
+  const files = page({ stored: { takeTorrentFiles: false } });
+  files.loaded();
+  assert.equal(files.click().prevented, true);
 });
 
 test("a page the extension has left behind leaves every click to the browser", () => {

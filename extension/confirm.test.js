@@ -14,7 +14,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install, messagesFor, ownFiles } = require("./fakechrome.test.js");
 
-const IDS = ["form", "url", "name", "size", "sizeRow", "dir", "browse", "conns", "connsRow", "dontAsk", "status", "cancel", "later", "start"];
+const IDS = ["form", "url", "name", "size", "sizeRow", "dir", "browse", "conns", "connsRow", "torrentRow", "saveFile", "dontAsk", "status", "cancel", "later", "start"];
 
 class FakeElement {
   constructor() {
@@ -121,6 +121,9 @@ test("every element the dialog's script looks for is in the page, and Add to lis
   assert.match(byId("start"), /type="submit"/);
   assert.match(byId("later"), /data-i18n="confirm_later"/);
   assert.match(byId("later"), /data-i18n-title="confirm_later_tip"/);
+  assert.match(byId("saveFile"), /type="button"/);
+  assert.match(byId("saveFile"), /data-i18n-title="confirm_save_file_tip"/);
+  assert.match(html, /<div class="torrent" id="torrentRow" hidden>/, "the note is hidden until the page shows it");
   const order = ["cancel", "later", "start"].map((id) => html.indexOf('id="' + id + '"'));
   assert.deepEqual([...order].sort((a, b) => a - b), order, "Cancel, Add to list, Start");
 });
@@ -385,6 +388,82 @@ test("a torrent can be added to the list from its dialog too", async () => {
   assert.equal(starts(d).length, 1);
   assert.equal(starts(d)[0].later, true);
   assert.equal(starts(d)[0].outDir, "E:\\Films");
+});
+
+const TORRENT_HELD = {
+  url: "https://tracker.test/download.php?id=42",
+  backUrl: "https://tracker.test/download.php?id=42",
+  referrer: "https://tracker.test/t/42",
+  filename: "Some Film.torrent",
+  size: 40 * 1024,
+  connections: 8,
+  kind: "bt"
+};
+const saves = (d) => d.sent.filter((m) => m.type === "godm-confirm-save-file");
+
+test("a .torrent's dialog says Start downloads what it holds, and can keep the file instead", async () => {
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }), undefined, TORRENT_HELD);
+  assert.equal(d.ui.torrentRow.hidden, false, "the dialog says what Start does");
+  assert.equal(d.ui.name.value, "Some Film.torrent");
+  assert.equal(d.ui.saveFile.disabled, false);
+  d.ui.saveFile.fire("click");
+  await settle();
+  assert.deepEqual(saves(d), [{ type: "godm-confirm-save-file", key: "confirm:1-abc" }]);
+  assert.equal(starts(d).length, 0, "nothing went to godm");
+  assert.deepEqual(d.closed, [7], "Chrome has the file, so the window closes");
+
+  // Neither a magnet link nor an ordinary file has a .torrent to keep.
+  for (const held of [MAGNET_HELD, HELD]) {
+    const other = await open((m) => (m.type === "godm-config" ? config : { ok: true }), undefined, held);
+    assert.equal(other.ui.torrentRow.hidden, true, held.url);
+  }
+});
+
+test("keeping the .torrent file is not held back by the form, and is out of reach while busy", async () => {
+  // Chrome puts it in its own folder, so a folder typed wrong does not matter.
+  const d = await open((m) => (m.type === "godm-config" ? config : { ok: true }), undefined, TORRENT_HELD);
+  d.ui.dir.value = "relative\\folder";
+  d.ui.dir.fire("input");
+  assert.equal(d.ui.start.disabled, true);
+  assert.equal(d.ui.saveFile.disabled, false);
+
+  const picked = later();
+  const choosing = await open((m) => (m.type === "godm-config" ? config : m.type === "godm-browse" ? picked.promise : { ok: true }), undefined, TORRENT_HELD);
+  choosing.ui.browse.fire("click");
+  await settle();
+  assert.equal(choosing.ui.saveFile.disabled, true, "while the folder chooser is open");
+  picked.resolve({ ok: true, path: "" });
+  await settle();
+  assert.equal(choosing.ui.saveFile.disabled, false);
+
+  const answer = later();
+  const keeping = await open((m) => (m.type === "godm-config" ? config : answer.promise), undefined, TORRENT_HELD);
+  keeping.ui.saveFile.fire("click");
+  await settle();
+  assert.equal(keeping.ui.status.textContent, "Handing the .torrent file to Chrome…");
+  assert.equal(keeping.ui.saveFile.disabled, true);
+  assert.equal(keeping.ui.start.disabled, true);
+  assert.equal(keeping.ui.later.disabled, true);
+  assert.equal(keeping.ui.cancel.disabled, true);
+  keeping.ui.saveFile.fire("click");
+  answer.resolve({ ok: false, error: "Chrome could not download it: Invalid URL" });
+  await settle();
+  assert.equal(saves(keeping).length, 1, "a second press sent nothing");
+  assert.equal(keeping.ui.status.textContent, "Chrome could not download it: Invalid URL");
+  assert.equal(keeping.ui.saveFile.disabled, false, "and the dialog can be used again");
+  assert.equal(keeping.ui.start.disabled, false);
+  assert.deepEqual(keeping.closed, []);
+
+  const starting = await open((m) => (m.type === "godm-config" ? config : later().promise), undefined, TORRENT_HELD);
+  starting.ui.form.fire("submit");
+  await settle();
+  assert.equal(starting.ui.saveFile.disabled, true, "nor once Start has been pressed");
+
+  const gone = await open((m) => (m.type === "godm-config" ? config : { ok: false, expired: true, error: "gone" }), undefined, TORRENT_HELD);
+  gone.ui.saveFile.fire("click");
+  await settle();
+  assert.match(gone.ui.status.textContent, /expired/);
+  assert.equal(gone.ui.saveFile.disabled, true, "nor once the request has expired");
 });
 
 test("the folder chosen last time is filled in, and emptying it goes back to godm's own", async () => {

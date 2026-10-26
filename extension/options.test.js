@@ -12,8 +12,8 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { install, ownFiles } = require("./fakechrome.test.js");
 
-const FIELDS = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist", "language"];
-const BOXES = ["enabled", "takeAll", "confirmDownload", "takeTorrents"];
+const FIELDS = ["enabled", "takeAll", "confirmDownload", "takeMagnets", "takeTorrentFiles", "minSize", "connections", "extensions", "blocklist", "language"];
+const BOXES = ["enabled", "takeAll", "confirmDownload", "takeMagnets", "takeTorrentFiles"];
 const NUMBERS = ["minSize", "connections"];
 const OTHERS = ["save", "status", "extid", "cmd", "probe", "lastping"];
 
@@ -52,8 +52,10 @@ function open(stored) {
   const chrome = Object.assign({}, install("en"), {
     storage: {
       sync: {
+        // As the extension API does, only the keys asked for come back.
         get: (defaults, cb) => {
-          const got = Object.assign({}, defaults, stored);
+          const got = {};
+          for (const k of Object.keys(defaults)) got[k] = k in stored ? stored[k] : defaults[k];
           if (cb) cb(got);
           return Promise.resolve(got);
         },
@@ -119,24 +121,42 @@ test("the number of connections stays between 1 and 32", () => {
   }
 });
 
-test("magnet links and .torrent files are taken over until the box is cleared", () => {
-  const fresh = open({});
-  assert.strictEqual(fresh.ui.takeTorrents.checked, true, "on when nothing has been saved");
-  fresh.ui.takeTorrents.checked = false;
-  fresh.ui.save.fire("click");
-  assert.strictEqual(fresh.saved.takeTorrents, false, "Save keeps the cleared box");
+test("magnet links and .torrent files each have a box, and are taken over until it is cleared", () => {
+  for (const [box, other] of [["takeMagnets", "takeTorrentFiles"], ["takeTorrentFiles", "takeMagnets"]]) {
+    const fresh = open({});
+    assert.strictEqual(fresh.ui[box].checked, true, box + " is on when nothing has been saved");
+    fresh.ui[box].checked = false;
+    fresh.ui.save.fire("click");
+    assert.strictEqual(fresh.saved[box], false, "Save keeps the cleared box");
+    assert.strictEqual(fresh.saved[other], true, "and the other one as it was");
 
-  const off = open({ takeTorrents: false });
-  assert.strictEqual(off.ui.takeTorrents.checked, false, "the page shows what was saved");
-  off.ui.takeTorrents.checked = true;
-  off.ui.save.fire("click");
-  assert.strictEqual(off.saved.takeTorrents, true);
+    const off = open({ [box]: false });
+    assert.strictEqual(off.ui[box].checked, false, "the page shows what was saved");
+    assert.strictEqual(off.ui[other].checked, true);
+    off.ui[box].checked = true;
+    off.ui.save.fire("click");
+    assert.strictEqual(off.saved[box], true);
+  }
+});
+
+test("the one switch the two boxes replaced shows in each until it is saved", () => {
+  const old = open({ takeTorrents: false });
+  assert.strictEqual(old.ui.takeMagnets.checked, false);
+  assert.strictEqual(old.ui.takeTorrentFiles.checked, false);
+  old.ui.save.fire("click");
+  assert.strictEqual(old.saved.takeMagnets, false, "and Save writes it into both");
+  assert.strictEqual(old.saved.takeTorrentFiles, false);
+
+  const mixed = open({ takeTorrents: false, takeMagnets: true });
+  assert.strictEqual(mixed.ui.takeMagnets.checked, true, "a box that was saved shows its own value");
+  assert.strictEqual(mixed.ui.takeTorrentFiles.checked, false);
 });
 
 test("the options page has a box for every setting it saves", () => {
   const html = fs.readFileSync(path.join(__dirname, "options.html"), "utf8");
   for (const id of FIELDS) assert.match(html, new RegExp(`id="${id}"`), id);
-  assert.match(html, /<input type="checkbox" id="takeTorrents">/);
+  assert.match(html, /<input type="checkbox" id="takeMagnets">/);
+  assert.match(html, /<input type="checkbox" id="takeTorrentFiles">/);
 });
 
 test("saving leaves the text and tick-box fields as they were", () => {

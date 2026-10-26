@@ -47,6 +47,14 @@
   "err_request_expired": {
     "message": "This download request has expired. Start it again from the page."
   },
+  "err_browser_download": {
+    "message": "Chrome could not download it: $ERROR$",
+    "placeholders": {
+      "error": {
+        "content": "$1"
+      }
+    }
+  },
   "err_nothing_selected": {
     "message": "nothing selected"
   },
@@ -335,11 +343,17 @@
   "options_confirm_hint": {
     "message": "Shows a window to change the file name, save folder and connections, or to cancel; for a torrent, only the folder. Cancelling downloads nothing. The folder chosen is offered again next time. Links picked from a page are added without asking."
   },
-  "options_take_torrents": {
-    "message": "Take over magnet links and .torrent files"
+  "options_take_magnets": {
+    "message": "Take over magnet links"
   },
-  "options_take_torrents_hint": {
-    "message": "A click on a magnet link goes to godm as a torrent. With asking on, the window above opens first, to choose where it is saved; without, it is added at once and a notice says what was added. A .torrent the browser starts to download goes to godm as a torrent whatever its size or type, also through the window when asking is on. Hold Ctrl or Shift while clicking to leave a magnet link to the browser. Pages that were open before the extension was loaded need reloading first."
+  "options_take_magnets_hint": {
+    "message": "A click on a magnet link goes to godm as a torrent. With asking on, the window above opens first, to choose where it is saved; without, it is added at once and a notice says what was added. Hold Ctrl or Shift while clicking to leave a magnet link to the browser. Pages that were open before the extension was loaded need reloading first."
+  },
+  "options_take_torrent_files": {
+    "message": "Take over .torrent files"
+  },
+  "options_take_torrent_files_hint": {
+    "message": "A .torrent the browser starts to download goes to godm as a torrent whatever its size or type, and godm downloads what it holds, not the file. With asking on, the window above opens first, and can also save just the .torrent file. Switched off, a .torrent is treated like any other download, which by default leaves it to the browser to save."
   },
   "options_types": {
     "message": "File types"
@@ -580,6 +594,18 @@
   },
   "confirm_later_tip": {
     "message": "Downloads a small part first, then waits. Start it later from godm's download list."
+  },
+  "confirm_torrent_note": {
+    "message": "Start and Add to list download what this torrent holds over BitTorrent, not the .torrent file itself."
+  },
+  "confirm_save_file": {
+    "message": "Save the .torrent only"
+  },
+  "confirm_save_file_tip": {
+    "message": "Downloads nothing the torrent holds: Chrome saves the .torrent file to its own download folder."
+  },
+  "confirm_saving_file": {
+    "message": "Handing the .torrent file to Chrome…"
   },
   "confirm_sending": {
     "message": "Sending to godm…"

@@ -9,12 +9,25 @@ const DEFAULTS = {
   extensions:
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst",
   blocklist: "",
-  takeTorrents: true,
+  takeMagnets: true,
+  takeTorrentFiles: true,
   // Which language the extension speaks; see i18n.js.
   language: LANGUAGE_DEFAULT
 };
 
-const fields = ["enabled", "takeAll", "confirmDownload", "takeTorrents", "minSize", "connections", "extensions", "blocklist", "language"];
+const fields = ["enabled", "takeAll", "confirmDownload", "takeMagnets", "takeTorrentFiles", "minSize", "connections", "extensions", "blocklist", "language"];
+
+// The two torrent switches replaced one, takeTorrents, and one never saved
+// shows what that one said, as magnet.js and the worker read it.
+const TORRENT_SWITCHES = ["takeMagnets", "takeTorrentFiles"];
+
+function withTorrentSwitches(got) {
+  const cfg = Object.assign({}, got);
+  for (const f of TORRENT_SWITCHES) {
+    if (typeof cfg[f] !== "boolean") cfg[f] = cfg.takeTorrents !== false;
+  }
+  return cfg;
+}
 
 // languageOf is a language the extension has, or else the default: a value
 // that synced in from a newer version, say, must not leave the box empty.
@@ -23,7 +36,9 @@ function languageOf(value) {
 }
 
 function load() {
-  chrome.storage.sync.get(DEFAULTS, (cfg) => {
+  const unset = { takeMagnets: null, takeTorrentFiles: null, takeTorrents: null };
+  chrome.storage.sync.get(Object.assign({}, DEFAULTS, unset), (got) => {
+    const cfg = withTorrentSwitches(got);
     for (const f of fields) {
       const el = document.getElementById(f);
       if (el.type === "checkbox") el.checked = cfg[f];

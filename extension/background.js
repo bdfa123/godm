@@ -37,14 +37,19 @@ const DEFAULTS = {
   extensions:
     "7z,apk,appimage,avi,bin,bz2,deb,dmg,exe,flac,flv,gz,img,iso,jar,mkv,mov,mp3,mp4,msi,ova,pdf,pkg,rar,rpm,tar,vhd,wav,webm,whl,xz,zip,zst",
   blocklist: "",
-  // Send a clicked magnet link, or a .torrent the browser starts to download,
-  // to godm as a torrent. magnet.js keeps its own copy of this default.
-  takeTorrents: true
+  // Send a clicked magnet link to godm as a torrent. magnet.js keeps its own
+  // copy of this default.
+  takeMagnets: true,
+  // Send a .torrent the browser starts to download to godm, which downloads
+  // what it holds, rather than leave the file to the browser.
+  takeTorrentFiles: true
 };
 
+// The torrent switches are read as unset and then settled, so that one never
+// saved follows the switch they replaced (see magnet.js).
 async function getConfig() {
-  const stored = await chrome.storage.sync.get(DEFAULTS);
-  return Object.assign({}, DEFAULTS, stored);
+  const stored = await chrome.storage.sync.get(Object.assign({}, DEFAULTS, TORRENT_SWITCHES_UNSET));
+  return settleTorrentSwitches(Object.assign({}, DEFAULTS, stored));
 }
 
 // ---------- native host ----------
@@ -186,9 +191,9 @@ function shouldTakeOver(item, cfg) {
   if (blocked.some((b) => host === b || host.endsWith("." + b))) return "host blocked";
 
   // A .torrent is a few kilobytes and seldom on the type list, but what it
-  // stands for is usually large, so with the torrent switch on it goes to godm
+  // stands for is usually large, so with its switch on it goes to godm
   // whatever its size or type.
-  if (cfg.takeTorrents && isTorrentFile(item)) return null;
+  if (cfg.takeTorrentFiles && isTorrentFile(item)) return null;
 
   // totalBytes is often 0 at creation time; only filter when it is real.
   if (item.totalBytes > 0 && item.totalBytes < cfg.minSize) return "below size floor";
@@ -338,7 +343,7 @@ async function handleDownload(item) {
   const url = item.finalUrl || item.url;
   // A torrent is fetched and read by the daemon, which needs telling: a
   // tracker's link seldom ends in .torrent.
-  const torrent = cfg.takeTorrents && isTorrentFile(item);
+  const torrent = cfg.takeTorrentFiles && isTorrentFile(item);
 
   // Two gates before we touch anything. Both exist because a cancelled
   // download we cannot take over is a download the user has lost.
@@ -673,6 +678,37 @@ async function confirmStart(msg) {
   }
 }
 
+// confirmSaveFile runs when the dialog for a .torrent is told to keep the file
+// itself, not download what it holds. Chrome's copy was cancelled when the
+// dialog opened, so Chrome is asked for it again, as it is when godm refuses a
+// download, and the link is remembered so that the new copy is left to it. A
+// magnet is no file Chrome could fetch, so only a .torrent can be kept.
+async function confirmSaveFile(msg) {
+  const key = msg && msg.key;
+  if (typeof key !== "string" || !key.startsWith("confirm:")) {
+    return { ok: false, error: tr("err_unknown_request") };
+  }
+  if (startingNow.has(key)) return { ok: false, error: tr("err_already_starting") };
+  startingNow.add(key);
+  try {
+    const held = (await chrome.storage.session.get(key))[key];
+    if (!held) {
+      return { ok: false, expired: true, error: tr("err_request_expired") };
+    }
+    if (held.kind !== "bt" || held.magnet) return { ok: false, error: tr("err_unknown_request") };
+    await markHandedBack(held.url, held.backUrl);
+    try {
+      await chrome.downloads.download({ url: held.url });
+    } catch (e) {
+      return { ok: false, error: tr("err_browser_download", String(e && e.message ? e.message : e)) };
+    }
+    await chrome.storage.session.remove(key);
+    return { ok: true };
+  } finally {
+    startingNow.delete(key);
+  }
+}
+
 async function browseFolder(current) {
   return callHost(
     { type: "browse", current: typeof current === "string" ? current : "" },
@@ -931,7 +967,7 @@ async function takeMagnet(msg, sender) {
 async function sendMagnet(link, sender) {
   const cfg = await getConfig();
   const url = magnetLink(link);
-  if (!url || !cfg.enabled || !cfg.takeTorrents || (await takeoverDisabled())) {
+  if (!url || !cfg.enabled || !cfg.takeMagnets || (await takeoverDisabled())) {
     return giveMagnetBack(link, sender);
   }
   const referrer = (sender.tab && sender.tab.url) || sender.url || "";
@@ -1049,6 +1085,12 @@ function route(msg, sender, sendResponse) {
   }
   if (msg && msg.type === "godm-confirm-start") {
     confirmStart(msg)
+      .catch((e) => ({ ok: false, error: String(e) }))
+      .then(sendResponse);
+    return true;
+  }
+  if (msg && msg.type === "godm-confirm-save-file") {
+    confirmSaveFile(msg)
       .catch((e) => ({ ok: false, error: String(e) }))
       .then(sendResponse);
     return true;

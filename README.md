@@ -277,9 +277,12 @@ right-click menu does; for a torrent it asks only where to save, since a torrent
 names itself and is fetched from peers. With the dialog off, a clicked magnet is
 added at once and a notification names what was added and the site it came
 from. godm fetches the `.torrent` before it accepts it, and one it cannot get (from a
-tracker that only lets a browser in, say) goes back to Chrome. Hold Ctrl or
-Shift while clicking to leave a magnet to the browser, or turn all this off on
-the extension's options page; right-clicking a magnet link and choosing
+tracker that only lets a browser in, say) goes back to Chrome. Start in the
+dialog downloads what the torrent holds, not the `.torrent` file; **Save the
+.torrent only** hands the file back to Chrome to keep instead. Hold Ctrl or
+Shift while clicking to leave a magnet to the browser, or turn off taking over
+magnet links or `.torrent` files (each has its own switch) on the extension's
+options page; right-clicking a magnet link and choosing
 **Download with godm** works either way. A magnet shows "Fetching metadata"
 until peers send the file list; if nobody answers within five minutes it stops
 and frees its place in the queue, and Resume tries again.

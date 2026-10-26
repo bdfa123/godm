@@ -424,8 +424,10 @@ test("a clicked magnet with no name is named by its hash, and the frame it was i
   assert.match(w.seen.notices[0].message, /ads\.test/);
 });
 
-test("with torrents or takeover switched off, a clicked magnet goes back to the browser", async () => {
-  for (const settings of [{ takeTorrents: false }, { enabled: false }]) {
+test("with magnets or takeover switched off, a clicked magnet goes back to the browser", async () => {
+  // takeTorrents is the switch magnets shared with .torrent files before each
+  // had its own; switched off and never replaced, it still keeps magnets away.
+  for (const settings of [{ takeMagnets: false }, { takeTorrents: false }, { enabled: false }]) {
     const w = start({ settings });
     const resp = await clicked(w);
     assert.equal(resp.handedBack, true, JSON.stringify(settings));
@@ -614,6 +616,7 @@ test("a web page may send nothing but a clicked magnet", async () => {
     { type: "godm-batch", items: [{ url: "https://example.test/a.zip" }] },
     { type: "godm-media-download", url: "https://example.test/a.m3u8", kind: "hls" },
     { type: "godm-confirm-start", key: "confirm:1" },
+    { type: "godm-confirm-save-file", key: "confirm:1" },
     { type: "godm-browse" },
     { type: "godm-grab-active" },
     null
@@ -643,7 +646,8 @@ test("the extension's own pages still reach the host, an options page in a tab t
 test("the worker and the content script start from the same settings", () => {
   const w = start();
   const [all, magnet] = vm.runInContext("[DEFAULTS, MAGNET_DEFAULTS]", w.context);
-  assert.equal(all.takeTorrents, true);
+  assert.equal(all.takeMagnets, true);
+  assert.equal(all.takeTorrentFiles, true);
   for (const key of Object.keys(magnet)) assert.strictEqual(magnet[key], all[key], key);
 });
 
@@ -727,14 +731,18 @@ test("a .torrent is known by its name, its link or the type the server sent", as
   }
 });
 
-test("with the torrent switch off a .torrent is left alone, or taken as a plain file as before", async () => {
-  const left = start({ settings: { takeTorrents: false } });
-  await left.download(TORRENT);
-  assert.deepEqual(left.seen.cancelled, []);
-  assert.deepEqual(left.seen.host, [], "not even a ping");
-  assert.deepEqual(left.seen.windows, []);
+test("with the .torrent switch off a .torrent is left alone, or taken as a plain file as before", async () => {
+  // The switch .torrent files shared with magnets before each had its own
+  // counts too while the new one has never been saved.
+  for (const settings of [{ takeTorrentFiles: false }, { takeTorrents: false }]) {
+    const left = start({ settings });
+    await left.download(TORRENT);
+    assert.deepEqual(left.seen.cancelled, [], JSON.stringify(settings));
+    assert.deepEqual(left.seen.host, [], "not even a ping");
+    assert.deepEqual(left.seen.windows, []);
+  }
 
-  const listed = start({ settings: { takeTorrents: false, extensions: "torrent", minSize: 0, confirmDownload: false } });
+  const listed = start({ settings: { takeTorrentFiles: false, extensions: "torrent", minSize: 0, confirmDownload: false } });
   await listed.download(TORRENT);
   assert.equal(downloads(listed).length, 1, "the type list still takes it");
   assert.equal(downloads(listed)[0].kind, "", "as an ordinary file");
@@ -774,12 +782,100 @@ test("other downloads, and a .torrent left to Chrome, are answered without waiti
   assert.notEqual(w.determine(ITEM, () => answered++), true);
   assert.equal(answered, 1, "an ordinary download is answered at once");
 
-  const off = start({ settings: { takeTorrents: false } });
+  const off = start({ settings: { takeTorrentFiles: false } });
   let torrentAnswered = 0;
   off.determine(TORRENT, () => torrentAnswered++);
   for (let i = 0; i < 50 && !torrentAnswered; i++) await settle();
   assert.equal(torrentAnswered, 1);
   assert.deepEqual(off.seen.cancelled, []);
+});
+
+test("magnets and .torrent files each follow their own switch", async () => {
+  const noMagnets = start({ settings: { takeMagnets: false, confirmDownload: false } });
+  await noMagnets.download(TORRENT);
+  assert.equal(downloads(noMagnets).length, 1, "a .torrent still goes to godm");
+  assert.equal((await clicked(noMagnets)).handedBack, true, "a clicked magnet goes back to the browser");
+  assert.equal(downloads(noMagnets).length, 1);
+
+  const noFiles = start({ settings: { takeTorrentFiles: false, confirmDownload: false } });
+  await noFiles.download(TORRENT);
+  assert.deepEqual(noFiles.seen.cancelled, [], "a .torrent is left to Chrome");
+  assert.deepEqual(await clicked(noFiles), { ok: true });
+  assert.deepEqual(downloads(noFiles).map((m) => m.url), [MAGNET], "a clicked magnet still goes to godm");
+
+  // A switch that has been saved wins over the old one it replaced.
+  const mixed = start({ settings: { takeTorrents: false, takeTorrentFiles: true, confirmDownload: false } });
+  await mixed.download(TORRENT);
+  assert.equal(downloads(mixed).length, 1);
+  assert.equal((await clicked(mixed)).handedBack, true);
+});
+
+// ---------- a .torrent kept as a file ----------
+
+const saveFile = (key) => ({ type: "godm-confirm-save-file", key });
+
+test("Save the .torrent only gives the file back to Chrome, and the copy Chrome starts is left to it", async () => {
+  const w = start();
+  await w.download(TORRENT);
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id]);
+  assert.deepEqual(await w.message(saveFile(w.heldKey())), { ok: true });
+  assert.deepEqual(downloads(w), [], "godm was given nothing to download");
+  assert.deepEqual(w.seen.downloaded, [TORRENT.url], "Chrome was asked for the link that was clicked");
+  assert.equal(w.heldKey(), undefined, "nothing is left waiting");
+  assert.deepEqual(w.seen.notices, [], "and there is nothing to tell anyone");
+
+  await w.download(Object.assign({}, TORRENT, { id: 10 }));
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id], "Chrome keeps the copy it started again");
+  assert.equal(w.seen.windows.length, 1, "without another dialog");
+  await w.download(ITEM);
+  assert.deepEqual(w.seen.cancelled, [TORRENT.id, ITEM.id], "and other downloads still go to godm");
+});
+
+test("only a .torrent waiting in its dialog can be kept as a file", async () => {
+  // A magnet is no file Chrome could fetch.
+  const m = start();
+  await clicked(m);
+  const magnetKey = m.heldKey();
+  assert.equal((await m.message(saveFile(magnetKey))).ok, false);
+  assert.deepEqual(m.seen.downloaded, []);
+  assert.deepEqual(m.seen.opened, []);
+  assert.equal(m.heldKey(), magnetKey, "it is still in its dialog");
+
+  // An ordinary download has Start for that.
+  const f = start();
+  await f.download(ITEM);
+  assert.equal((await f.message(saveFile(f.heldKey()))).ok, false);
+  assert.deepEqual(f.seen.downloaded, []);
+
+  // A dialog that has gone has expired, and a key that is no dialog's asks for nothing.
+  const gone = start();
+  assert.equal((await gone.message(saveFile("confirm:1-gone"))).expired, true);
+  assert.equal((await gone.message(saveFile("pick-1"))).ok, false);
+  assert.deepEqual(gone.seen.downloaded, []);
+
+  // Once Start has been pressed the .torrent is on its way to godm.
+  const answer = later();
+  const s = start({ host: (msg) => (msg.type === "download" ? answer.promise : { ok: true }) });
+  await s.download(TORRENT);
+  const key = s.heldKey();
+  const starting = s.message(form(key));
+  await settle();
+  assert.equal((await s.message(saveFile(key))).ok, false);
+  answer.resolve({ ok: true });
+  await starting;
+  assert.deepEqual(s.seen.downloaded, [], "so Chrome is not given it as well");
+});
+
+test("a .torrent Chrome will not download again stays in its dialog", async () => {
+  const w = start();
+  await w.download(TORRENT);
+  w.context.chrome.downloads.download = async () => {
+    throw new Error("Invalid URL");
+  };
+  const resp = await w.message(saveFile(w.heldKey()));
+  assert.equal(resp.ok, false);
+  assert.match(resp.error, /Invalid URL/);
+  assert.notEqual(w.heldKey(), undefined, "so Start, or keeping the file again, can still be chosen");
 });
 
 // ---------- the videos a page played, in the link picker ----------

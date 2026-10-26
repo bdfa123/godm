@@ -13,7 +13,24 @@
 // The two settings this needs, with the defaults the worker and the options
 // page use. The name differs from the worker's DEFAULTS because the worker
 // loads this file into the same scope.
-const MAGNET_DEFAULTS = { enabled: true, takeTorrents: true };
+const MAGNET_DEFAULTS = { enabled: true, takeMagnets: true };
+
+// Magnet links and .torrent files used to share one switch, takeTorrents. Each
+// has its own now, and one that has never been saved follows the old switch,
+// so that whoever had turned it off finds both off. They are read as unset
+// (null) rather than at their defaults, which would hide whether they were
+// ever saved; settleTorrentSwitches then gives each its value. The worker uses
+// both, and the options page has its own copy of the rule.
+const TORRENT_SWITCHES_UNSET = { takeMagnets: null, takeTorrentFiles: null, takeTorrents: null };
+
+function settleTorrentSwitches(got) {
+  const cfg = Object.assign({}, got);
+  for (const key of ["takeMagnets", "takeTorrentFiles"]) {
+    if (typeof cfg[key] !== "boolean") cfg[key] = cfg.takeTorrents !== false;
+  }
+  delete cfg.takeTorrents;
+  return cfg;
+}
 
 // A v1 info hash as the daemon reads one: forty hex digits, or thirty-two
 // characters of base32 in capitals, which is the only case its decoder takes.
@@ -85,7 +102,7 @@ function linkIn(path) {
 // without switching anything off. A click something else has already cancelled
 // was never going to open the link.
 function magnetToTake(ev, cfg) {
-  if (!cfg || !cfg.enabled || !cfg.takeTorrents) return "";
+  if (!cfg || !cfg.enabled || !cfg.takeMagnets) return "";
   if (!ev || ev.isTrusted !== true || ev.defaultPrevented) return "";
   if (ev.button !== 0 || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.metaKey) return "";
   const path = typeof ev.composedPath === "function" ? ev.composedPath() : [ev.target];
@@ -109,9 +126,9 @@ function watchMagnetClicks() {
   // which may predate it, cannot undo it.
   const changed = {};
   try {
-    chrome.storage.sync.get(MAGNET_DEFAULTS, (got) => {
+    chrome.storage.sync.get(Object.assign({}, MAGNET_DEFAULTS, TORRENT_SWITCHES_UNSET), (got) => {
       if (chrome.runtime.lastError || !got) return;
-      cfg = Object.assign({}, MAGNET_DEFAULTS, got, changed);
+      cfg = Object.assign({}, MAGNET_DEFAULTS, settleTorrentSwitches(got), changed);
     });
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== "sync") return;
@@ -177,5 +194,14 @@ if (typeof document !== "undefined" && typeof window !== "undefined") watchMagne
 // Node runs this file directly to test the rules; a page or the service worker
 // has no module object and skips it.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { MAGNET_DEFAULTS, extensionAlive, linkIn, magnetLink, magnetName, magnetToTake };
+  module.exports = {
+    MAGNET_DEFAULTS,
+    TORRENT_SWITCHES_UNSET,
+    extensionAlive,
+    linkIn,
+    magnetLink,
+    magnetName,
+    magnetToTake,
+    settleTorrentSwitches
+  };
 }

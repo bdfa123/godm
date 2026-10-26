@@ -16,6 +16,8 @@ const ui = {
   browse: document.getElementById("browse"),
   conns: document.getElementById("conns"),
   connsRow: document.getElementById("connsRow"),
+  torrentRow: document.getElementById("torrentRow"),
+  saveFile: document.getElementById("saveFile"),
   dontAsk: document.getElementById("dontAsk"),
   status: document.getElementById("status"),
   cancel: document.getElementById("cancel"),
@@ -24,7 +26,7 @@ const ui = {
 };
 
 let note = ""; // something worth saying that is not a mistake in the form
-let busy = false; // Start or Add to list has been pressed and godm has not answered yet
+let busy = false; // Start, Add to list or Save the .torrent only has been pressed and not answered yet
 let browsing = false; // the folder chooser is open on the desktop
 let dirTouched = false; // the person has typed or picked a folder themselves
 let defaultDir = ""; // godm's own download folder, shown as the placeholder
@@ -52,6 +54,9 @@ function render() {
   ui.start.disabled = !!problem || busy || browsing || over;
   ui.later.disabled = ui.start.disabled;
   ui.browse.disabled = busy || browsing || over;
+  // Chrome keeps the .torrent in its own folder, so nothing in the form can
+  // stand in the way of keeping it.
+  ui.saveFile.disabled = busy || browsing || over;
   // Once Start is pressed the job is on its way to godm and closing the window
   // cannot call it back, so Cancel would only look as if it could.
   ui.cancel.disabled = busy;
@@ -130,12 +135,37 @@ async function submit(later) {
   render();
 }
 
+// saveFile is for a .torrent wanted as a file rather than for what it holds.
+// The worker has Chrome download it again, as it would have without godm, and
+// that copy is left to Chrome; once it has, there is nothing left to do here.
+async function saveFile() {
+  if (busy || browsing || over) return;
+  busy = true;
+  note = tr("confirm_saving_file");
+  render();
+  const resp = await send({ type: "godm-confirm-save-file", key: heldKey });
+  if (resp && resp.ok) {
+    closeSelf();
+    return;
+  }
+  if (resp && resp.expired) {
+    finish(tr("err_request_expired"));
+    return;
+  }
+  // Nothing was given to Chrome, so the dialog is as it was: keep the file
+  // again, Start, or Cancel.
+  busy = false;
+  note = (resp && resp.error) || tr("confirm_no_answer");
+  render();
+}
+
 ui.form.addEventListener("submit", (e) => {
   e.preventDefault();
   submit(false);
 });
 // Not a submit button, so Enter in a field still means Start.
 ui.later.addEventListener("click", () => submit(true));
+ui.saveFile.addEventListener("click", saveFile);
 
 ui.cancel.addEventListener("click", () => {
   if (!busy) closeSelf();
@@ -216,6 +246,11 @@ i18nReady.then(async function init() {
   ui.name.readOnly = torrent;
   ui.sizeRow.hidden = torrent;
   ui.connsRow.hidden = torrent;
+  // The name a .torrent shows is the file's, which reads as if Start would
+  // save that file. It would not: godm downloads what the torrent holds. So the
+  // dialog says so, and offers to keep the file instead. A magnet link is no
+  // file and needs neither.
+  ui.torrentRow.hidden = !torrent || held.magnet === true;
 
   // The folder chosen last time is offered again, as if typed in, so it is
   // what the download goes to unless it is changed. Emptying the field goes

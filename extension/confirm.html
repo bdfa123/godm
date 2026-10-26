@@ -33,6 +33,8 @@
   input[type=number] { width: 80px; }
   input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   #size { font-variant-numeric: tabular-nums; }
+  .torrent { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; padding: 8px 10px; border-radius: 6px; background: var(--accent-soft); }
+  .torrent span { flex: 1; }
   #status { min-height: 2.9em; color: var(--muted); font-size: 12px; }
   #status.err { color: var(--err); }
   footer { background: var(--panel); border-top: 1px solid var(--line); padding: 10px 16px; display: flex; gap: 10px; align-items: center; }
@@ -66,6 +68,10 @@
         <input type="text" id="dir" spellcheck="false" data-i18n-ph="confirm_dir_ph">
         <button type="button" class="btn" id="browse" data-i18n="confirm_browse"></button>
       </div>
+    </div>
+    <div class="torrent" id="torrentRow" hidden>
+      <span data-i18n="confirm_torrent_note"></span>
+      <button type="button" class="btn" id="saveFile" data-i18n="confirm_save_file" data-i18n-title="confirm_save_file_tip"></button>
     </div>
     <div class="row" id="connsRow">
       <label for="conns" data-i18n="confirm_conns"></label>
