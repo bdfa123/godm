@@ -472,6 +472,52 @@ progress and check that the connections gather where the player reads. Where
 mpv is installed, one test also runs the download map's script in it, with no
 window and no sound, and asks it over mpv's IPC what it worked out.
 
+## How godm was built, and what the AI did
+
+Most of godm's code was typed by AI coding agents (Claude Code, with sub-agents
+for parallel bug hunts and larger changes) working from my design and under my
+review. I decide what godm should do and where its limits are, read every diff,
+choose what is merged, and cut the releases. Nothing lands until `gofmt`,
+`go vet`, the Go and extension suites and CI on Windows and Linux pass; what the
+suites check is under **Tests**.
+
+AI-written code goes wrong in ordinary ways, and the history records catching
+it. Each commit below describes the fault, how it was measured, and the fix:
+
+- [`25fd56c`](https://github.com/bdfa123/godm/commit/25fd56c546f61c8585668696bb2ab46fed252132):
+  the resume sidecar was flushed every 400 ms but the bytes it described were
+  not, so a power cut could leave a "finished" file with blocks of zeros and no
+  error. Flushing at several intervals was measured under load before settling
+  on data first, sidecar second, every 2 seconds.
+- [`cd94cdc`](https://github.com/bdfa123/godm/commit/cd94cdc8448565062e159ad8c618d6932d90a5f0):
+  an 85 GB download to a hard disk sat at 124 KB for minutes with all eight
+  connections busy. NTFS was zero-filling the preallocated file up to the first
+  write near its end, some seventeen minutes of zeros. The file is now made
+  sparse before it is sized;
+  [`1a6bd2f`](https://github.com/bdfa123/godm/commit/1a6bd2fdbaa479333634fbc82a43a50b6ac65f50)
+  then gathers each connection's reads into megabyte writes so a sparse file is
+  not cut into more fragments than NTFS can track, and
+  [`387f5f2`](https://github.com/bdfa123/godm/commit/387f5f2e0572372e90afff722023e14c50a31f22)
+  does the same for torrent files.
+- [`0916276`](https://github.com/bdfa123/godm/commit/09162760b3bc2b4c139b3ce5067b5bcb73b67554):
+  a range still being read by one connection could be handed whole to a second
+  while a player read close behind, and the download ended with more bytes
+  counted than the file has. CI's stream test caught it about once in eight
+  runs on a busy machine; the cause was traced in the claim logic and fixed
+  rather than the test loosened.
+- [`0a0d074`](https://github.com/bdfa123/godm/commit/0a0d074c463546a932ab9657fa33c14e825104f2)
+  and
+  [`fce504c`](https://github.com/bdfa123/godm/commit/fce504cf68e035290cd6973e217a099a81c04bca):
+  two torrent timing tests failed now and then, only on GitHub's Windows
+  runners. Six rounds of probing on the runners showed the system disk stalling
+  the transfer, about one run in eight losing one to sixteen seconds, and
+  nothing in godm. The tests moved their files to the runner's own disk and now
+  judge pace and progress instead of the clock.
+- Before v0.1.1, five review agents that had not seen the code before were each
+  asked to find defects. They reported 44; each was reproduced with a throwaway
+  test or refuted before anything was changed, and 11 were fixed for that
+  release.
+
 ## License
 
 [MIT](LICENSE). The libraries godm is built from are under their own licenses
