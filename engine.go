@@ -61,6 +61,11 @@ type Options struct {
 	// not, the download is refused instead of silently starting over.
 	Refresh bool
 
+	// GuessExtension lets a name with no extension be given the one the file's
+	// first bytes call for (see guessext.go). Only for a download not yet on
+	// disk: one being continued has to keep the name its partial file has.
+	GuessExtension bool
+
 	// Playback, when set, lets a player read the file while it downloads: the
 	// connections gather just ahead of wherever it is reading.
 	Playback *Playback
@@ -344,6 +349,11 @@ func Download(ctx context.Context, o Options) (*Result, error) {
 	pr, err := probeWithRetry(ctx, client, o)
 	if err != nil {
 		return nil, classifyLinkError(err)
+	}
+	if o.GuessExtension && pr.Resumable && extensionless(pr.Filename) {
+		if ext := sniffedExtension(sniffHead(ctx, client, o)); ext != "" {
+			pr.Filename = sanitize(pr.Filename + ext)
+		}
 	}
 	if err := os.MkdirAll(o.OutDir, 0o755); err != nil {
 		return nil, err

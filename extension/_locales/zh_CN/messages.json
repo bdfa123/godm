@@ -359,7 +359,7 @@
     "message": "文件类型"
   },
   "options_types_hint": {
-    "message": "逗号分隔的扩展名。开启“接管所有下载”时忽略。"
+    "message": "逗号分隔的扩展名。开启“接管所有下载”时忽略。完全没有扩展名的文件超过 100 MB 也会接管，godm 会按文件内容补上扩展名。"
   },
   "options_blocklist": {
     "message": "永不拦截这些主机"

@@ -703,6 +703,9 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 		// server suggests this time.
 		filename = filepath.Base(mt.view.Path)
 	}
+	// Only a download with no file yet may have an extension added to its
+	// name; see guessext.go.
+	fresh := mt.view.Path == ""
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 
@@ -799,6 +802,8 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 			Refresh:     refresh,
 			Playback:    &mt.play,
 			StreamPiece: m.streamPiece,
+			// A name with no extension is given one by what the file holds.
+			GuessExtension: fresh,
 			OnStart: func(si StartInfo) {
 				planned = true
 				mt.onStart(gen, si)

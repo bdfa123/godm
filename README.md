@@ -90,7 +90,12 @@ has to be loaded **before** the native host can be registered.
 
 Open the extension options page — it says whether the native host and daemon are
 reachable. Download something matching the file-type list and it will land in
-the godm manager instead of the browser's download bar.
+the godm manager instead of the browser's download bar. A file whose name has
+no extension at all (a file host naming a film by its hash, say) is taken over
+when it is larger than 100 MB, and godm adds the extension the file's first
+bytes call for — `.mkv`, `.mp4`, `.iso`, `.m2ts`, `.zip` and the like — before
+it starts, so it opens and plays like any other. It never adds one that would
+make a file run when opened.
 
 A managed browser can be set to ignore per-user native hosts; `install
 --machine` registers for the whole machine instead (needs an Administrator

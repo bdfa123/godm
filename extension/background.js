@@ -14,6 +14,10 @@ const HOST_RECHECK_MS = 60000;
 const HANDBACK_TTL_MS = 120000;
 const NOTIFY_COOLDOWN_MS = 60000;
 
+// The smallest download with no extension at all that is taken over; see
+// shouldTakeOver.
+const NO_EXTENSION_MIN_BYTES = 100 * 1024 * 1024;
+
 // A confirmation dialog that has been sitting this long was forgotten about.
 const CONFIRM_TTL_MS = 24 * 60 * 60 * 1000;
 const CONFIRM_WIDTH = 540;
@@ -164,7 +168,9 @@ async function wasHandedBack(...urls) {
 
 function extensionOf(name) {
   if (!name) return "";
-  const clean = name.split(/[?#]/)[0];
+  // The name, not the folders or the path it is in: a dot in "C:\Users\a.b\"
+  // or "/v1.2/" is no extension.
+  const clean = name.split(/[?#]/)[0].split(/[\\/]/).pop();
   const dot = clean.lastIndexOf(".");
   if (dot < 0 || dot === clean.length - 1) return "";
   return clean.slice(dot + 1).toLowerCase();
@@ -207,6 +213,12 @@ function shouldTakeOver(item, cfg) {
     extensionOf(item.filename) ||
     extensionOf(pathOf(item.url)) ||
     extensionOf(pathOf(url));
+  // A name with no extension at all says nothing about what the file is. A
+  // large one is still worth taking: a file host may name a film by its hash
+  // and serve it as plain bytes, and godm then names it by what it holds. A
+  // small one stays with the browser; it is more often something a site made
+  // up on the spot, an export or a report, than a download to manage.
+  if (!ext && item.totalBytes >= NO_EXTENSION_MIN_BYTES) return null;
   if (!allowed.has(ext)) return "extension not in list (" + (ext || "none") + ")";
 
   return null; // take it

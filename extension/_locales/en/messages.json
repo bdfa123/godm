@@ -359,7 +359,7 @@
     "message": "File types"
   },
   "options_types_hint": {
-    "message": "Comma separated extensions. Ignored when \"take over everything\" is on."
+    "message": "Comma separated extensions. Ignored when \"take over everything\" is on. A file with no extension at all is taken over too when it is larger than 100 MB, and godm names it by what it holds."
   },
   "options_blocklist": {
     "message": "Never intercept these hosts"

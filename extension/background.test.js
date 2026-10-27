@@ -878,6 +878,49 @@ test("a .torrent Chrome will not download again stays in its dialog", async () =
   assert.notEqual(w.heldKey(), undefined, "so Start, or keeping the file again, can still be chosen");
 });
 
+// ---------- a download with no extension at all ----------
+
+// A film a file host names by its hash and serves as plain bytes.
+const HASHED = {
+  id: 21,
+  url: "https://dl.files.test/download/?fid=1&sign=x",
+  finalUrl: "https://dl.files.test/download/?fid=1&sign=x",
+  filename: "C:\\Users\\me\\Downloads\\A63FC880ABF65C1D80CF37F769B2224320A7FF88",
+  mime: "binary/octet-stream",
+  referrer: "https://files.test/drive",
+  totalBytes: 80 * 1024 * 1024 * 1024,
+  state: "in_progress"
+};
+
+test("a large download with no extension at all is taken over, a small one or one of unknown size is not", async () => {
+  const big = start({ settings: { confirmDownload: false } });
+  await big.download(HASHED);
+  assert.deepEqual(big.seen.cancelled, [HASHED.id]);
+  assert.equal(downloads(big)[0].filename, "A63FC880ABF65C1D80CF37F769B2224320A7FF88", "under the name it came with; godm adds what it holds");
+
+  for (const totalBytes of [99 * 1024 * 1024, 0]) {
+    const w = start({ settings: { confirmDownload: false } });
+    await w.download(Object.assign({}, HASHED, { totalBytes }));
+    assert.deepEqual(w.seen.cancelled, [], "size " + totalBytes);
+    assert.deepEqual(w.seen.host, [], "godm is not even asked");
+  }
+});
+
+test("a dot in a folder's name is no extension", async () => {
+  const dotted = { filename: "C:\\Users\\john.doe\\Downloads\\A63FC880ABF65C1D80CF37F769B2224320A7FF88", url: "https://files.test/v1.2/get", finalUrl: "https://files.test/v1.2/get" };
+  const w = start({ settings: { confirmDownload: false } });
+  await w.download(Object.assign({}, HASHED, dotted));
+  assert.deepEqual(w.seen.cancelled, [HASHED.id], "it has none, and is large");
+
+  // A name's own extension is still what counts.
+  const film = start({ settings: { confirmDownload: false } });
+  await film.download(Object.assign({}, ITEM, dotted, { filename: "C:\\Users\\john.doe\\Downloads\\film.mkv" }));
+  assert.deepEqual(film.seen.cancelled, [ITEM.id]);
+  const page = start({ settings: { confirmDownload: false } });
+  await page.download(Object.assign({}, ITEM, dotted, { filename: "C:\\Users\\john.doe\\Downloads\\notes.txt" }));
+  assert.deepEqual(page.seen.cancelled, [], "one off the list stays with the browser");
+});
+
 // ---------- the videos a page played, in the link picker ----------
 
 const { mediaEntry } = require("./sniff.js");
