@@ -361,9 +361,46 @@ notes*).
 | `godm status` | Print daemon state and tasks. |
 | `godm install --ext-id <id>` | Register the native messaging host. |
 | `godm uninstall` | Remove the registration. |
+| `godm mcp` | Serve the Model Context Protocol on stdin and stdout, for Claude (see below). |
 
 `godm get` flags: `-o <dir>`, `-n <connections>`, `-H "Name: value"` (repeatable),
 `--name <filename>`. `godm daemon` flags: `-port`, `-o`, `-parallel`.
+
+## Let Claude drive it (MCP)
+
+`godm mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server
+that lets Claude see and drive the godm running on your computer: "download this
+link to D:\Films", "what is downloading and how long is left", "pause
+everything", "start the download list at 2 in the morning", "allow 8 at once".
+It talks to the running godm the way the browser extension does, reading the
+token itself, so Claude never sees it, and it does not start godm: open it
+first.
+
+Add it to Claude Code (every project, for your user):
+
+```
+claude mcp add --scope user godm -- "C:\path\to\godm.exe" mcp
+```
+
+and to the Claude desktop app's chat under `mcpServers` in
+`%APPDATA%\Claude\claude_desktop_config.json` (then restart the app):
+
+```json
+"godm": { "command": "C:\\path\\to\\godm.exe", "args": ["mcp"] }
+```
+
+There are 20 tools: `status`, `list_tasks`, `get_task`, `get_settings`,
+`inspect_stream` and `ytdlp_status` only read; `add_downloads`,
+`add_torrent_file`, `pause`, `resume`, `start_list`, `remove_tasks`,
+`set_limits`, `set_task_options`, `update_settings`, `set_after_all`,
+`change_address`, `play`, `open_folder` and `ytdlp_update` act. `remove_tasks`
+(which can delete the files with `delete_files`) and `set_after_all` (which can
+put the computer to sleep or shut it down) are marked destructive, so Claude
+asks before using them. Links are shown without their query string, which on a
+file host is often a signature. Downloads added this way carry no browser
+cookies, so a link that needs you to be logged in may fail where the same link
+taken over from the browser works. A web page Claude reads can try to steer it,
+so keep asking before it acts on what a page says.
 
 ## Engine behaviour
 

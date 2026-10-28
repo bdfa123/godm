@@ -71,6 +71,8 @@ func main() {
 		err = cmdUninstall()
 	case "status":
 		err = cmdStatus()
+	case "mcp":
+		err = RunMCP()
 	case "app":
 		err = RunApp()
 	case "ui":
@@ -107,6 +109,10 @@ func usage() {
   godm uninstall     Remove the native messaging registration.
   godm status        Show daemon state and current tasks.
   godm ui            Open the manager in your browser instead.
+  godm mcp           Serve the Model Context Protocol on stdin and stdout, so
+                     that Claude can see and drive the downloads of the running
+                     godm. Add it to Claude Code with:
+                       claude mcp add --scope user godm -- <path to godm.exe> mcp
 `)
 }
 

@@ -89,17 +89,20 @@ func refusalStatus(code int) bool {
 }
 
 func (c *daemonClient) do(method, path string, body any, out any) error {
-	var rdr *bytes.Reader
+	var b []byte
 	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
+		var err error
+		if b, err = json.Marshal(body); err != nil {
 			return err
 		}
-		rdr = bytes.NewReader(b)
-	} else {
-		rdr = bytes.NewReader(nil)
 	}
-	req, err := http.NewRequest(method, c.base+path, rdr)
+	return c.send(method, path, b, out)
+}
+
+// send is do with the body already in bytes, for the one request whose body is
+// not JSON: a .torrent file.
+func (c *daemonClient) send(method, path string, body []byte, out any) error {
+	req, err := http.NewRequest(method, c.base+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
