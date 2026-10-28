@@ -14,15 +14,18 @@ import (
 // It runs when no download is running or waiting its turn and at least one has
 // finished since it was armed. Which states count:
 //
-//   - Done is what finishing means. Nothing else is, so a lone failure never
-//     turns the machine off or puts it to sleep.
-//   - Running and queued downloads hold the action back.
+//   - Done is what finishing means, and so is a failure that is not to be
+//     tried again (onfailure.go): with failGiveUp at once, with failRetry once the
+//     tries again have come to nothing. Under failForever a failure never
+//     ends, and the action waits.
+//   - Running and queued downloads hold the action back, and so do failed
+//     ones that are to be tried again.
 //   - A download waiting for a fresh link holds it back too, because the user
 //     is in the middle of fixing it, but only until its wait runs out
 //     (refreshWindow at most), so it cannot hold the action back for ever.
-//   - Paused, failed and expired-link downloads do not hold it back. They will
-//     not move without the user, and waiting for them would mean the action
-//     never comes.
+//   - Paused downloads, and failed ones given up on, do not hold it back. They
+//     will not move without the user, and waiting for them would mean the
+//     action never comes.
 type afterAction string
 
 const (
@@ -37,9 +40,10 @@ const shutdownDelay = 60 * time.Second
 
 // checkAfterAll runs the armed action if nothing holds it back. It is called
 // when a run ends by itself, as done, failed or expired (finished says whether
-// it was done), and again when a wait for a new link runs out. Pausing or
-// removing a download never sets the action off: whoever does that is at the
-// machine, and finishing is not what they did.
+// it is over, see above), again when a wait for a new link runs out, and when
+// failed downloads stop being tried again. Pausing or removing a download
+// never sets the action off: whoever does that is at the machine, and
+// finishing is not what they did.
 func (m *Manager) checkAfterAll(finished bool) {
 	m.mu.Lock()
 	if finished {
@@ -79,12 +83,17 @@ func (m *Manager) afterBlockedLocked() (blocked bool, retry time.Time) {
 			continue
 		}
 		t.mu.Lock()
-		st, until := t.view.State, t.view.RefreshUntil
+		st, until, again := t.view.State, t.view.RefreshUntil, !t.view.RetryAt.IsZero()
 		t.mu.Unlock()
 		switch st {
 		case StateRunning, StateQueued:
 			// Its own end will look again.
 			return true, time.Time{}
+		case StateError, StateNeedsRefresh:
+			if again {
+				// So will the end of its try again.
+				return true, time.Time{}
+			}
 		case StateAwaitingRefresh:
 			if now.Before(until) {
 				blocked = true

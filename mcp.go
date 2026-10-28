@@ -141,7 +141,7 @@ func (t *mcpTools) server() *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "pause",
-		Description: "Pause downloads by id, or all that are running or waiting with all. What has been downloaded is kept; resume continues from there.",
+		Description: "Pause downloads by id, or all that are running or waiting with all. What has been downloaded is kept; resume continues from there. A failed download waiting to be tried again is not tried again once paused, and all stops every such try.",
 		Annotations: mcpWrite("Pause downloads", false, false),
 		InputSchema: mcpSchema[idsOrAllIn](func(p mcpProps) {
 			p.items("ids", 1, 200)
@@ -196,17 +196,20 @@ func (t *mcpTools) server() *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "update_settings",
-		Description: "Change godm's settings; only what is given changes. Covers the default download folder, sorting into folders by type and their names, keeping the computer awake, language, what a torrent does once finished, and the time of day the download list starts by itself. Use set_after_all for what happens when all downloads finish.",
+		Description: "Change godm's settings; only what is given changes. Covers the default download folder, sorting into folders by type and their names, keeping the computer awake, language, what a torrent does once finished, the time of day the download list starts by itself, and whether a download that fails is tried again. Use set_after_all for what happens when all downloads finish.",
 		Annotations: mcpWrite("Change settings", false, false),
 		InputSchema: mcpSchema[settingsIn](func(p mcpProps) {
 			p.enum("language", "auto", "en", "zh")
 			p.enum("seed_policy", "stop", "ratio", "keep")
+			p.enum("on_failure", string(failGiveUp), string(failRetry), string(failForever))
+			p.intRange("retry_every_minutes", 1, maxRetryEvery)
+			p.intRange("retry_times", 1, maxRetryTimes)
 		}),
 	}, scrubbed(t.updateSettings))
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "set_after_all",
-		Description: "Choose what the computer does once all downloads have finished: nothing, sleep or shutdown. It happens once and is then forgotten, and godm warns before it shuts down. get_settings lists the choices this computer has. Sleep and shutdown are meant for when the user has asked for them.",
+		Description: "Choose what the computer does once all downloads have finished: nothing, sleep or shutdown. It happens once and is then forgotten, and godm warns before it shuts down. get_settings lists the choices this computer has. Whether it waits for a download that failed is the on_failure setting (update_settings). Sleep and shutdown are meant for when the user has asked for them.",
 		Annotations: mcpWrite("When all downloads finish", true, true),
 		InputSchema: mcpSchema[afterAllIn](func(p mcpProps) {
 			p.enum("action", "nothing", "sleep", "shutdown")
@@ -308,6 +311,10 @@ type mcpTask struct {
 	Left     string `json:"time_left,omitempty"`
 	Error    string `json:"error,omitempty"`
 	Path     string `json:"path,omitempty"`
+	// RetryAt is when a failed download is tried again by itself, and
+	// Retries how many tries again in a row have got it no further.
+	RetryAt string `json:"tried_again_at,omitempty"`
+	Retries int    `json:"tries_again_so_far,omitempty"`
 }
 
 // mcpState is the state in one word, with the ones godm's window spells out
@@ -334,6 +341,12 @@ func briefTask(v TaskView, inLine int) mcpTask {
 	}
 	if b.Name == "" {
 		b.Name = linkShown(v.URL)
+	}
+	if isFailure(v.State) {
+		if !v.RetryAt.IsZero() {
+			b.RetryAt = v.RetryAt.Local().Format("2006-01-02 15:04:05")
+		}
+		b.Retries = v.Retries
 	}
 	if v.Size > 0 {
 		b.Size = humanBytes(v.Size)
@@ -1058,6 +1071,9 @@ type settingsIn struct {
 	SeedPolicy    *string           `json:"seed_policy,omitempty" jsonschema:"What a finished torrent does: stop uploading, upload until a ratio of 1, or keep uploading"`
 	ListStartTime *string           `json:"list_start_time,omitempty" jsonschema:"The time of day the download list starts by itself, HH:MM in 24 hours; empty to stop"`
 	ListDaily     *bool             `json:"list_daily,omitempty" jsonschema:"Start the download list at that time every day, rather than once"`
+	OnFailure     *string           `json:"on_failure,omitempty" jsonschema:"What a download that fails or whose link expires does next: give_up leaves it failed, and a sleep or shutdown set with set_after_all goes ahead without it; retry tries it again every retry_every_minutes, up to retry_times times without getting further, then gives up; forever goes on trying, and a sleep or shutdown waits for it"`
+	RetryEvery    *int              `json:"retry_every_minutes,omitempty" jsonschema:"Minutes between tries again"`
+	RetryTimes    *int              `json:"retry_times,omitempty" jsonschema:"How many tries again that get no further before retry gives up"`
 }
 
 func (t *mcpTools) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, in settingsIn) (*mcp.CallToolResult, any, error) {
@@ -1073,6 +1089,7 @@ func (t *mcpTools) updateSettings(ctx context.Context, _ *mcp.CallToolRequest, i
 	u := settingsUpdate{
 		KeepAwake: in.KeepAwake, SortByType: in.SortByType, Folders: in.Folders, Language: in.Language,
 		DownloadDir: in.DownloadDir, ListAt: in.ListStartTime, ListDaily: in.ListDaily,
+		OnFailure: in.OnFailure, RetryEvery: in.RetryEvery, RetryTimes: in.RetryTimes,
 	}
 	var out map[string]any
 	if err := c.do(http.MethodPost, "/api/settings", u, &out); err != nil {

@@ -257,6 +257,26 @@ func TestMCPChangesLimitsAndSettings(t *testing.T) {
 	if settings["seed_policy"] != "keep" || settings["list_at"] != "07:05" || settings["download_dir"] != dir {
 		t.Errorf("get_settings answered %v", settings)
 	}
+
+	// What a failed download does next, and a failed download saying when it
+	// is tried again.
+	mcpOK(t, cs, "update_settings", map[string]any{"on_failure": "forever", "retry_every_minutes": 10, "retry_times": 4}, nil)
+	if p, e, n := m.RetryChoice(); p != "forever" || e != 10 || n != 4 {
+		t.Errorf("failures are %s every %d minutes, %d times; want forever, 10, 4", p, e, n)
+	}
+	mcpOK(t, cs, "get_settings", nil, &settings)
+	if settings["on_failure"] != "forever" || settings["retry_every"] != float64(10) {
+		t.Errorf("get_settings answered %v", settings)
+	}
+	f := taskIn(m, "t1-9", StateRunning)
+	failRun(m, f, StateError, 0)
+	var got struct {
+		Download mcpTask `json:"download"`
+	}
+	mcpOK(t, cs, "get_task", map[string]any{"id": "t1-9"}, &got)
+	if got.Download.RetryAt == "" || got.Download.State != "error" {
+		t.Errorf("a failed download to be tried again shows as %+v", got.Download)
+	}
 }
 
 // What happens when all downloads finish goes through, with a computer that
@@ -446,6 +466,9 @@ func TestMCPSaysWhatWentWrong(t *testing.T) {
 		{"remove_tasks", map[string]any{"ids": nil}, ""},
 		{"pause", map[string]any{"ids": []string{}}, ""},
 		{"update_settings", map[string]any{"list_start_time": "25:00"}, ""},
+		{"update_settings", map[string]any{"on_failure": "explode"}, ""},
+		{"update_settings", map[string]any{"retry_every_minutes": 0}, ""},
+		{"update_settings", map[string]any{"retry_times": 101}, ""},
 		{"change_address", map[string]any{"id": "t1-1", "url": "https://a.test/new"}, ""},
 	}
 	for _, c := range cases {

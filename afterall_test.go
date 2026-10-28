@@ -110,6 +110,14 @@ func arm(t *testing.T, m *Manager, act string) {
 	}
 }
 
+// onFailure sets what a failed download does next, the way the dialog does.
+func onFailure(t *testing.T, m *Manager, policy string) {
+	t.Helper()
+	if err := m.UpdateSettings(settingsUpdate{OnFailure: &policy}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // taskIn puts a task straight into the list in the given state, so a test can
 // end its run whichever way it likes without a download behind it.
 func taskIn(m *Manager, id string, st TaskState) *managedTask {
@@ -224,25 +232,47 @@ func TestAfterAllNeedsADownloadToFinishAfterItIsSet(t *testing.T) {
 	happensOnce(t, pc, "sleep")
 }
 
-func TestAFailedDownloadNeverSetsItOff(t *testing.T) {
+// A failure that is to be tried again is not over, so it never sets the action
+// off: so it is by default, and with Keep trying.
+func TestAFailureToBeTriedAgainNeverSetsItOff(t *testing.T) {
+	for _, policy := range []string{"retry", "forever"} {
+		for _, st := range []TaskState{StateError, StateNeedsRefresh} {
+			t.Run(policy+" "+string(st), func(t *testing.T) {
+				m, pc, _ := managerWithFakePC(t, 2)
+				onFailure(t, m, policy)
+				arm(t, m, "shutdown")
+				good, bad := taskIn(m, "good", StateRunning), taskIn(m, "bad", StateRunning)
+				end(m, bad, st)
+				end(m, good, StateDone)
+				nothingHappens(t, pc, "a download failed and is to be tried again")
+				if got := m.AfterAll(); got != "shutdown" {
+					t.Errorf("the choice was %q after a failure, want it still armed", got)
+				}
+			})
+		}
+	}
+}
+
+// With Don't try again a failure is as over as a finished download: one failing
+// on its own sets the action off.
+func TestAFailureNotToBeTriedAgainSetsItOff(t *testing.T) {
 	for _, st := range []TaskState{StateError, StateNeedsRefresh} {
 		t.Run(string(st), func(t *testing.T) {
 			m, pc, _ := managerWithFakePC(t, 2)
+			onFailure(t, m, "give_up")
 			arm(t, m, "shutdown")
 			only := taskIn(m, "only", StateRunning)
 			end(m, only, st)
-			nothingHappens(t, pc, "the only download failed, which is not finishing")
-			if got := m.AfterAll(); got != "shutdown" {
-				t.Errorf("the choice was %q after a failure, want it still armed", got)
-			}
+			happensOnce(t, pc, "shutdown in 1m0s")
 		})
 	}
 }
 
-func TestFailedDownloadsDoNotHoldItBack(t *testing.T) {
+func TestFailedDownloadsGivenUpOnDoNotHoldItBack(t *testing.T) {
 	for _, st := range []TaskState{StateError, StateNeedsRefresh} {
 		t.Run(string(st)+" first", func(t *testing.T) {
 			m, pc, _ := managerWithFakePC(t, 2)
+			onFailure(t, m, "give_up")
 			good, bad := taskIn(m, "good", StateRunning), taskIn(m, "bad", StateRunning)
 			arm(t, m, "sleep")
 			end(m, bad, st)
@@ -252,6 +282,7 @@ func TestFailedDownloadsDoNotHoldItBack(t *testing.T) {
 		})
 		t.Run(string(st)+" last", func(t *testing.T) {
 			m, pc, _ := managerWithFakePC(t, 2)
+			onFailure(t, m, "give_up")
 			good, bad := taskIn(m, "good", StateRunning), taskIn(m, "bad", StateRunning)
 			arm(t, m, "sleep")
 			end(m, good, StateDone)
@@ -324,13 +355,16 @@ func TestAWaitThatIsAlreadyOverDoesNotHoldItBack(t *testing.T) {
 
 // ---------- the choice itself ----------
 
+// In these two b stops by being paused, which counts for nothing either way,
+// and the look after it is the one a wait for a new link running out makes.
 func TestChoosingTheSameThingAgainKeepsCounting(t *testing.T) {
 	m, pc, _ := managerWithFakePC(t, 2)
 	a, b := taskIn(m, "a", StateRunning), taskIn(m, "b", StateRunning)
 	arm(t, m, "sleep")
 	end(m, a, StateDone)
 	arm(t, m, "sleep") // the same again: a already finished since it was armed
-	end(m, b, StateError)
+	end(m, b, StatePaused)
+	m.checkAfterAll(false)
 	happensOnce(t, pc, "sleep")
 }
 
@@ -340,7 +374,8 @@ func TestChoosingSomethingElseStartsCountingAfresh(t *testing.T) {
 	arm(t, m, "sleep")
 	end(m, a, StateDone)
 	arm(t, m, "shutdown") // a new decision: a finished before it
-	end(m, b, StateError)
+	end(m, b, StatePaused)
+	m.checkAfterAll(false)
 	nothingHappens(t, pc, "nothing finished since shutdown was chosen")
 }
 

@@ -155,6 +155,8 @@ func (m *Manager) startLater(id string) bool {
 	switch mt.view.State {
 	case StateQueued:
 		mt.setLaterLocked(false)
+		// Started by hand, even if it waited as a try again: it counts afresh.
+		mt.autoGen, mt.view.Retries = 0, 0
 		mt.mu.Unlock()
 		m.dirty.Store(true)
 		m.mu.Lock()
@@ -262,7 +264,8 @@ func (m *Manager) ListNext() time.Time {
 	return m.listNext
 }
 
-// listClock starts the list when its time comes, until stop is closed.
+// listClock starts the list when its time comes, and tries again the failed
+// downloads whose time has come (see onfailure.go), until stop is closed.
 func (m *Manager) listClock(stop <-chan struct{}) {
 	tick := time.NewTicker(listClockEvery)
 	defer tick.Stop()
@@ -272,6 +275,7 @@ func (m *Manager) listClock(stop <-chan struct{}) {
 			return
 		case <-tick.C:
 			m.listTick(time.Now())
+			m.retryTick(time.Now())
 		}
 	}
 }

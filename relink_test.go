@@ -290,6 +290,17 @@ func TestAWrongAddressIsStillRefusedAfterWaitingInTheQueue(t *testing.T) {
 	if after, _ := os.ReadFile(before.Path); sum(after) != sum(partial) {
 		t.Error("the partial file was written to")
 	}
+
+	// Nor is it tried again by itself, which would fetch the other file
+	// afresh beside this one.
+	if !v.RetryAt.IsZero() {
+		t.Errorf("an address leading to another file is to be tried again at %v", v.RetryAt)
+	}
+	m.retryTick(time.Now().Add(time.Hour))
+	time.Sleep(300 * time.Millisecond)
+	if got := namesIn(t, dir); len(got) != 2 {
+		t.Errorf("after the time for a try again the folder holds %v", got)
+	}
 }
 
 // Matching a new download to the one that waits for its link takes a request

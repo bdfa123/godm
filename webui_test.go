@@ -120,6 +120,15 @@ func TestTheSettingsDialogChoosesTheDownloadFolder(t *testing.T) {
 	}
 }
 
+// What a failed download does next: the Settings dialog shows the choices that
+// go with each and saves only what changed, and a failed card and the line at
+// the top say when it is tried again.
+func TestThePageSaysWhatAFailedDownloadDoesNext(t *testing.T) {
+	for _, lang := range []string{"en", "zh"} {
+		t.Run(lang, func(t *testing.T) { runPage(t, "onfailure", lang) })
+	}
+}
+
 // The manager page's download list: its tab, its bar and Add to list.
 func TestThePageShowsTheDownloadList(t *testing.T) {
 	for _, lang := range []string{"en", "zh"} {
@@ -146,7 +155,7 @@ function matches(n, part) {
   return false;
 }
 
-const SELECTS = ["limit", "listLimit", "speed", "setSeed", "setLang", "setAfter"];
+const SELECTS = ["limit", "listLimit", "speed", "setSeed", "setLang", "setAfter", "setFail", "setEvery", "setTimes"];
 const DIALOGS = ["addDlg", "rmDlg", "addrDlg", "setDlg"];
 
 class El {
@@ -961,6 +970,72 @@ scenarios.downloaddir = async function () {
   same(els.setDlg.hidden, false, "the dialog closed on a mistake");
   assert(/ err/.test(toast().className), "the mistake should be shown as one");
   assert(toast().textContent.indexOf(words("full path", "完整路径")) >= 0, "the toast says why: " + toast().textContent);
+};
+
+scenarios.onfailure = async function () {
+  let saved = null, every = 5;
+  const view = () => ({ ok: true, keep_awake: true, can_keep_awake: true, after_all: "nothing", after_all_options: ["nothing", "shutdown"],
+    sort_by_type: false, folders: {}, out_dir: "C:\\d", language: process.env.PAGE_LANG, on_failure: "retry", retry_every: every, retry_times: 3 });
+  routes["/api/settings"] = (body) => { if (body) saved = body; return view(); };
+  routes["/api/ytdlp"] = () => ({ ok: true, found: false });
+  routes["/api/ytdlp/check"] = () => ({ ok: true, found: false });
+  routes["/api/tasks"] = () => ({ tasks: tasks, limit: limit, after_all: "nothing", speed_limit: 0, language: "", on_failure: "retry", retry_every: 5, retry_times: 3 });
+  tasks = [
+    task("f", { state: "error", error: "HTTP 500", speed: 0, retries: 1, retry_at: new Date(Date.now() + 240400).toISOString() }),
+    task("e", { state: "needs_refresh", speed: 0, retry_at: new Date(Date.now() + 60400).toISOString() }),
+    task("g", { state: "error", error: "HTTP 500", speed: 0, retries: 3 }),
+    task("r", { state: "running", retry_at: new Date(Date.now() + 60400).toISOString() }), // left over, not waiting
+  ];
+  await boot();
+
+  // The cards say when, and which try, and the one given up on says so.
+  const list = els.list.innerHTML;
+  assert(list.indexOf(words("godm tries again in 4m 0s (try 2 of 3)", "4分0秒后自动重试（第 2/3 次）")) >= 0, "the failed card should say when it is tried again: " + list);
+  assert(list.indexOf(words("godm tries again in 1m 0s (try 1 of 3)", "1分0秒后自动重试（第 1/3 次）")) >= 0, "so should the expired one: " + list);
+  assert(list.indexOf(words("tried again 3 times, then given up", "已自动重试 3 次，不再重试")) >= 0, "the card given up on should say so: " + list);
+  same(list.split(words("Stop trying", "不再重试") + "</button>").length - 1, 2, "the two to be tried again can be stopped, and only they");
+  assert(els.stats.innerHTML.indexOf(words("2 failed, to be tried again", "2 个失败的等待自动重试")) >= 0, "the top line should count them: " + els.stats.innerHTML);
+
+  const open = async () => { els.setDlg.hidden = true; dispatch(els.setBtn, "click"); await tick(); };
+  const shown = () => [els.everyBox.hidden, els.timesBox.hidden];
+  await open();
+  same(els.failRow.hidden, false, "the choice should be in the dialog");
+  same(els.setFail.value, "retry", "the choice made");
+  same(els.setEvery.value, "5", "the minutes");
+  same(els.setTimes.value, "3", "the tries");
+  same(JSON.stringify(shown()), "[false,false]", "Try again a few times shows the minutes and the tries");
+  assert(els.setTimes.innerHTML.indexOf(">" + words("once", "1 次") + "<") >= 0, "one try is said as one: " + els.setTimes.innerHTML);
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved, null, "saving an untouched dialog sent settings");
+
+  await open();
+  els.setFail.value = "forever";
+  dispatch(els.setFail, "change");
+  same(JSON.stringify(shown()), "[false,true]", "Keep trying shows the minutes only");
+  els.setEvery.value = "30";
+  dispatch(els.setGo, "click");
+  await tick();
+  same(JSON.stringify(saved), JSON.stringify({ on_failure: "forever", retry_every: 30 }), "saving sends what changed");
+
+  saved = null;
+  await open();
+  els.setFail.value = "give_up";
+  dispatch(els.setFail, "change");
+  same(JSON.stringify(shown()), "[true,true]", "Don't try again shows neither");
+  dispatch(els.setGo, "click");
+  await tick();
+  same(JSON.stringify(saved), JSON.stringify({ on_failure: "give_up" }), "saving sends the choice alone");
+
+  // Minutes set some other way are offered as they are.
+  every = 7;
+  saved = null;
+  await open();
+  same(els.setEvery.value, "7", "minutes the dialog does not offer should still show");
+  assert(els.setEvery.innerHTML.indexOf(words("7 min", "7 分钟")) >= 0, "and be named: " + els.setEvery.innerHTML);
+  dispatch(els.setGo, "click");
+  await tick();
+  same(saved, null, "saving them as they are sent settings");
 };
 
 // The download list: a tab of its own that the Unfinished tab leaves out, what

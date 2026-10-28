@@ -193,6 +193,7 @@ const uiHTML = `<!doctype html>
   .dialog .set { margin: 0 0 16px; }
   .dialog .set p { margin: 3px 0 0; font-size: 12.5px; }
   .dialog .set .check + p { margin-left: 26px; }
+  .dialog .failline { display: flex; flex-wrap: wrap; gap: 6px 14px; }
   #setDlg .dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
   .folders { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 10px 0 0 26px; }
   .folders.off { opacity: .55; }
@@ -310,6 +311,14 @@ const uiHTML = `<!doctype html>
       <label class="field"><span data-i18n="set.after"></span> <select id="setAfter"></select></label>
       <p data-i18n="set.after.help"></p>
     </div>
+    <div class="set" id="failRow">
+      <div class="failline">
+        <label class="field"><span data-i18n="set.fail"></span> <select id="setFail"></select></label>
+        <label class="field" id="everyBox"><span data-i18n="set.fail.every"></span> <select id="setEvery"></select></label>
+        <label class="field" id="timesBox"><span data-i18n="set.fail.times"></span> <select id="setTimes"></select></label>
+      </div>
+      <p data-i18n="set.fail.help"></p>
+    </div>
     <div class="set" id="seedRow" hidden>
       <label class="field"><span data-i18n="set.seed"></span> <select id="setSeed"></select></label>
       <p data-i18n="set.seed.help"></p>
@@ -395,6 +404,7 @@ I18N.en = {
   "stats.idle": "Idle",
   "stats.sleep": "will sleep when finished",
   "stats.shutdown": "will shut down when finished",
+  "stats.retrying": "{n} failed, to be tried again",
   "net.offline": "Not connected to the godm service",
 
   "tab.all": "All",
@@ -467,6 +477,10 @@ I18N.en = {
   "act.remove": "Remove",
   "act.refresh": "Refresh link",
   "act.stopWaiting": "Stop waiting",
+  "act.stopRetry": "Stop trying",
+  "retry.in": "godm tries again in {time} (try {n})",
+  "retry.inOf": "godm tries again in {time} (try {n} of {of})",
+  "retry.gaveUp": "tried again {n} times, then given up",
   "act.retry": "Retry",
 
   "task.conns": "Connections",
@@ -567,6 +581,16 @@ I18N.en = {
   "set.awake.help": "Stops Windows going to sleep on its own while a download is running. The screen can still turn off.",
   "set.after": "When all downloads finish",
   "set.after.help": "Happens once, then goes back to Do nothing, and is forgotten if godm restarts. Shut down waits 60 seconds first: press Win+R, type shutdown /a and press Enter to cancel.",
+  "set.fail": "When a download fails",
+  "set.fail.every": "every",
+  "set.fail.times": "at most",
+  "set.fail.min": "{n} min",
+  "set.fail.n.one": "once",
+  "set.fail.n.other": "{n} times",
+  "set.fail.giveUp": "Don't try again",
+  "set.fail.retry": "Try again a few times",
+  "set.fail.forever": "Keep trying",
+  "set.fail.help": "A download that fails, or whose link expires, is tried again by itself after the time set, and a try that gets further starts the count again. With sleep or shut down chosen above: Don't try again goes ahead without waiting for it, Try again a few times goes ahead once the tries are used up, and Keep trying waits for as long as a download keeps failing.",
   "after.nothing": "Do nothing",
   "after.sleep": "Sleep",
   "after.shutdown": "Shut down",
@@ -659,6 +683,7 @@ I18N.zh = {
   "stats.idle": "空闲",
   "stats.sleep": "完成后将进入睡眠",
   "stats.shutdown": "完成后将关机",
+  "stats.retrying": "{n} 个失败的等待自动重试",
   "net.offline": "未连接到 godm 服务",
 
   "tab.all": "全部",
@@ -731,6 +756,10 @@ I18N.zh = {
   "act.remove": "移除",
   "act.refresh": "刷新链接",
   "act.stopWaiting": "停止等待",
+  "act.stopRetry": "不再重试",
+  "retry.in": "{time}后自动重试（第 {n} 次）",
+  "retry.inOf": "{time}后自动重试（第 {n}/{of} 次）",
+  "retry.gaveUp": "已自动重试 {n} 次，不再重试",
   "act.retry": "重试",
 
   "task.conns": "连接数",
@@ -831,6 +860,16 @@ I18N.zh = {
   "set.awake.help": "下载进行时，防止 Windows 自行进入睡眠。屏幕仍可以关闭。",
   "set.after": "所有下载完成后",
   "set.after.help": "仅执行一次，之后会恢复为“不执行任何操作”，godm 重启后也会恢复。选择“关机”时会先等待 60 秒：按 Win+R，输入 shutdown /a 并按 Enter 可取消。",
+  "set.fail": "下载失败时",
+  "set.fail.every": "每隔",
+  "set.fail.times": "最多",
+  "set.fail.min": "{n} 分钟",
+  "set.fail.n.one": "1 次",
+  "set.fail.n.other": "{n} 次",
+  "set.fail.giveUp": "不重试",
+  "set.fail.retry": "重试几次",
+  "set.fail.forever": "一直重试",
+  "set.fail.help": "失败或链接过期的下载，到了设定的时间会自动重试；重试时有进展就重新计数。上面选了睡眠或关机时：“不重试”不等失败的下载，直接执行；“重试几次”等重试次数用完再执行；“一直重试”只要还有下载在失败，就一直等着不执行。",
   "after.nothing": "不执行任何操作",
   "after.sleep": "睡眠",
   "after.shutdown": "关机",
@@ -1297,7 +1336,8 @@ function banner(t) {
     var saved = t.size > 0 ? tr("banner.expired.pct", { pct: Math.round(t.received / t.size * 100) + "%" }) : tr("banner.expired.noPct");
     return '<div class="banner warn"><div class="msg">' + saved +
       '<span class="hint">' + (from ? tr("banner.expired.refresh", { host: esc(from) }) : tr("banner.expired.paste")) +
-      (t.error ? " (" + esc(t.error.replace(/^download link expired:\s*/i, "")) + ")" : "") + "</span></div>" +
+      (t.error ? " (" + esc(t.error.replace(/^download link expired:\s*/i, "")) + ")" : "") + retryNote(t) + "</span></div>" +
+      stopRetry(t) +
       (t.referrer ? '<button class="btn warn small" data-act="refresh" data-id="' + t.id + '">' + tr("act.refresh") + "</button>" : "") +
       '<button class="btn small" data-act="address" data-id="' + t.id + '">' + tr("act.address") + "</button></div>";
   }
@@ -1308,10 +1348,27 @@ function banner(t) {
       '<button class="btn small" data-act="pause" data-id="' + t.id + '">' + tr("act.stopWaiting") + "</button></div>";
   }
   if (t.state === "error") {
-    return '<div class="banner err"><div class="msg">' + tr("banner.failed") + ' <span class="hint">' + esc(t.error || tr("banner.unknown")) + "</span></div>" +
+    return '<div class="banner err"><div class="msg">' + tr("banner.failed") + ' <span class="hint">' + esc(t.error || tr("banner.unknown")) + retryNote(t) + "</span></div>" +
+      stopRetry(t) +
       '<button class="btn small" data-act="resume" data-id="' + t.id + '">' + tr("act.retry") + "</button></div>";
   }
   return "";
+}
+
+// retryNote says when a failed download is tried again by itself, and which
+// try that is, or that it was tried and given up on. Pausing one that waits to
+// be tried again is what stops it.
+function retryNote(t) {
+  if (t.retry_at) {
+    var left = Math.max(0, (new Date(t.retry_at) - Date.now()) / 1000), n = (t.retries || 0) + 1;
+    return " · " + (S.onFailure === "retry" && S.retryTimes
+      ? tr("retry.inOf", { time: dur(left), n: n, of: S.retryTimes })
+      : tr("retry.in", { time: dur(left), n: n }));
+  }
+  return t.retries ? " · " + tr("retry.gaveUp", { n: t.retries }) : "";
+}
+function stopRetry(t) {
+  return t.retry_at ? '<button class="btn small" data-act="pause" data-id="' + t.id + '">' + tr("act.stopRetry") + "</button>" : "";
 }
 
 // playable is true for a video that can be watched now: a finished one, or an
@@ -1403,14 +1460,16 @@ document.addEventListener("selectionchange", function () { HOLD.selAt = performa
 
 function render() {
   HOLD.pending = false;
-  var tasks = S.tasks, running = 0, speed = 0, queued = 0;
+  var tasks = S.tasks, running = 0, speed = 0, queued = 0, retrying = 0;
   tasks.forEach(function (t) {
     if (t.state === "running") { running++; speed += t.speed || 0; }
     if (t.state === "queued" && !t.later) queued++;
+    if (t.retry_at && (t.state === "error" || t.state === "needs_refresh")) retrying++;
   });
   var line = running
     ? tr("stats.running", { n: running, speed: human(speed) + "/s" }) + (queued ? " · " + tr("stats.waiting", { n: queued }) : "")
     : tasks.length ? (queued ? tr("stats.waiting", { n: queued }) : tr("stats.idle")) : "";
+  if (retrying) line += " · " + tr("stats.retrying", { n: retrying });
   // A one-shot action armed and forgotten is the one that would surprise.
   var armed = { sleep: "stats.sleep", shutdown: "stats.shutdown" }[S.afterAll];
   document.getElementById("stats").innerHTML = line + (armed ? (line ? " · " : "") + "<b>" + tr(armed) + "</b>" : "");
@@ -1492,6 +1551,8 @@ function poll() {
     if (d.language && d.language !== LANG_SETTING && asked > S.langAt) setLang(d.language);
     S.tasks = d.tasks || [];
     S.afterAll = d.after_all;
+    S.onFailure = d.on_failure;
+    S.retryTimes = d.retry_times;
     S.listAt = d.list_at || "";
     S.listDaily = !!d.list_daily;
     S.listNext = d.list_next;
@@ -1791,6 +1852,23 @@ document.getElementById("listStart").addEventListener("click", function () {
 // put back by pressing Save.
 var AFTER_LABEL = { nothing: "after.nothing", sleep: "after.sleep", shutdown: "after.shutdown" };
 var AFTER_DOES = { sleep: "toast.after.sleep", shutdown: "toast.after.shutdown" };
+// What a failed download does next, and the minutes and tries offered for it.
+// A number set some other way, through godm mcp say, is offered as well.
+var FAIL_CHOICES = [["give_up", "set.fail.giveUp"], ["retry", "set.fail.retry"], ["forever", "set.fail.forever"]];
+var RETRY_EVERY = [1, 5, 10, 30], RETRY_TIMES = [1, 3, 5];
+function numberChoices(id, list, have, label) {
+  var el = document.getElementById(id), picked = +el.value || have;
+  if (have && list.indexOf(have) < 0) list = list.concat([have]).sort(function (a, b) { return a - b; });
+  el.innerHTML = list.map(function (n) { return '<option value="' + n + '">' + esc(label(n)) + "</option>"; }).join("");
+  el.value = picked;
+}
+// Only the choices that go with the one made are shown.
+function showFailBoxes() {
+  var how = document.getElementById("setFail").value;
+  document.getElementById("everyBox").hidden = how === "give_up";
+  document.getElementById("timesBox").hidden = how !== "retry";
+}
+document.getElementById("setFail").addEventListener("change", showFailBoxes);
 // What a finished torrent does, by the daemon's name for it. A choice the page
 // has no words for is shown under the label the daemon sent.
 var SEED_LABEL = { stop: "seed.stop", ratio: "seed.ratio", keep: "seed.keep" };// The kinds match what the daemon sorts by; the names are only what to call them.
@@ -1822,6 +1900,14 @@ function fillSettingsText() {
     return '<option value="' + o + '">' + esc(AFTER_LABEL[o] ? tr(AFTER_LABEL[o]) : o) + "</option>";
   }).join("");
   after.value = picked;
+  var fail = document.getElementById("setFail"), how = fail.value || d.on_failure;
+  fail.innerHTML = FAIL_CHOICES.map(function (c) {
+    return '<option value="' + c[0] + '">' + esc(tr(c[1])) + "</option>";
+  }).join("");
+  fail.value = how;
+  numberChoices("setEvery", RETRY_EVERY, d.retry_every, function (n) { return tr("set.fail.min", { n: n }); });
+  numberChoices("setTimes", RETRY_TIMES, d.retry_times, function (n) { return trn("set.fail.n", n); });
+  showFailBoxes();
   var seed = document.getElementById("setSeed"), kept = seed.value || (S.seed && S.seed.policy);
   seed.innerHTML = ((S.seed && S.seed.choices) || []).map(function (c) {
     return '<option value="' + esc(c.value) + '">' + esc(SEED_LABEL[c.value] ? tr(SEED_LABEL[c.value]) : c.label) + "</option>";
@@ -1858,6 +1944,14 @@ function openSettings() {
     document.getElementById("setLang").value = d.language || "auto";
     document.getElementById("setAfter").value = d.after_all;
     document.getElementById("afterRow").hidden = (d.after_all_options || []).length < 2;
+    // A daemon without the choice has no row, and nothing of it is saved.
+    document.getElementById("failRow").hidden = !d.on_failure;
+    if (d.on_failure) {
+      document.getElementById("setFail").value = d.on_failure;
+      document.getElementById("setEvery").value = d.retry_every;
+      document.getElementById("setTimes").value = d.retry_times;
+      showFailBoxes();
+    }
     document.getElementById("seedRow").hidden = !S.seed;
     if (S.seed) document.getElementById("setSeed").value = S.seed.policy;
     // No folder chosen shows as an empty field with the one in use behind it,
@@ -1896,6 +1990,13 @@ document.getElementById("setGo").addEventListener("click", function () {
   if (awake !== !!was.keep_awake) upd.keep_awake = awake;
   var after = document.getElementById("setAfter").value;
   if (after && after !== was.after_all) upd.after_all = after;
+  if (was.on_failure) {
+    var how = document.getElementById("setFail").value;
+    if (how && how !== was.on_failure) upd.on_failure = how;
+    var every = +document.getElementById("setEvery").value, times = +document.getElementById("setTimes").value;
+    if (every && every !== was.retry_every) upd.retry_every = every;
+    if (times && times !== was.retry_times) upd.retry_times = times;
+  }
   var dir = document.getElementById("setDir").value.trim();
   if (dir !== (was.download_dir || "")) {
     // The daemon refuses anything but a full path too, but says so in English.

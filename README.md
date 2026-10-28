@@ -324,6 +324,14 @@ download:
 - **When all downloads finish**: sleep or shut down, once. Shutting down gives a
   60-second warning that `shutdown /a` cancels. It is never remembered across a
   restart.
+- **When a download fails** (or its link expires): don't try again, try again a
+  few times (every 5 minutes, 3 times, by default), or keep trying, every 1, 5,
+  10 or 30 minutes. A try that gets further than before starts the count again,
+  and the card says when the next try is, with a button to stop it; Pause all
+  stops every one. This also decides what the action above waits for: with
+  *don't try again* a failed download does not hold it back, with *try again*
+  it goes ahead once the tries are used up, and with *keep trying* it waits for
+  as long as a download keeps failing. Also in the tray menu.
 - **Download folder**: where a download goes when nothing names another. Left
   empty it is the folder godm was started with (`godm daemon -o`, else
   `GODM_DOWNLOAD_DIR`, else your Downloads folder). godm makes it if it is not

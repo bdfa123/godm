@@ -114,6 +114,9 @@ const (
 	menuAfterNothing
 	menuAfterSleep
 	menuAfterShutdown
+	menuFailGiveUp
+	menuFailRetry
+	menuFailForever
 	menuQuit
 )
 
@@ -127,6 +130,17 @@ var afterItems = []struct {
 	{menuAfterNothing, "nothing", "after.nothing"},
 	{menuAfterSleep, "sleep", "after.sleep"},
 	{menuAfterShutdown, "shutdown", "after.shutdown"},
+}
+
+// failItems are the choices under "When a download fails", as afterItems.
+var failItems = []struct {
+	cmd    uintptr
+	policy failPolicy
+	label  string
+}{
+	{menuFailGiveUp, failGiveUp, "fail.give_up"},
+	{menuFailRetry, failRetry, "fail.retry"},
+	{menuFailForever, failForever, "fail.forever"},
 }
 
 type notifyIconData struct {
@@ -486,6 +500,9 @@ func (t *tray) showMenu() {
 	if sub := afterMenu(t.mgr); sub != 0 {
 		procAppendMenu.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(text("tray.after"))))
 	}
+	if sub := failMenu(t.mgr); sub != 0 {
+		procAppendMenu.Call(menu, mfPopup, sub, uintptr(unsafe.Pointer(text("tray.fail"))))
+	}
 	procAppendMenu.Call(menu, mfSeparator, 0, 0)
 	procAppendMenu.Call(menu, mfString, menuQuit, uintptr(unsafe.Pointer(text("tray.quit"))))
 
@@ -510,6 +527,8 @@ func (t *tray) showMenu() {
 		t.mgr.SetNotifications(!t.mgr.Notifications())
 	case menuAfterNothing, menuAfterSleep, menuAfterShutdown:
 		t.chooseAfter(cmd)
+	case menuFailGiveUp, menuFailRetry, menuFailForever:
+		t.chooseFail(cmd)
 	case menuQuit:
 		log.Printf("quit requested from the tray")
 		t.mgr.PauseAll()
@@ -554,6 +573,38 @@ func (t *tray) chooseAfter(cmd uintptr) {
 			continue
 		}
 		if err := t.mgr.UpdateSettings(settingsUpdate{AfterAll: &it.action}); err != nil {
+			log.Printf("tray: %v", err)
+		}
+	}
+}
+
+// failMenu builds the submenu for what a failed download does next, with the
+// minutes and the tries as they are set, and ticks the choice made.
+func failMenu(m *Manager) uintptr {
+	sub, _, _ := procCreatePopupMenu.Call()
+	if sub == 0 {
+		return 0
+	}
+	policy, every, times := m.RetryChoice()
+	for _, it := range failItems {
+		flags := uintptr(mfString)
+		if string(it.policy) == policy {
+			flags |= mfChecked
+		}
+		label := m.tr(it.label, "m", every, "n", times)
+		procAppendMenu.Call(sub, flags, it.cmd, uintptr(unsafe.Pointer(utf16(label))))
+	}
+	return sub
+}
+
+// chooseFail applies a pick from that submenu.
+func (t *tray) chooseFail(cmd uintptr) {
+	for _, it := range failItems {
+		if it.cmd != cmd {
+			continue
+		}
+		policy := string(it.policy)
+		if err := t.mgr.UpdateSettings(settingsUpdate{OnFailure: &policy}); err != nil {
 			log.Printf("tray: %v", err)
 		}
 	}

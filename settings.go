@@ -33,10 +33,19 @@ type Settings struct {
 	// once. See downloadlist.go.
 	ListAt    string `json:"list_at,omitempty"`
 	ListDaily bool   `json:"list_daily,omitempty"`
+	// OnFailure is what a download that fails does next, a failPolicy;
+	// RetryEvery is the minutes between tries again and RetryTimes how many
+	// there are under failRetry. See onfailure.go.
+	OnFailure  string `json:"on_failure"`
+	RetryEvery int    `json:"retry_every"`
+	RetryTimes int    `json:"retry_times"`
 }
 
 func defaultSettings() Settings {
-	return Settings{KeepAwake: true, Folders: defaultFolders(), Language: langAuto}
+	return Settings{
+		KeepAwake: true, Folders: defaultFolders(), Language: langAuto,
+		OnFailure: string(failRetry), RetryEvery: defaultRetryEvery, RetryTimes: defaultRetryTimes,
+	}
 }
 
 // clone copies the folder map, so that a snapshot taken under the lock can be
@@ -68,6 +77,10 @@ type settingsUpdate struct {
 	// ListAt is "15:04", or empty to stop starting the list by the clock.
 	ListAt    *string `json:"list_at"`
 	ListDaily *bool   `json:"list_daily"`
+	// OnFailure is give_up, retry or forever; RetryEvery is in minutes.
+	OnFailure  *string `json:"on_failure"`
+	RetryEvery *int    `json:"retry_every"`
+	RetryTimes *int    `json:"retry_times"`
 }
 
 // defaultDirLocked is the folder a new download goes to when it names none.
@@ -134,6 +147,21 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	if u.Language != nil && !validLang(*u.Language) {
 		return fmt.Errorf("unknown language %q: use %s, %s or %s", *u.Language, langAuto, langEN, langZH)
 	}
+	if u.OnFailure != nil {
+		if err := checkFailPolicy(*u.OnFailure); err != nil {
+			return err
+		}
+	}
+	if u.RetryEvery != nil {
+		if err := checkRetryEvery(*u.RetryEvery); err != nil {
+			return err
+		}
+	}
+	if u.RetryTimes != nil {
+		if err := checkRetryTimes(*u.RetryTimes); err != nil {
+			return err
+		}
+	}
 	var listAt string
 	if u.ListAt != nil {
 		var err error
@@ -186,6 +214,24 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	if u.ListAt != nil || u.ListDaily != nil {
 		m.planListLocked(time.Now())
 	}
+	// A new choice for failures starts the downloads failed now on it afresh.
+	// Saving the dialog with it as it was changes nothing.
+	dropped := false
+	if was := m.settings; u.OnFailure != nil || u.RetryEvery != nil || u.RetryTimes != nil {
+		if u.OnFailure != nil {
+			m.settings.OnFailure = *u.OnFailure
+		}
+		if u.RetryEvery != nil {
+			m.settings.RetryEvery = *u.RetryEvery
+		}
+		if u.RetryTimes != nil {
+			m.settings.RetryTimes = *u.RetryTimes
+		}
+		if m.settings.OnFailure != was.OnFailure || m.settings.RetryEvery != was.RetryEvery || m.settings.RetryTimes != was.RetryTimes {
+			m.failing.Store(m.settings.retryChoice())
+			dropped = m.replanRetriesLocked(failPolicy(was.OnFailure), time.Now())
+		}
+	}
 	if u.AfterAll != nil {
 		// Choosing the same thing again changes nothing. Choosing something else
 		// starts counting finished downloads afresh.
@@ -196,6 +242,12 @@ func (m *Manager) UpdateSettings(u settingsUpdate) error {
 	m.syncAwakeLocked()
 	m.mu.Unlock()
 	m.dirty.Store(true)
+	if dropped {
+		// Downloads that were to be tried again no longer hold the action
+		// back. A change of setting finishes nothing, so it goes ahead only
+		// if a download has finished since it was armed.
+		m.checkAfterAll(false)
+	}
 	return nil
 }
 
@@ -221,6 +273,10 @@ func (m *Manager) settingsView() map[string]any {
 		"list_at":    s.ListAt,
 		"list_daily": s.ListDaily,
 		"list_next":  m.listNext,
+		// What a failed download does next; see onfailure.go.
+		"on_failure":  s.OnFailure,
+		"retry_every": s.RetryEvery,
+		"retry_times": s.RetryTimes,
 		// What was chosen, and what that comes to on this computer right now.
 		"language":        cleanLang(s.Language),
 		"language_active": resolveLang(s.Language),

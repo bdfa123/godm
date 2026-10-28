@@ -111,6 +111,11 @@ type TaskView struct {
 	Later    bool  `json:"later,omitempty"`
 	TrySpeed int64 `json:"try_speed,omitempty"`
 	FromList bool  `json:"from_list,omitempty"`
+	// RetryAt is when a download that failed is tried again by itself, zero
+	// when it is not to be; Retries is how many tries again in a row have got
+	// it no further. See onfailure.go.
+	RetryAt time.Time `json:"retry_at,omitzero"`
+	Retries int       `json:"retries,omitempty"`
 }
 
 type jobRequest struct {
@@ -206,6 +211,14 @@ type managedTask struct {
 	// tryHeld is the generation of the run that watchTry stopped because the
 	// try had done its part, so that the run ends on the list.
 	tryHeld int
+	// autoGen is the generation of the run onfailure.go started by itself, and
+	// furthest the most any run that failed had of the download, which a try
+	// again has to beat to count as getting somewhere. wrongFile is the run
+	// whose new address turned out to lead to another file, which is not
+	// tried again.
+	autoGen   int
+	furthest  int64
+	wrongFile int
 
 	lastRecv int64
 	lastAt   time.Time
@@ -266,6 +279,8 @@ func (t *managedTask) snapshot() TaskView {
 // cancelled, and the new run would find the task not queued and leave.
 func (t *managedTask) queueRun() int {
 	t.view.State = StateQueued
+	// However it was started, it no longer waits for a try again.
+	t.view.RetryAt = time.Time{}
 	t.gen++
 	return t.gen
 }
@@ -461,6 +476,9 @@ type Manager struct {
 	// by mu.
 	after     afterAction
 	afterSeen bool
+	// failing is what a failed download does next, as the settings say; see
+	// retryChoice.
+	failing atomic.Pointer[retryChoice]
 	// streamPiece is the engine's piece size while a player reads; zero keeps
 	// the engine default. Tests shrink it to fit their small files.
 	streamPiece int64
@@ -498,6 +516,7 @@ func NewManager(outDir string, parallel int) *Manager {
 		mapLinger: defaultMapLinger,
 	}
 	m.notifyOn.Store(true)
+	m.failing.Store(m.settings.retryChoice())
 	return m
 }
 
@@ -517,10 +536,22 @@ func (m *Manager) OutDir() string {
 }
 
 // announceFinish tells the user what happened to a download once it stops
-// moving. Pausing is their own doing, so it stays quiet.
-func (m *Manager) announceFinish(v TaskView, st TaskState) {
+// moving. Pausing is their own doing, so it stays quiet. A failure says when it
+// is tried again, and a try again that fails as the run before it did says
+// nothing more until the download is given up on.
+func (m *Manager) announceFinish(v TaskView, st TaskState, plan retryPlan) {
 	if m.announce == nil || !m.notifyOn.Load() {
 		return
+	}
+	if plan.auto && !plan.gaveUp {
+		return
+	}
+	retry := ""
+	switch {
+	case !plan.at.IsZero():
+		retry = "\n" + m.tr("notify.retryIn", "n", int(plan.every/time.Minute))
+	case plan.auto:
+		retry = "\n" + m.tr("notify.gaveUp", "n", plan.tries)
 	}
 	name := v.Filename
 	if name == "" {
@@ -540,9 +571,9 @@ func (m *Manager) announceFinish(v TaskView, st TaskState) {
 		}
 		m.announce(m.tr("notify.complete"), text, v.Path)
 	case StateNeedsRefresh:
-		m.announce(m.tr("notify.expired"), m.tr("notify.expiredAt", "name", name), "app")
+		m.announce(m.tr("notify.expired"), m.tr("notify.expiredAt", "name", name)+retry, "app")
 	case StateError:
-		m.announce(m.tr("notify.failed"), name+"\n"+v.Error, "app")
+		m.announce(m.tr("notify.failed"), name+"\n"+v.Error+retry, "app")
 	}
 }
 
@@ -841,7 +872,15 @@ func (m *Manager) start(mt *managedTask, gen int, allowMatch bool) {
 		if m.finishRun(mt, gen, StatePaused, "", "") {
 			m.Resume(id)
 		}
-	case errors.As(err, &expired), errors.As(err, &mismatch):
+	case errors.As(err, &mismatch):
+		// The new address leads to another file. Run again without the old
+		// one, it would download that file afresh beside the partial one, so
+		// it waits for the user rather than being tried again.
+		mt.mu.Lock()
+		mt.wrongFile = gen
+		mt.mu.Unlock()
+		m.finishRun(mt, gen, StateNeedsRefresh, err.Error(), "")
+	case errors.As(err, &expired):
 		m.finishRun(mt, gen, StateNeedsRefresh, err.Error(), "")
 	default:
 		reason := err.Error()
@@ -1082,6 +1121,12 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 		}
 		mt.view.Segments = segs
 	}
+	// Whether a failure is tried again is settled together with the failure,
+	// so that nothing sees the one without the other.
+	var plan retryPlan
+	if isFailure(st) {
+		plan = m.planRetryLocked(mt, gen, now)
+	}
 	view := mt.view
 	mt.mu.Unlock()
 	m.dirty.Store(true)
@@ -1090,28 +1135,53 @@ func (m *Manager) finishRun(mt *managedTask, gen int, st TaskState, errMsg, path
 	m.broadcastLocked()
 	m.mu.Unlock()
 
-	if st != StatePaused && st != StateListed {
-		m.checkAfterAll(st == StateDone)
+	if st != StatePaused {
+		// A failure that is not to be tried again is over, as a finished
+		// download is; one that is holds the action back. See onfailure.go.
+		// A try that has done its part (StateListed, never a pause by the
+		// user) finishes nothing, but stops holding the action back.
+		m.checkAfterAll(st == StateDone || plan.gaveUp)
 	}
-	go m.announceFinish(view, st)
+	go m.announceFinish(view, st, plan)
 	return again
 }
 
-func (m *Manager) Pause(id string) bool {
+// Pause stops a download. One that failed and waits to be tried again is not
+// tried again: it is given up on, and stops holding back the action for when
+// the downloads finish.
+func (m *Manager) Pause(id string) bool { return m.pause(id, true) }
+
+// pause is Pause; with check false a download given up on does not look at
+// the action for when the downloads finish, as for Pause all, which is never
+// one to set it off.
+func (m *Manager) pause(id string, check bool) bool {
 	mt := m.get(id)
 	if mt == nil {
 		return false
 	}
 	mt.mu.Lock()
 	st, cancel := mt.view.State, mt.cancel
+	gaveUp := false
 	if st == StateQueued {
 		// Mark it synchronously so a resume goroutine that has not begun yet
 		// observes the pause instead of creating a fresh context afterwards.
 		mt.view.State = StatePaused
 	} else if st == StateAwaitingRefresh {
 		mt.view.State, mt.view.RefreshUntil = StateNeedsRefresh, time.Time{}
+	} else if isFailure(st) && !mt.view.RetryAt.IsZero() {
+		mt.view.RetryAt = time.Time{}
+		gaveUp = true
 	}
 	mt.mu.Unlock()
+	if gaveUp {
+		m.dirty.Store(true)
+		if check {
+			// What the user does finishes nothing; it only stops holding the
+			// action back.
+			m.checkAfterAll(false)
+		}
+		return true
+	}
 	if (st == StateQueued || st == StateRunning) && cancel != nil {
 		cancel()
 	}
@@ -1130,17 +1200,37 @@ func (m *Manager) Resume(id string) bool { return m.resume(id, false) }
 
 // resume is Resume, but with onList it leaves a download on the download list,
 // where it is tried again and then waits.
-func (m *Manager) resume(id string, onList bool) bool {
+func (m *Manager) resume(id string, onList bool) bool { return m.rerun(id, onList, time.Time{}) }
+
+// rerun is resume. Given when a failed download was due to be tried again (see
+// onfailure.go), it is that try again instead: it goes ahead only if the download
+// still waits for it, leaves the download on the list or off it as it is, and
+// counts. Any other start counts from nothing.
+func (m *Manager) rerun(id string, onList bool, due time.Time) bool {
 	mt := m.get(id)
 	if mt == nil {
 		return false
 	}
 	mt.mu.Lock()
+	auto := !due.IsZero()
+	if auto {
+		if !mt.view.RetryAt.Equal(due) {
+			mt.mu.Unlock()
+			return false
+		}
+		onList = mt.req.Later
+	}
 	switch mt.view.State {
 	case StatePaused, StateError, StateNeedsRefresh, StateAwaitingRefresh, StateListed:
 		gen := mt.queueRun()
 		mt.view.Error = ""
 		mt.view.RefreshUntil = time.Time{}
+		if auto {
+			mt.view.Retries++
+			mt.autoGen = gen
+		} else {
+			mt.view.Retries = 0
+		}
 		if !onList {
 			mt.setLaterLocked(false)
 		}
@@ -1156,12 +1246,22 @@ func (m *Manager) resume(id string, onList bool) bool {
 	return false
 }
 
+// PauseAll stops everything, and nothing starts again by itself after it:
+// failed downloads are not tried again either, those that fail while it goes
+// round among them.
 func (m *Manager) PauseAll() {
+	m.mu.Lock()
+	m.stopRetriesLocked()
+	m.mu.Unlock()
 	for _, v := range m.List() {
 		if v.State == StateQueued || v.State == StateRunning {
-			m.Pause(v.ID)
+			m.pause(v.ID, false)
 		}
 	}
+	m.mu.Lock()
+	m.stopRetriesLocked()
+	m.mu.Unlock()
+	m.dirty.Store(true)
 }
 
 // ResumeAll continues what was paused or failed. What is on the download list
@@ -1348,6 +1448,8 @@ func (m *Manager) RequestRefresh(id string) (string, error) {
 	}
 	mt.view.State = StateAwaitingRefresh
 	mt.view.RefreshUntil = time.Now().Add(refreshWindow)
+	// The user is fetching a new link by hand; the old one is not tried again.
+	mt.view.RetryAt = time.Time{}
 	ref := mt.req.Referrer
 	mt.mu.Unlock()
 	m.dirty.Store(true)
@@ -1441,6 +1543,7 @@ func (m *Manager) adoptAsRefresh(ctx context.Context, nt *managedTask) bool {
 	target.setLaterLocked(target.req.Later && req.Later)
 	gen := target.queueRun()
 	target.view.RefreshUntil = time.Time{}
+	target.view.Retries = 0
 	target.relinked = true
 	name := target.view.Filename
 	target.mu.Unlock()
@@ -1510,6 +1613,7 @@ func (m *Manager) ChangeAddress(id, url string) error {
 	}
 	gen := mt.queueRun()
 	mt.view.Error = ""
+	mt.view.Retries = 0
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 	m.mu.Lock()
@@ -1872,6 +1976,8 @@ func (m *Manager) restore(list savedList) {
 		m.settings = *list.Settings
 		m.settings.Folders = folderNames(list.Settings.Folders)
 		m.settings.Language = cleanLang(list.Settings.Language)
+		m.settings.settleRetry()
+		m.failing.Store(m.settings.retryChoice())
 		if at, err := checkListAt(m.settings.ListAt); err == nil {
 			m.settings.ListAt = at
 		} else {
@@ -1904,6 +2010,9 @@ func (m *Manager) restore(list savedList) {
 		case StateAwaitingRefresh:
 			v.State, v.RefreshUntil = StateNeedsRefresh, time.Time{}
 		}
+		// Nothing starts by itself after a restart: what was running waits
+		// paused, and what failed waits for the user too.
+		v.RetryAt, v.Retries = time.Time{}, 0
 		if v.Kind == "bt" {
 			v.Stage = "" // neither fetching metadata nor seeding until it runs again
 		}
@@ -1926,7 +2035,7 @@ func (m *Manager) restore(list savedList) {
 		v.Later = st.Req.Later
 		mt := &managedTask{
 			view: v, req: st.Req, outDir: st.OutDir,
-			relinked: st.Relinked,
+			relinked: st.Relinked, furthest: v.Received,
 		}
 		mt.connLimit.Store(int32(st.Req.Connections))
 		mt.speed.SetRate(st.Req.SpeedLimit)
@@ -2262,6 +2371,7 @@ func (s *server) handleBatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
+	policy, every, times := s.mgr.RetryChoice()
 	writeJSON(w, map[string]any{
 		"ok": true, "tasks": s.mgr.List(), "limit": s.mgr.Limit(),
 		"after_all": s.mgr.AfterAll(), "speed_limit": s.mgr.SpeedLimit(),
@@ -2270,6 +2380,8 @@ func (s *server) handleTasks(w http.ResponseWriter, r *http.Request) {
 		"language": s.mgr.LanguageSetting(),
 		// And the download list's start by the clock, which its tab shows.
 		"list_at": s.mgr.listAt(), "list_daily": s.mgr.listDaily(), "list_next": s.mgr.ListNext(),
+		// And what a failed download does next, which its card says.
+		"on_failure": policy, "retry_every": every, "retry_times": times,
 	})
 }
 

@@ -298,10 +298,12 @@ func TestNotificationsAreInTheChosenLanguage(t *testing.T) {
 		t.Errorf("expiry notice = %q", got)
 	}
 
-	// The error text is the daemon's own and stays as it is.
+	// The error text is the daemon's own and stays as it is. When it is
+	// tried again is said in the language.
 	m.finishRun(mt, 1, StateError, "disk full", "")
 	waitFor(t, 2*time.Second, "the failure notice", func() bool { return len(n.all()) == 3 })
-	if got := n.all()[2]; !strings.HasPrefix(got, msg(langZH, "notify.failed")+" | ") || !strings.HasSuffix(got, "disk full") {
+	if got := n.all()[2]; !strings.HasPrefix(got, msg(langZH, "notify.failed")+" | ") || !strings.Contains(got, " disk full ") ||
+		!strings.HasSuffix(got, msg(langZH, "notify.retryIn", "n", 5)) {
 		t.Errorf("failure notice = %q", got)
 	}
 

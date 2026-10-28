@@ -4,6 +4,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"unsafe"
@@ -114,6 +115,39 @@ func TestTrayTooltipIsInTheChosenLanguage(t *testing.T) {
 	taskIn(m, "b", StateQueued)
 	if got, want := trayTip(m), msg(langZH, "tray.tip.running", "n", 1, "speed", "2.0 MiB")+msg(langZH, "tray.tip.more", "n", 1); got != want {
 		t.Errorf("tooltip = %q, want %q", got, want)
+	}
+}
+
+// The submenu for failures gives the minutes and the tries as they are set, in
+// the language, ticks the choice made, and a pick from it is the new choice.
+func TestTrayMenuForFailuresSaysWhatIsSet(t *testing.T) {
+	m := NewManager(t.TempDir(), 2)
+	setLanguage(t, m, langZH)
+	if err := m.UpdateSettings(settingsInts(10, 5)); err != nil {
+		t.Fatal(err)
+	}
+	menu := failMenu(m)
+	defer procDestroyMenu.Call(menu)
+	want := []menuEntry{
+		{menuFailGiveUp, msg(langZH, "fail.give_up"), false},
+		{menuFailRetry, msg(langZH, "fail.retry", "m", 10, "n", 5), true},
+		{menuFailForever, msg(langZH, "fail.forever", "m", 10), false},
+	}
+	if got := readMenu(menu); !reflect.DeepEqual(got, want) {
+		t.Errorf("menu = %+v\nwant   %+v", got, want)
+	}
+	for _, e := range want {
+		if !hasHan(e.label) || strings.Contains(e.label, "{") {
+			t.Errorf("%q is not in Chinese with its numbers", e.label)
+		}
+	}
+
+	(&tray{mgr: m}).chooseFail(menuFailForever)
+	if p, _, _ := m.RetryChoice(); p != "forever" {
+		t.Fatalf("after picking Keep trying the choice is %q", p)
+	}
+	if got := readMenu(failMenu(m)); !got[2].checked || got[1].checked {
+		t.Errorf("after picking Keep trying the menu is %+v", got)
 	}
 }
 
