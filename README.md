@@ -397,11 +397,16 @@ and to the Claude desktop app's chat under `mcpServers` in
 "godm": { "command": "C:\\path\\to\\godm.exe", "args": ["mcp"] }
 ```
 
-There are 20 tools: `status`, `list_tasks`, `get_task`, `get_settings`,
+There are 21 tools: `status`, `list_tasks`, `get_task`, `get_settings`,
 `inspect_stream` and `ytdlp_status` only read; `add_downloads`,
 `add_torrent_file`, `pause`, `resume`, `start_list`, `remove_tasks`,
 `set_limits`, `set_task_options`, `update_settings`, `set_after_all`,
-`change_address`, `play`, `open_folder` and `ytdlp_update` act. `remove_tasks`
+`refresh_link`, `change_address`, `play`, `open_folder` and `ytdlp_update` act.
+`refresh_link` is the Refresh link button for a download whose signed link has
+expired: godm waits for a new link, and Claude (or you) downloads the same file
+again in Chrome, which the extension hands to the waiting download; with
+`open_page` false it does not open the page in your default browser, for when
+Claude opens it in a browser it drives. `remove_tasks`
 (which can delete the files with `delete_files`) and `set_after_all` (which can
 put the computer to sleep or shut it down) are marked destructive, so Claude
 asks before using them. Links are shown without their query string, which on a
@@ -451,7 +456,9 @@ so keep asking before it acts on what a page says.
   settings, including its bypass list. Loopback is never proxied.
 - **Expired links**: a `401/403/404/410`, or a web page where the file should be,
   keeps the progress and waits for a fresh link to the same file. Click the
-  download again in the browser and the waiting task adopts it. A new address
+  download again in the browser and the waiting task adopts it, without the
+  confirmation dialog: a download the same size, to the byte, as one waiting for
+  a new link is that link. A new address
   given to a download that was paused, queued or never got going still
   continues from the saved progress, and a stream (HLS) continues from its
   saved segments. A different stream, or another quality, is refused rather than

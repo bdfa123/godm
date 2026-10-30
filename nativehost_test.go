@@ -174,6 +174,35 @@ func TestNativeRequestsOtherThanBrowseLeaveTheForegroundAlone(t *testing.T) {
 	}
 }
 
+// A ping that asks says how large the downloads waiting for a new link are,
+// those still waiting; one that does not ask is answered without the daemon.
+func TestNativePingSaysWhichSizesAreAwaited(t *testing.T) {
+	asked := 0
+	c, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		asked++
+		writeJSON(w, map[string]any{"tasks": []TaskView{
+			{ID: "a", State: StateAwaitingRefresh, Size: 60 << 30, RefreshUntil: time.Now().Add(10 * time.Minute)},
+			{ID: "b", State: StateAwaitingRefresh, Size: 35 << 30, RefreshUntil: time.Now().Add(-time.Minute)},
+			{ID: "c", State: StateNeedsRefresh, Size: 20 << 30},
+			{ID: "d", State: StateAwaitingRefresh, RefreshUntil: time.Now().Add(10 * time.Minute)},
+		}})
+	})
+	resp := forwardNative(c, nativeRequest{Type: "ping", Awaiting: true})
+	if !resp.OK || !reflect.DeepEqual(resp.Awaiting, []int64{60 << 30}) {
+		t.Errorf("a ping asking for sizes answered %+v", resp)
+	}
+	asked = 0
+	if resp := forwardNative(c, nativeRequest{Type: "ping"}); !resp.OK || resp.Awaiting != nil || asked != 0 {
+		t.Errorf("a plain ping answered %+v and asked the daemon %d times", resp, asked)
+	}
+
+	// A daemon that cannot say does not fail the ping.
+	broken, _ := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusInternalServerError) })
+	if resp := forwardNative(broken, nativeRequest{Type: "ping", Awaiting: true}); !resp.OK || resp.Awaiting != nil {
+		t.Errorf("a ping the daemon could not answer sizes for answered %+v", resp)
+	}
+}
+
 // The dialog picks the file name, folder and connection count, so all three
 // have to make it from the extension's message into the daemon's job.
 func TestNativeDownloadCarriesTheDialogsChoices(t *testing.T) {

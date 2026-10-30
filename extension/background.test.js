@@ -282,6 +282,42 @@ test("Cancel before Start leaves nothing behind and nothing downloading", async 
   assert.deepEqual(w.seen.downloaded, []);
 });
 
+// godm waits for a new link to a download whose link expired, and says how
+// large it is when asked. The same file downloaded again is that link.
+const FILM = 60 * 1024 * 1024 * 1024;
+const awaiting = (sizes) => (m) => (m.type === "ping" ? { ok: true, awaiting: sizes } : { ok: true });
+
+test("a download as large as one godm waits for a new link for is handed over without asking", async () => {
+  const w = start({ host: awaiting([35 * 1024 * 1024 * 1024, FILM]) });
+  await w.download(Object.assign({}, ITEM, { totalBytes: FILM }));
+  assert.equal(w.seen.host[0].type, "ping");
+  assert.equal(w.seen.host[0].awaiting, true, "the ping asks for the sizes");
+  assert.deepEqual(w.seen.cancelled, [ITEM.id]);
+  assert.equal(w.seen.windows.length, 0, "nobody was asked");
+  assert.equal(downloads(w).length, 1);
+  assert.equal(downloads(w)[0].url, ITEM.url);
+});
+
+test("anything else is asked about as before while godm waits for a new link", async () => {
+  const cases = [
+    ["a byte larger", Object.assign({}, ITEM, { totalBytes: FILM + 1 })],
+    ["of a size not known yet", Object.assign({}, ITEM, { totalBytes: 0 })],
+    ["a .torrent of that size", Object.assign({}, TORRENT, { totalBytes: FILM })]
+  ];
+  for (const [what, item] of cases) {
+    const w = start({ host: awaiting([FILM]) });
+    await w.download(item);
+    assert.equal(w.seen.windows.length, 1, what + " was not asked about");
+    assert.deepEqual(downloads(w), [], what + " went to godm unasked");
+  }
+  // And with nothing waiting, or a godm too old to say, as ever.
+  for (const host of [awaiting([]), () => ({ ok: true })]) {
+    const w = start({ host });
+    await w.download(Object.assign({}, ITEM, { totalBytes: FILM }));
+    assert.equal(w.seen.windows.length, 1);
+  }
+});
+
 test("Start twice at once sends the job once", async () => {
   const answer = later();
   const w = start({ host: (m) => (m.type === "download" ? answer.promise : { ok: true }) });

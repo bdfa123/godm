@@ -375,8 +375,9 @@ async function handleDownload(item) {
   }
 
   // Confirm the host is actually reachable *before* cancelling. One extra
-  // round trip is cheap next to losing the user's download.
-  const health = await callHost({ type: "ping" });
+  // round trip is cheap next to losing the user's download. The same answer
+  // says how large the downloads waiting in godm for a new link are.
+  const health = await callHost({ type: "ping", awaiting: true });
   if (!health.ok) {
     await setHostState(false, health.error);
     await notifyThrottled(
@@ -423,7 +424,13 @@ async function handleDownload(item) {
   // link. A page can start a download without any click at all, and a .torrent
   // that went to godm unasked would join a swarm, and show the person's address
   // to it, on the page's say-so.
-  if (cfg.confirmDownload) {
+  //
+  // A download as large, to the byte, as one godm is waiting for a new link for
+  // is that link, fetched because godm was asked to wait for it, and it goes on
+  // the download already agreed to rather than starting another. It is not
+  // asked about again: the person has done their part, and someone driving the
+  // browser for them, as Claude can, has no way to answer the dialog.
+  if (cfg.confirmDownload && !isAwaited(item, health, torrent)) {
     // The dialog owns the download from here: Start hands it to godm, Cancel or
     // closing the window drops it, which is what the person asked for by
     // choosing to be asked.
@@ -448,6 +455,15 @@ async function handleDownload(item) {
     outDir: ""
   });
   if (torrent && result.ok) noteTorrentAdded(held.filename, held.referrer || held.url);
+}
+
+// isAwaited is whether a download is the new link of one godm is waiting for,
+// by its size, which a signed link does not change from one click to the next.
+// A size the browser does not know yet, 0, matches nothing: godm waits only
+// for downloads it knows the size of.
+function isAwaited(item, health, torrent) {
+  const sizes = Array.isArray(health.awaiting) ? health.awaiting : [];
+  return !torrent && sizes.includes(item.totalBytes);
 }
 
 // handOff sends one job to godm and, if that fails, gives the download back to

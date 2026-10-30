@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 )
 
 // Chrome caps a single browser-to-host message at 64 MB and a host-to-browser
@@ -42,6 +43,9 @@ type nativeRequest struct {
 	// Later puts a download, or every link of a batch, on the download list
 	// instead of starting it.
 	Later bool `json:"later"`
+	// Awaiting asks a ping to say how large the downloads waiting for a new
+	// link are; see nativeResponse.Awaiting.
+	Awaiting bool `json:"awaiting"`
 }
 
 // batchItem is one link picked from a page. Cookies are per item because the
@@ -104,6 +108,12 @@ type nativeResponse struct {
 	// stops handing downloads over for a while; a refusal says nothing against
 	// the host, only against the one link.
 	Rejected bool `json:"rejected,omitempty"`
+	// Awaiting is the size of each download waiting for a new link, for a ping
+	// that asked. A download the browser starts at one of these sizes is that
+	// link, which the daemon takes up in place of the expired one, so the
+	// extension hands it over without asking: what it is for was settled when
+	// the download was first agreed to, and the new link was asked for since.
+	Awaiting []int64 `json:"awaiting,omitempty"`
 }
 
 // RunNativeHost speaks the Chrome native-messaging protocol on stdio:
@@ -164,7 +174,11 @@ func handleNative(req nativeRequest) nativeResponse {
 func forwardNative(c *daemonClient, req nativeRequest) nativeResponse {
 	switch req.Type {
 	case "ping":
-		return nativeResponse{OK: true}
+		resp := nativeResponse{OK: true}
+		if req.Awaiting {
+			resp.Awaiting = awaitingSizes(c)
+		}
+		return resp
 
 	case "tasks":
 		tasks, err := c.tasks()
@@ -271,6 +285,24 @@ func popupTasks(tasks []TaskView) []TaskView {
 		}
 	}
 	return out
+}
+
+// awaitingSizes is the size of each download waiting for a new link whose wait
+// has not run out. Not finding out is not worth failing the ping over: the
+// download is then asked about as any other is.
+func awaitingSizes(c *daemonClient) []int64 {
+	tasks, err := c.tasks()
+	if err != nil {
+		return nil
+	}
+	var sizes []int64
+	now := time.Now()
+	for _, t := range tasks {
+		if t.State == StateAwaitingRefresh && t.Size > 0 && now.Before(t.RefreshUntil) {
+			sizes = append(sizes, t.Size)
+		}
+	}
+	return sizes
 }
 
 // failed is the answer for a request the daemon did not carry out.

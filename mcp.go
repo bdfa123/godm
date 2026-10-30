@@ -38,7 +38,9 @@ const mcpInstructions = `godm is the download manager on this computer: a segmen
 
 Tasks are named by ids such as t1792966665951-2, which list_tasks and add_downloads return. The download list holds downloads put aside for later: each is tried briefly (about 8 MB, to check the link) and then waits until it is started, by resume, start_list, or a time of day set with update_settings; one started from the list stays on it until it is done. How many download at once is a setting (set_limits); the rest wait in line.
 
-Links are shown without their query string, which on a file host is often a signature. Downloads added here carry no browser cookies, so a link that needs the user to be logged in can fail where the same link handed over by the browser extension works.`
+Links are shown without their query string, which on a file host is often a signature. Downloads added here carry no browser cookies, so a link that needs the user to be logged in can fail where the same link handed over by the browser extension works.
+
+A signed link expires (state needs_refresh) and the download keeps what it has. refresh_link makes it wait for a new link; downloading the same file again in Chrome then hands the new link to it, through the godm extension, and it goes on from where it stopped.`
 
 // RunMCP serves MCP on stdin and stdout until the client goes away.
 func RunMCP() error {
@@ -217,8 +219,14 @@ func (t *mcpTools) server() *mcp.Server {
 	}, scrubbed(t.setAfterAll))
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name:        "refresh_link",
+		Description: "For a download whose link has expired (state needs_refresh, as a signed file-host link does): make godm wait up to " + strconv.Itoa(int(refreshWindow.Minutes())) + " minutes for a new link to the same file, as the Refresh link button in godm's window does. Then download the same file once more in Chrome, from the page the download came from (page here, by its host): the godm extension hands the new link to this download, which goes on from where it stopped, and no new download appears. By default the page is opened in the default browser; with open_page false it is not, for when you open it in a browser you drive yourself. get_task shows the download running again once the link has arrived. With a full new link in hand, change_address does the same at once.",
+		Annotations: mcpWrite("Wait for a new link", false, true),
+	}, scrubbed(t.refreshLink))
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "change_address",
-		Description: "Give a download a new link and continue it from where it stopped, for a link that has expired (a signed file-host link, say). The new link must lead to the same file, the same size.",
+		Description: "Give a download a new link and continue it from where it stopped, for a link that has expired (a signed file-host link, say). The new link must lead to the same file, the same size. Without the full link, refresh_link waits for the browser to bring one.",
 		Annotations: mcpWrite("Change a download's link", false, false),
 	}, scrubbed(t.changeAddress))
 
@@ -315,6 +323,10 @@ type mcpTask struct {
 	// Retries how many tries again in a row have got it no further.
 	RetryAt string `json:"tried_again_at,omitempty"`
 	Retries int    `json:"tries_again_so_far,omitempty"`
+	// NewLinkUntil is how long a download whose link expired waits for a new
+	// one, and NextStep what gets it one.
+	NewLinkUntil string `json:"new_link_until,omitempty"`
+	NextStep     string `json:"next_step,omitempty"`
 }
 
 // mcpState is the state in one word, with the ones godm's window spells out
@@ -329,6 +341,9 @@ func mcpState(v TaskView) string {
 		return "fetching_metadata"
 	case v.Kind == "bt" && v.State == StateDone && v.Stage == "seeding":
 		return "seeding"
+	case v.State == StateAwaitingRefresh && !time.Now().Before(v.RefreshUntil):
+		// The wait is over; godm notes so when the next download arrives.
+		return string(StateNeedsRefresh)
 	}
 	return string(v.State)
 }
@@ -347,6 +362,18 @@ func briefTask(v TaskView, inLine int) mcpTask {
 			b.RetryAt = v.RetryAt.Local().Format("2006-01-02 15:04:05")
 		}
 		b.Retries = v.Retries
+	}
+	switch TaskState(b.State) {
+	case StateAwaitingRefresh:
+		b.NewLinkUntil = v.RefreshUntil.Local().Format("2006-01-02 15:04:05")
+		b.NextStep = "download the same file once more in Chrome; godm takes up the new link by itself"
+	case StateNeedsRefresh:
+		// Only a download with something on disk has progress to go on from.
+		if v.Path != "" && v.Size > 0 {
+			b.NextStep = "its link has expired: refresh_link, then download the same file once more in Chrome; or change_address with a full new link"
+		} else {
+			b.NextStep = "its link has expired: change_address with a new link"
+		}
 	}
 	if v.Size > 0 {
 		b.Size = humanBytes(v.Size)
@@ -1122,6 +1149,58 @@ func (t *mcpTools) setAfterAll(ctx context.Context, _ *mcp.CallToolRequest, in a
 		return nil, nil, err
 	}
 	return nil, map[string]any{"after_all": out.AfterAll}, nil
+}
+
+type refreshIn struct {
+	ID       string `json:"id" jsonschema:"The download's id, from list_tasks"`
+	OpenPage *bool  `json:"open_page,omitempty" jsonschema:"Open the page the download came from in the default browser; true if not given"`
+}
+
+func (t *mcpTools) refreshLink(ctx context.Context, _ *mcp.CallToolRequest, in refreshIn) (*mcp.CallToolResult, any, error) {
+	c, err := t.client()
+	if err != nil {
+		return nil, nil, err
+	}
+	open := in.OpenPage == nil || *in.OpenPage
+	path := "/api/refresh?id=" + url.QueryEscape(in.ID)
+	if !open {
+		path += "&open=0"
+	}
+	var got struct {
+		OK       bool   `json:"ok"`
+		Error    string `json:"error"`
+		Referrer string `json:"referrer"`
+	}
+	if err := c.do(http.MethodPost, path, nil, &got); err != nil {
+		return nil, nil, err
+	}
+	if !got.OK {
+		return nil, nil, errors.New(got.Error)
+	}
+	v, _, err := t.task(c, in.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	b := briefTask(v, 0)
+	b.NextStep = "" // said in full below
+	out := map[string]any{"download": b, "size_bytes": v.Size}
+	if host := pageHost(got.Referrer); host != "" {
+		out["page"], out["page_opened"] = host, open
+		out["next_step"] = "On that page, in Chrome, click download once for the same file before new_link_until: godm takes up the new link by itself and this download goes on from where it stopped. Only a file of exactly size_bytes is taken up."
+	} else {
+		out["next_step"] = "godm does not know which page this download came from. Find the same file and download it once more in Chrome before new_link_until, or give change_address a full new link."
+	}
+	return nil, out, nil
+}
+
+// pageHost is all refresh_link shows of the page a download came from: which
+// site it is on. Its address can name a session or a share as well.
+func pageHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	return u.Hostname()
 }
 
 type addressIn struct {

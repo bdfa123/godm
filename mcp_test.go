@@ -84,7 +84,7 @@ func TestTheMCPToolsAreDescribedForClaude(t *testing.T) {
 	destructive := map[string]bool{"remove_tasks": true, "set_after_all": true}
 	want := []string{"status", "list_tasks", "get_task", "get_settings", "inspect_stream", "ytdlp_status", "add_downloads", "add_torrent_file",
 		"pause", "resume", "start_list", "remove_tasks", "set_limits", "set_task_options", "update_settings", "set_after_all",
-		"change_address", "play", "open_folder", "ytdlp_update"}
+		"refresh_link", "change_address", "play", "open_folder", "ytdlp_update"}
 	got := map[string]*mcp.Tool{}
 	for _, tool := range res.Tools {
 		got[tool.Name] = tool
@@ -436,6 +436,104 @@ func TestMCPErrorsDoNotShowALinksQuery(t *testing.T) {
 	}
 }
 
+// A download whose link expired is shown with what to do about it, and
+// refresh_link makes it wait for a new link, opening the page it came from only
+// when asked to. Downloading the same file again then goes on with it.
+func TestMCPGetsAnExpiredDownloadANewLink(t *testing.T) {
+	payload := makePayload(2 << 20)
+	h := newExpiringServer(payload, 700<<10)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	m := listManager(t)
+	opened := make(chan string, 2)
+	m.openURL = func(u string) error { opened <- u; return nil }
+	cs := mcpSession(t, m)
+
+	const page = "https://files.example/share/abc?session=SECRET"
+	id, err := m.Add(jobRequest{URL: srv.URL + "/f?t=old", Referrer: page, Connections: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the link to expire", stateIs(m, id, StateNeedsRefresh))
+
+	var listed struct {
+		Tasks []mcpTask `json:"tasks"`
+	}
+	mcpOK(t, cs, "list_tasks", map[string]any{"view": "needs_attention"}, &listed)
+	if len(listed.Tasks) != 1 || listed.Tasks[0].State != "needs_refresh" || !strings.Contains(listed.Tasks[0].NextStep, "refresh_link") {
+		t.Fatalf("an expired download is listed as %+v", listed.Tasks)
+	}
+
+	var got struct {
+		Download   mcpTask `json:"download"`
+		Page       string  `json:"page"`
+		PageOpened bool    `json:"page_opened"`
+		Size       int64   `json:"size_bytes"`
+		NextStep   string  `json:"next_step"`
+	}
+	text := mcpOK(t, cs, "refresh_link", map[string]any{"id": id, "open_page": false}, &got)
+	if got.Download.State != "awaiting_refresh" || got.Download.NewLinkUntil == "" || got.Page != "files.example" ||
+		got.PageOpened || got.Size != int64(len(payload)) || got.NextStep == "" {
+		t.Fatalf("refresh_link answered %s", text)
+	}
+	if strings.Contains(text, "SECRET") || strings.Contains(text, "/share/") {
+		t.Errorf("refresh_link showed more of the page than its host: %s", text)
+	}
+	select {
+	case u := <-opened:
+		t.Fatalf("with open_page false the page was opened: %s", u)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if v, _ := findTask(m, id); v.State != StateAwaitingRefresh {
+		t.Fatalf("the download is %s, want awaiting_refresh", v.State)
+	}
+	var details struct {
+		Download mcpTask `json:"download"`
+	}
+	mcpOK(t, cs, "get_task", map[string]any{"id": id}, &details)
+	if details.Download.NewLinkUntil == "" || details.Download.NextStep == "" {
+		t.Errorf("get_task shows a download waiting for a new link as %+v", details.Download)
+	}
+
+	// Asked again, as godm's window asks, it opens the page.
+	mcpOK(t, cs, "refresh_link", map[string]any{"id": id}, &got)
+	select {
+	case u := <-opened:
+		if u != page {
+			t.Errorf("opened %s, want the page the download came from", u)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the page was not opened")
+	}
+
+	// The same file downloaded again in the browser reaches godm as a new
+	// download, and goes on with the one that was waiting.
+	newID, err := m.Add(jobRequest{URL: srv.URL + "/f?t=new", Referrer: page, Connections: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 20*time.Second, "the download to finish", stateIs(m, id, StateDone))
+	if _, still := findTask(m, newID); still {
+		t.Error("the new link made a download of its own")
+	}
+}
+
+// A wait for a new link that has run out is an expired link again, and one
+// with nothing downloaded has no progress a new link could go on with.
+func TestMCPSaysWhenAWaitForANewLinkIsOver(t *testing.T) {
+	over := briefTask(TaskView{State: StateAwaitingRefresh, RefreshUntil: time.Now().Add(-time.Second), Path: `D:\f.mkv`, Size: 1 << 30}, 0)
+	if over.State != "needs_refresh" || over.NewLinkUntil != "" || !strings.Contains(over.NextStep, "refresh_link") {
+		t.Errorf("a wait that is over is shown as %+v", over)
+	}
+	empty := briefTask(TaskView{State: StateNeedsRefresh}, 0)
+	if strings.Contains(empty.NextStep, "refresh_link") || !strings.Contains(empty.NextStep, "change_address") {
+		t.Errorf("an expired download with nothing on disk is shown as %+v", empty)
+	}
+	if b := briefTask(TaskView{State: StatePaused, Size: 1 << 30}, 0); b.NextStep != "" || b.NewLinkUntil != "" {
+		t.Errorf("a paused download is shown as %+v", b)
+	}
+}
+
 func TestMCPNumbersAtTheirEdges(t *testing.T) {
 	for v, want := range map[float64]string{0: "0", 1e-9: "1", 1.5: "1572864", 1e30: strconv.FormatInt(maxMiBPerSecond<<20, 10)} {
 		if got := mibPerSecond(v); got != want {
@@ -470,6 +568,7 @@ func TestMCPSaysWhatWentWrong(t *testing.T) {
 		{"update_settings", map[string]any{"retry_every_minutes": 0}, ""},
 		{"update_settings", map[string]any{"retry_times": 101}, ""},
 		{"change_address", map[string]any{"id": "t1-1", "url": "https://a.test/new"}, ""},
+		{"refresh_link", map[string]any{"id": "t1-1"}, "no such task"},
 	}
 	for _, c := range cases {
 		text, failed := mcpCall(t, cs, c.tool, c.args)

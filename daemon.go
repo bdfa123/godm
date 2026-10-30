@@ -1428,6 +1428,13 @@ func removeTree(dir, what string) {
 // RequestRefresh parks a task until the user fetches a new link for it, and
 // opens the page the download originally came from so they can click it again.
 func (m *Manager) RequestRefresh(id string) (string, error) {
+	return m.requestRefresh(id, true)
+}
+
+// requestRefresh is RequestRefresh, opening the page only if open is set. One
+// who drives a browser of their own, as Claude can, has the page open there
+// already, and another copy of it in the default browser is in the way.
+func (m *Manager) requestRefresh(id string, open bool) (string, error) {
 	mt := m.get(id)
 	if mt == nil {
 		return "", fmt.Errorf("no such task")
@@ -1454,7 +1461,7 @@ func (m *Manager) RequestRefresh(id string) (string, error) {
 	mt.mu.Unlock()
 	m.dirty.Store(true)
 
-	if ref != "" && m.openURL != nil {
+	if open && ref != "" && m.openURL != nil {
 		go m.openURL(ref)
 	}
 	return ref, nil
@@ -2406,7 +2413,8 @@ func (s *server) handleRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	ref, err := s.mgr.RequestRefresh(r.URL.Query().Get("id"))
+	q := r.URL.Query()
+	ref, err := s.mgr.requestRefresh(q.Get("id"), q.Get("open") != "0")
 	if err != nil {
 		writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 		return
